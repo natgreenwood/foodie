@@ -9,9 +9,13 @@ Import recipes from the web, plan a week of meals, and generate shopping lists.
 Requires Docker with Compose v2.
 
 ```sh
-cp .env.example .env   # optional: compose has local-dev defaults for every value
+cp .env.example .env   # optional: same values as the compose defaults
 docker compose up --build
 ```
+
+Postgres applies `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` only
+when it first creates its volume. If you change them after the first run,
+recreate the volume with `docker compose down -v` (this deletes local data).
 
 This starts:
 
@@ -74,7 +78,9 @@ pnpm --filter @foodie/api db:migrate    # applies pending migrations
 
 ## Secrets
 
-This repository is public. Every push and pull request is scanned with
-[Gitleaks](https://github.com/gitleaks/gitleaks) over the full git history
-(`.github/workflows/secrets-scan.yml`). Never commit `.env`; only
-`.env.example`, with placeholder values, belongs in git.
+This repository is public. `.github/workflows/secrets-scan.yml` runs
+[Gitleaks](https://github.com/gitleaks/gitleaks) on every push, every pull
+request and weekly. Each run scans the full history of every branch and tag,
+not just the new commits, so a leak anywhere in the repository fails every
+run until it is removed from history. Never commit `.env`; only
+`.env.example`, with local-dev values, belongs in git.
