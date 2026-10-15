@@ -97,3 +97,56 @@ export const measurementName = pgTable(
     ),
   ],
 );
+
+// One row per real-world ingredient. `id` is the IngredientID recipe lines
+// reference. Region-neutral attributes only; names are per locale, in
+// ingredient_name.
+export const ingredient = pgTable("ingredient", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  // Free text for now; a lookup table can come with shopping-list aisles.
+  category: text("category"),
+  // Provenance, for example seed, user or import.
+  source: text("source"),
+});
+
+// Every name an ingredient is found by, tagged with a BCP-47 locale: the same
+// text can mean different ingredients by region (`biscuit` in en-GB and
+// en-US), and one ingredient has many names (`coriander`, `cilantro`).
+export const ingredientName = pgTable(
+  "ingredient_name",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    ingredientId: bigint("ingredient_id", { mode: "number" })
+      .notNull()
+      .references(() => ingredient.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    normalisedName: text("normalised_name")
+      .notNull()
+      .generatedAlwaysAs((): SQL => normalised(ingredientName.name)),
+    locale: text("locale").notNull(),
+    isCanonical: boolean("is_canonical").notNull().default(false),
+    source: text("source"),
+  },
+  (t) => [
+    // Serves exact lookup by locale and normalised name.
+    uniqueIndex("ingredient_name_locale_name_key").on(
+      t.locale,
+      t.normalisedName,
+    ),
+    // Serves fuzzy candidate search (similarity, %, ILIKE '%term%') across
+    // locales. Needs pg_trgm, which the migration enables by hand.
+    index("ingredient_name_normalised_name_trgm_idx").using(
+      "gin",
+      t.normalisedName.op("gin_trgm_ops"),
+    ),
+    // One canonical (display) name per ingredient per locale.
+    uniqueIndex("ingredient_name_canonical_key")
+      .on(t.ingredientId, t.locale)
+      .where(sql`${t.isCanonical}`),
+    // Serves the join from ingredient and the cascade on delete.
+    index("ingredient_name_ingredient_id_idx").on(t.ingredientId),
+    check("ingredient_name_name_not_blank", sql`${t.normalisedName} <> ''`),
+  ],
+);
