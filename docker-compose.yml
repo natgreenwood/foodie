@@ -1,0 +1,42 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: dev
+    # Apply migrations, then exec the watcher so it (not sh) receives SIGTERM.
+    command: sh -c "pnpm db:migrate && exec node_modules/.bin/tsx watch src/server.ts"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-foodie}:${POSTGRES_PASSWORD:-foodie}@postgres:5432/${POSTGRES_DB:-foodie}
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    volumes:
+      # Hot reload: source and migrations come from the host; node_modules stay in the image.
+      - ./apps/api/src:/app/apps/api/src
+      - ./apps/api/drizzle:/app/apps/api/drizzle
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-foodie}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-foodie}
+      POSTGRES_DB: ${POSTGRES_DB:-foodie}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # web: added by the frontend scaffold (apps/web).
+
+volumes:
+  postgres-data:
