@@ -37,9 +37,9 @@ export const measurement = pgTable(
       .primaryKey()
       .generatedAlwaysAsIdentity(),
     type: measurementType("type").notNull(),
-    // How many of the type's base unit (gram, millilitre, each) one of this
-    // unit is: kilogram is 1000. Null for units that can be listed but not
-    // summed, such as pinch or to taste.
+    // How many of the type's base unit (gram, millilitre) one of this unit
+    // is: kilogram is 1000. Null for count units, which have no base unit:
+    // they only sum with quantities of the same measurement.
     factorToBase: numeric("factor_to_base"),
     // Shipped by migration rather than created by a user. Nothing here stops
     // a system unit being edited or deleted; that is application behaviour.
