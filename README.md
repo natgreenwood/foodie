@@ -19,6 +19,10 @@ This starts:
 - `api` — the Fastify API on <http://localhost:3000>. It applies database
   migrations on start, then runs with hot reload: edits under `apps/api/src`
   restart the server.
+- `web` — the React app (Vite dev server) on <http://localhost:5173>, with hot
+  module replacement for edits under `apps/web/src`. It shows the API's health;
+  requests to `/api/*` are proxied to the `api` service with the `/api` prefix
+  removed, so `/api/health` reaches `GET /health`.
 
 Check it is up:
 
@@ -28,6 +32,11 @@ curl localhost:3000/health
 ```
 
 Stop with `docker compose down`; add `-v` to also delete the database volume.
+
+The production web image (`docker build -f apps/web/Dockerfile .`) serves the
+static build with nginx on port 8080 as a non-root user and proxies `/api/*` to
+`API_UPSTREAM` (default `http://api:3000`). nginx resolves that host when it
+starts, so the api must be reachable by then.
 
 ### Without Docker
 
@@ -41,6 +50,7 @@ cp .env.example .env
 set -a; . ./.env; set +a          # export DATABASE_URL etc.
 pnpm --filter @foodie/api db:migrate
 pnpm --filter @foodie/api dev
+pnpm --filter @foodie/web dev     # in another shell; proxies /api to localhost:3000
 ```
 
 ### Checks
