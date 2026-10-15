@@ -9,6 +9,24 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # The api tests run against a real Postgres, the same image as
+    # docker-compose.yml. They create and migrate foodie_test themselves.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: foodie
+          POSTGRES_PASSWORD: foodie
+          POSTGRES_DB: foodie
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U foodie -d foodie"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://foodie:foodie@localhost:5432/foodie_test
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
