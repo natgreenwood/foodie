@@ -7,10 +7,13 @@ import {
   boolean,
   check,
   index,
+  integer,
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
+  timestamp,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
@@ -148,5 +151,118 @@ export const ingredientName = pgTable(
     // Serves the join from ingredient and the cascade on delete.
     index("ingredient_name_ingredient_id_idx").on(t.ingredientId),
     check("ingredient_name_name_not_blank", sql`${t.normalisedName} <> ''`),
+  ],
+);
+
+// One recipe, imported from a URL or entered by hand. There is no owner yet:
+// auth adds owner_id in its own migration. source_url is not unique, so
+// importing the same page twice gives two recipes.
+export const recipe = pgTable(
+  "recipe",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    title: text("title").notNull(),
+    sourceUrl: text("source_url"),
+    servings: integer("servings"),
+    prepMinutes: integer("prep_minutes"),
+    cookMinutes: integer("cook_minutes"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Set on insert only; whatever updates a recipe sets it.
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check("recipe_title_not_blank", sql`${normalised(t.title)} <> ''`),
+    check("recipe_servings_positive", sql`${t.servings} > 0`),
+    check("recipe_prep_minutes_not_negative", sql`${t.prepMinutes} >= 0`),
+    check("recipe_cook_minutes_not_negative", sql`${t.cookMinutes} >= 0`),
+  ],
+);
+
+// One ingredient line of a recipe, in `position` order. "Salt to taste" is a
+// line with notes and no measurement or quantity. The same ingredient may
+// appear on several lines. Catalogue rows a line uses cannot be deleted.
+export const recipeIngredient = pgTable(
+  "recipe_ingredient",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    recipeId: bigint("recipe_id", { mode: "number" })
+      .notNull()
+      .references(() => recipe.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    ingredientId: bigint("ingredient_id", { mode: "number" })
+      .notNull()
+      .references(() => ingredient.id, { onDelete: "restrict" }),
+    measurementId: bigint("measurement_id", { mode: "number" }).references(
+      () => measurement.id,
+      { onDelete: "restrict" },
+    ),
+    // A single amount: ½ is 0.5, and "2 to 3" stores 2 with the range in
+    // notes, so lines can be summed through measurement.factor_to_base.
+    quantity: numeric("quantity"),
+    // Modifiers such as crushed or diced.
+    prepNotes: text("prep_notes"),
+    notes: text("notes"),
+  },
+  (t) => [
+    // Also serves the join from recipe and the cascade on delete.
+    uniqueIndex("recipe_ingredient_recipe_position_key").on(
+      t.recipeId,
+      t.position,
+    ),
+    // Serve the restrict check when an ingredient or measurement is deleted.
+    index("recipe_ingredient_ingredient_id_idx").on(t.ingredientId),
+    index("recipe_ingredient_measurement_id_idx").on(t.measurementId),
+    check("recipe_ingredient_quantity_positive", sql`${t.quantity} > 0`),
+  ],
+);
+
+// One method step of a recipe, in `position` order.
+export const recipeStep = pgTable(
+  "recipe_step",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    recipeId: bigint("recipe_id", { mode: "number" })
+      .notNull()
+      .references(() => recipe.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    text: text("text").notNull(),
+  },
+  (t) => [
+    // Also serves the join from recipe and the cascade on delete.
+    uniqueIndex("recipe_step_recipe_position_key").on(t.recipeId, t.position),
+    check("recipe_step_text_not_blank", sql`${normalised(t.text)} <> ''`),
+  ],
+);
+
+// Free-text tags such as high-protein or gluten-free; there is no catalogue.
+// Keyed on the normalised tag, so `High-Protein` and ` high-protein ` cannot
+// both be on one recipe.
+export const recipeTag = pgTable(
+  "recipe_tag",
+  {
+    recipeId: bigint("recipe_id", { mode: "number" })
+      .notNull()
+      .references(() => recipe.id, { onDelete: "cascade" }),
+    tag: text("tag").notNull(),
+    normalisedTag: text("normalised_tag")
+      .notNull()
+      .generatedAlwaysAs((): SQL => normalised(recipeTag.tag)),
+  },
+  (t) => [
+    // Leads with recipe_id, so it also serves the join and the cascade.
+    primaryKey({ columns: [t.recipeId, t.normalisedTag] }),
+    // Serves finding recipes by tag.
+    index("recipe_tag_normalised_tag_idx").on(t.normalisedTag),
+    check("recipe_tag_tag_not_blank", sql`${t.normalisedTag} <> ''`),
   ],
 );
