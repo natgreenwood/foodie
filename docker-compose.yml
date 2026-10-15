@@ -36,7 +36,22 @@ services:
       timeout: 5s
       retries: 10
 
-  # web: added by the frontend scaffold (apps/web).
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: dev
+    environment:
+      # The Vite dev server proxies /api/* here, so the browser needs no CORS.
+      API_PROXY_TARGET: http://api:3000
+    ports:
+      - "${WEB_PORT:-5173}:5173"
+    volumes:
+      # Hot reload: source comes from the host; node_modules stay in the image.
+      - ./apps/web/src:/app/apps/web/src
+      - ./apps/web/index.html:/app/apps/web/index.html
+    depends_on:
+      - api
 
 volumes:
   postgres-data:
