@@ -48,13 +48,21 @@ most 5 (`MAX_REDIRECTS`), checking each new location against the policy;
 the sixth is a `FetchFailedError` with `reason: "too_many_redirects"`. The
 returned and stored `finalUrl` is the last hop's.
 
-**Residual risk: DNS rebinding.** The policy resolves the host, then the
-strategy resolves it again to connect. A DNS server that answers with a
-public address the first time and a private one the second can still steer
-a request inward. Pinning the checked address needs a resolver hook that
-impit does not have, and Node's `fetch` takes one only through undici's
-`Agent`, which would be a new dependency, so the window is accepted. Egress
-rules on the container network are what close it.
+The policy also decides which addresses the request goes to: it returns
+the ones it checked, and the http strategy (`node:http` / `node:https`)
+connects only to those, through a `lookup` that answers with them. The host
+is not resolved a second time, so a DNS server that answers with a public
+address for the check and a private one afterwards (rebinding) cannot steer
+it inward (NATG-268). The Host header, TLS server name and certificate check
+still use the URL's host name.
+
+A cached page is served only if its URL passes the policy now, so a row
+stored before destinations were checked cannot return an internal page.
+
+**Residual risk: DNS rebinding through impit.** impit takes no resolver, so
+it resolves the host again to connect and the window above stays open on
+that strategy. It is accepted (NATG-267); egress rules on the container
+network are what close it.
 
 Tests fetch from fixtures on `127.0.0.1`, which the default refuses, so they
 pass a policy that allows that host and applies `publicOnly` with a fake
@@ -75,9 +83,12 @@ docker build -f apps/api/Dockerfile -t foodie-api .
 docker run --rm foodie-api node --input-type=module -e '
   import { defaultStrategies } from "./dist/import/fetch.js";
   import { cloudflareBlock } from "./dist/import/fetch/cloudflare.js";
+  import { defaultDestinationPolicy } from "./dist/import/fetch/destination.js";
   const url = process.argv[1];
+  const check = await defaultDestinationPolicy(new URL(url));
+  if (check.refused) throw new Error(check.refused);
   for (const s of defaultStrategies) {
-    const res = await s.fetch(url).catch((err) => ({ err }));
+    const res = await s.fetch(url, check.addresses).catch((err) => ({ err }));
     console.log(s.name, res.err ? String(res.err) : `${res.status} ${cloudflareBlock(res) ?? "ok"} ${res.body.length} bytes`);
   }' "https://www.example-recipe-site.com/some-recipe"
 ```
