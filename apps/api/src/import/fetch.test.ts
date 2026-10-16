@@ -174,6 +174,8 @@ const routes: Record<
 const FIXTURE_BODY = "<html>fixture</html>";
 const requests: string[] = [];
 const userAgents: (string | undefined)[] = [];
+// The cookie header each /cookie/check request arrived with.
+const cookies: (string | undefined)[] = [];
 let server: Server;
 let base: string;
 
@@ -181,6 +183,27 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     requests.push(req.url ?? "");
     userAgents.push(req.headers["user-agent"]);
+    // A consent page: sets a cookie and redirects to a page that answers
+    // only with it, on this host or on localhost at the same port.
+    if (req.url === "/cookie/same" || req.url === "/cookie/cross") {
+      const port = (server.address() as AddressInfo).port;
+      res.writeHead(302, {
+        "set-cookie": "consent=yes; Path=/",
+        location:
+          req.url === "/cookie/same"
+            ? "/cookie/check"
+            : `http://localhost:${port}/cookie/check`,
+      });
+      res.end();
+      return;
+    }
+    if (req.url === "/cookie/check") {
+      cookies.push(req.headers.cookie);
+      const ok = req.headers.cookie === "consent=yes";
+      res.writeHead(ok ? 200 : 403, { "content-type": "text/html" });
+      res.end(FIXTURE_BODY);
+      return;
+    }
     const route = routes[req.url ?? ""] ?? { status: 500 };
     res.writeHead(route.status, {
       "content-type": "text/html",
@@ -1029,6 +1052,57 @@ describe("fetchPage destinations", () => {
       expect((err as Error).message).toContain(
         `${strategy.name}: 302 to 169.254.169.254, blocked_destination`,
       );
+    },
+  );
+
+  // NATG-271: fetchPage follows redirects itself, one strategy call a hop.
+  dbTest(
+    "the real impit strategy keeps a same-origin cookie across a redirect",
+    async ({ tx }) => {
+      cookies.length = 0;
+
+      const page = await fetchPage(`${base}/cookie/same`, {
+        db: tx,
+        strategies: [impitStrategy],
+        destinationPolicy: allowFixtures,
+      });
+
+      expect(page).toMatchObject({
+        status: 200,
+        strategy: "impit",
+        finalUrl: `${base}/cookie/check`,
+      });
+      expect(cookies).toEqual(["consent=yes"]);
+    },
+  );
+
+  dbTest(
+    "the real impit strategy does not send a cookie to another host",
+    async ({ tx }) => {
+      cookies.length = 0;
+      const checked: string[] = [];
+      const allowLocalhost: DestinationPolicy = (url) => {
+        checked.push(url.host);
+        return url.hostname === "localhost"
+          ? Promise.resolve({ refused: null, addresses: ["127.0.0.1"] })
+          : allowFixtures(url);
+      };
+
+      const err = await fetchPage(`${base}/cookie/cross`, {
+        db: tx,
+        strategies: [impitStrategy],
+        destinationPolicy: allowLocalhost,
+      }).catch((e: unknown) => e);
+
+      expect(err).toMatchObject({ reason: "blocked", status: 403 });
+      expect(cookies).toEqual([undefined]);
+      // Both hops, and the cache check before them, went through the policy.
+      const port = new URL(base).port;
+      expect(checked).toEqual([
+        `127.0.0.1:${port}`,
+        `127.0.0.1:${port}`,
+        `localhost:${port}`,
+      ]);
     },
   );
 });
