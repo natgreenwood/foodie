@@ -136,3 +136,60 @@ th.section {
   font-size: 0.875rem;
   color: #59636e;
 }
+
+.site-header {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 0;
+}
+
+.site-header h1 {
+  margin: 0 0 0.5rem;
+}
+
+.site-header ul {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.signed-in-as {
+  color: #59636e;
+}
+
+main:focus {
+  outline: none;
+}
+
+.account-form {
+  display: grid;
+  gap: 0.25rem;
+  max-width: 24rem;
+  margin-bottom: 1rem;
+}
+
+.account-form label {
+  margin-top: 0.5rem;
+  font-weight: 600;
+}
+
+.account-form input,
+.account-form select {
+  font: inherit;
+  padding: 0.5rem;
+}
+
+.account-form button {
+  justify-self: start;
+  margin-top: 0.75rem;
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #59636e;
+}
