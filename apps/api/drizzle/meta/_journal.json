@@ -36,6 +36,13 @@
       "when": 1792117657920,
       "tag": "0004_numeric_checks_finite",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792163049551,
+      "tag": "0005_page_fetch",
+      "breakpoints": true
     }
   ]
 }

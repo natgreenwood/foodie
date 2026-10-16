@@ -15,6 +15,7 @@
   "dependencies": {
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.7",
+    "impit": "^0.14.6",
     "parse-ingredient": "3.0.0",
     "pg": "^8.23.1"
   },
