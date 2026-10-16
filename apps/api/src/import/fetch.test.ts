@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { pageFetch } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
@@ -40,14 +41,19 @@ function fakeImpit(status = 200): FetchStrategy & { calls: string[] } {
 }
 
 // Records what it is asked for and answers every URL with a page, so a test
-// can see whether a request would have been sent at all.
-function recorder(name: StrategyName): FetchStrategy & { calls: string[] } {
+// can see whether a request would have been sent at all, and to where.
+function recorder(
+  name: StrategyName,
+): FetchStrategy & { calls: string[]; addresses: (readonly string[])[] } {
   const calls: string[] = [];
+  const addresses: (readonly string[])[] = [];
   return {
     name,
     calls,
-    fetch(url) {
+    addresses,
+    fetch(url, checked) {
       calls.push(url);
+      addresses.push(checked);
       return Promise.resolve({
         status: 200,
         headers: new Headers({ "content-type": "text/html" }),
@@ -73,7 +79,9 @@ const strictWithFakeDns = publicOnly(fakeDns);
 // The fixtures listen on 127.0.0.1, which the default policy refuses. Every
 // other host goes through the real policy, on the fake DNS.
 const allowFixtures: DestinationPolicy = (url) =>
-  url.hostname === "127.0.0.1" ? Promise.resolve(null) : strictWithFakeDns(url);
+  url.hostname === "127.0.0.1"
+    ? Promise.resolve({ refused: null, addresses: ["127.0.0.1"] })
+    : strictWithFakeDns(url);
 
 // A real image, as a recipe URL that points at a photo would return. Its
 // bytes include NULs.
@@ -103,6 +111,16 @@ const routes: Record<
   "/png": { status: 200, headers: { "content-type": "image/png" }, body: PNG },
   "/png-as-html": { status: 200, body: PNG },
   "/nul": { status: 200, body: NUL_BODY },
+  "/gzip": {
+    status: 200,
+    headers: { "content-encoding": "gzip" },
+    body: gzipSync("<html>fixture</html>"),
+  },
+  "/br": {
+    status: 200,
+    headers: { "content-encoding": "br" },
+    body: brotliCompressSync("<html>fixture</html>"),
+  },
   "/at-cap": { status: 200, body: Buffer.alloc(MAX_BODY_BYTES, "a") },
   "/over-cap": { status: 200, body: Buffer.alloc(MAX_BODY_BYTES + 1, "a") },
   "/to-metadata": {
@@ -377,6 +395,12 @@ describe("fetchPage strategies", () => {
 });
 
 describe("fetchPage bodies", () => {
+  dbTest.for(["/gzip", "/br"])("decodes %s", async (path, { tx }) => {
+    const page = await fetchPage(`${base}${path}`, deps(tx));
+
+    expect(page.html).toBe(FIXTURE_BODY);
+  });
+
   dbTest("accepts application/xhtml+xml", async ({ tx }) => {
     const page = await fetchPage(`${base}/xhtml`, deps(tx));
 
@@ -551,6 +575,9 @@ describe("fetchPage destinations", () => {
     "http://[fec0::1]/",
     // IPv4-compatible, which URL rewrites to ::7f00:1.
     "http://[::127.0.0.1]/",
+    // Reserved, and broadcast.
+    "http://240.0.0.1/",
+    "http://255.255.255.255/",
   ])(
     "refuses %s under the default policy before any request",
     async (url, { tx }) => {
@@ -598,7 +625,71 @@ describe("fetchPage destinations", () => {
 
     expect(page).toMatchObject({ strategy: "http", cached: false });
     expect(http.calls).toEqual(["https://recipes.test/pie"]);
+    // The addresses the policy checked, for the strategy to connect to.
+    expect(http.addresses).toEqual([DNS["recipes.test"]]);
   });
+
+  dbTest(
+    "connects to the address the policy checked, not a later DNS answer (rebinding)",
+    async ({ tx }) => {
+      // rebind.test answers the fixture's address once, then a private one:
+      // a strategy that resolved the name again would get 10.0.0.1 from
+      // this resolver, or nothing from the real DNS. Here the fixture's
+      // 127.0.0.1 stands for the public address the policy allowed.
+      const answers: string[][] = [];
+      const rebinding: Resolver = (host) => {
+        const answer = answers.length === 0 ? ["127.0.0.1"] : ["10.0.0.1"];
+        answers.push(answer);
+        return host === "rebind.test"
+          ? Promise.resolve(answer)
+          : Promise.reject(new Error(`getaddrinfo ENOTFOUND ${host}`));
+      };
+      const policy: DestinationPolicy = async (url) => {
+        const addresses = await rebinding(url.hostname);
+        return addresses.every((a) => a === "127.0.0.1")
+          ? { refused: null, addresses }
+          : { refused: `${url.hostname} resolves to ${addresses.join(", ")}` };
+      };
+      const port = (server.address() as AddressInfo).port;
+      requests.length = 0;
+
+      const page = await fetchPage(
+        `http://rebind.test:${port}/ok`,
+        { db: tx, strategies: [httpStrategy], destinationPolicy: policy },
+        // The cache's own destination check would take the first answer.
+        { refresh: true },
+      );
+
+      expect(page).toMatchObject({ strategy: "http", html: FIXTURE_BODY });
+      expect(requests).toEqual(["/ok"]);
+      expect(answers).toEqual([["127.0.0.1"]]);
+    },
+  );
+
+  dbTest(
+    "does not serve a cached page for a refused destination",
+    async ({ tx }) => {
+      const http = recorder("http");
+      // As a fetch before destinations were checked would have stored it.
+      await tx.insert(pageFetch).values({
+        normalisedUrl: "http://10.0.0.1/admin",
+        finalUrl: "http://10.0.0.1/admin",
+        status: 200,
+        strategy: "http",
+        html: "<html>internal</html>",
+        fetchedAt: new Date(),
+      });
+
+      const err = await fetchPage("http://10.0.0.1/admin", {
+        db: tx,
+        strategies: [http],
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(FetchFailedError);
+      expect(err).toMatchObject({ reason: "blocked_destination" });
+      expect(http.calls).toEqual([]);
+    },
+  );
 
   dbTest("fails unreachable when the host does not resolve", async ({ tx }) => {
     const http = recorder("http");

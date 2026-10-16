@@ -7,6 +7,7 @@ import type * as schema from "../db/schema.js";
 import { cloudflareBlock } from "./fetch/cloudflare.js";
 import {
   defaultDestinationPolicy,
+  type DestinationCheck,
   type DestinationPolicy,
 } from "./fetch/destination.js";
 import { httpStrategy } from "./fetch/http.js";
@@ -19,7 +20,10 @@ import {
 } from "./fetch/strategy.js";
 
 export type { FetchStrategy, StrategyName } from "./fetch/strategy.js";
-export type { DestinationPolicy } from "./fetch/destination.js";
+export type {
+  DestinationCheck,
+  DestinationPolicy,
+} from "./fetch/destination.js";
 
 // Plain HTTP first; impit only when Cloudflare stops it (NATG-239).
 export const defaultStrategies: readonly FetchStrategy[] = [
@@ -168,8 +172,13 @@ export async function fetchPage(
 ): Promise<FetchedPage> {
   const url = normaliseUrl(rawUrl);
   const now = deps.now ?? (() => new Date());
+  const policy = deps.destinationPolicy ?? defaultDestinationPolicy;
 
-  if (!opts.refresh) {
+  // A row written before destinations were checked (PR #19) may hold an
+  // internal page, so the cache is read only for an allowed destination.
+  // Otherwise the fetch below refuses the URL or reports the DNS failure,
+  // with the same error as when nothing is cached.
+  if (!opts.refresh && (await isAllowed(url, policy))) {
     const [hit] = await deps.db
       .select()
       .from(pageFetch)
@@ -186,11 +195,7 @@ export async function fetchPage(
     }
   }
 
-  const res = await fetchWithStrategies(
-    url,
-    deps.strategies,
-    deps.destinationPolicy ?? defaultDestinationPolicy,
-  );
+  const res = await fetchWithStrategies(url, deps.strategies, policy);
   const row = {
     normalisedUrl: url,
     finalUrl: res.finalUrl,
@@ -213,6 +218,17 @@ export async function fetchPage(
     fetchedAt: row.fetchedAt,
     cached: false,
   };
+}
+
+async function isAllowed(
+  url: string,
+  policy: DestinationPolicy,
+): Promise<boolean> {
+  try {
+    return (await policy(new URL(url))).refused === null;
+  } catch {
+    return false;
+  }
 }
 
 async function fetchWithStrategies(
@@ -280,23 +296,25 @@ async function fetchFollowingRedirects(
     // The host only: a redirect's path and query are the remote's to choose
     // and need not be in the log.
     const hop = via === null ? "" : ` ${via} to ${current.host},`;
-    let refused: string | null;
+    let check: DestinationCheck;
     try {
-      refused = await policy(current);
+      check = await policy(current);
     } catch (err) {
       attempts.push(`${strategy.name}:${hop} ${describeError(err)}`);
       throw new FetchFailedError(url, "unreachable", via, attempts, {
         cause: err,
       });
     }
-    if (refused) {
-      attempts.push(`${strategy.name}:${hop} blocked_destination (${refused})`);
+    if (check.refused !== null) {
+      attempts.push(
+        `${strategy.name}:${hop} blocked_destination (${check.refused})`,
+      );
       throw new FetchFailedError(url, "blocked_destination", via, attempts);
     }
 
     let res: FetchResponse;
     try {
-      res = await strategy.fetch(current.toString());
+      res = await strategy.fetch(current.toString(), check.addresses);
     } catch (err) {
       // No response at all; nothing suggests another strategy would differ.
       attempts.push(`${strategy.name}:${hop} ${describeError(err)}`);

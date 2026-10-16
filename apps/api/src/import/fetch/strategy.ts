@@ -3,9 +3,12 @@
 // strategy only fetches: it does not judge the response. Network failures
 // (refused, DNS, timeout) reject. A strategy never follows a redirect: it
 // returns the 3xx, and fetchPage checks the next hop before requesting it.
+//
+// `addresses` are what the destination policy checked url's host resolves
+// to. A strategy that can should connect only to those.
 export interface FetchStrategy {
   name: StrategyName;
-  fetch(url: string): Promise<FetchResponse>;
+  fetch(url: string, addresses: readonly string[]): Promise<FetchResponse>;
 }
 
 // Headless Chromium is parked (NATG-239); it would add a name here.

@@ -3,9 +3,14 @@ import { BlockList, isIP } from "node:net";
 
 // Where fetchPage may send a request. Called with every URL before it is
 // requested, the first and each redirect hop, by every strategy. Resolves
-// to why the URL is refused, or null if it is allowed; rejects only when
-// the host cannot be resolved at all (SEC-1, CWE-918).
-export type DestinationPolicy = (url: URL) => Promise<string | null>;
+// to why the URL is refused, or to the addresses it may be sent to; rejects
+// only when the host cannot be resolved at all (SEC-1, CWE-918).
+export type DestinationPolicy = (url: URL) => Promise<DestinationCheck>;
+
+// `addresses` are the ones checked. The http strategy connects only to
+// them, so the host is not resolved a second time (NATG-268).
+export type DestinationCheck =
+  { refused: string } | { refused: null; addresses: string[] };
 
 // Every address a hostname resolves to. Rejects when it resolves to none.
 export type Resolver = (hostname: string) => Promise<string[]>;
@@ -70,19 +75,18 @@ export function nonPublicRange(address: string): string | null {
 // is public. One private record is enough to refuse, since the strategy
 // may connect to any of them.
 //
-// The strategies then resolve the host again themselves, so a DNS server
-// that answers differently the second time (rebinding) can still steer a
-// request to a private address. Pinning the checked address is not possible
-// without a new dependency: impit takes no resolver, and Node's fetch takes
-// one only through undici's Agent, which Node does not export. The window
-// is accepted (NATG-267); egress rules on the container close it.
+// The http strategy connects only to the addresses checked here. impit
+// takes no resolver and resolves the host again itself, so a DNS server that
+// answers differently the second time (rebinding) can still steer an impit
+// request to a private address. That window is accepted (NATG-267); egress
+// rules on the container close it.
 export function publicOnly(resolve: Resolver = lookupAll): DestinationPolicy {
   return async (url) => {
     if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return `${url.protocol} is not http or https`;
+      return { refused: `${url.protocol} is not http or https` };
     }
     if (url.username !== "" || url.password !== "") {
-      return "URL carries credentials";
+      return { refused: "URL carries credentials" };
     }
     // URL keeps the brackets on an IPv6 host; the address has none.
     const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
@@ -93,12 +97,15 @@ export function publicOnly(resolve: Resolver = lookupAll): DestinationPolicy {
     for (const address of addresses) {
       const range = nonPublicRange(address);
       if (range) {
-        return address === host
-          ? `${host} is ${range}`
-          : `${host} resolves to ${address}, ${range}`;
+        return {
+          refused:
+            address === host
+              ? `${host} is ${range}`
+              : `${host} resolves to ${address}, ${range}`,
+        };
       }
     }
-    return null;
+    return { refused: null, addresses };
   };
 }
 
