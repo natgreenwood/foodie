@@ -3,6 +3,7 @@ import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { pipeline, Readable } from "node:stream";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
+import { decodeBody } from "./decode.js";
 import {
   FETCH_TIMEOUT_MS,
   readCapped,
@@ -33,11 +34,11 @@ export const httpStrategy: FetchStrategy = {
     const res = await get(new URL(url), addresses);
     const body = Readable.toWeb(decoded(res)) as ReadableStream<Uint8Array>;
     const bytes = await readCapped(body);
+    const headers = toHeaders(res.rawHeaders);
     return {
       status: res.statusCode ?? 0,
-      headers: toHeaders(res.rawHeaders),
-      // UTF-8, as res.text() would decode it.
-      body: bytes ? new TextDecoder().decode(bytes) : "",
+      headers,
+      body: bytes ? decodeBody(bytes, headers.get("content-type")) : "",
       tooLarge: bytes === null,
     };
   },
