@@ -25,16 +25,28 @@ const NON_PUBLIC: readonly [string, number, "ipv4" | "ipv6", string][] = [
   ["127.0.0.0", 8, "ipv4", "loopback"],
   ["169.254.0.0", 16, "ipv4", "link-local"],
   ["172.16.0.0", 12, "ipv4", "private"],
+  ["192.0.0.0", 24, "ipv4", "IETF protocol assignments"],
   ["192.168.0.0", 16, "ipv4", "private"],
+  ["198.18.0.0", 15, "ipv4", "benchmarking"],
   ["224.0.0.0", 4, "ipv4", "multicast"],
   // Reserved, and 255.255.255.255 broadcast.
   ["240.0.0.0", 4, "ipv4", "reserved"],
   ["::", 128, "ipv6", "unspecified"],
   ["::1", 128, "ipv6", "loopback"],
+  // Deprecated IPv4-compatible, such as ::127.0.0.1.
+  ["::", 96, "ipv6", "IPv4-compatible"],
   // Refused whatever IPv4 address it carries, rather than unwrapped.
   ["::ffff:0:0", 96, "ipv6", "IPv4-mapped"],
+  // Translators that turn the embedded IPv4 address back into a request to
+  // it: NAT64 (an AWS NAT Gateway does this for IPv6-only subnets), 6to4
+  // and Teredo. Refused outright, as IPv4-mapped is (NATG-270).
+  ["64:ff9b::", 96, "ipv6", "NAT64"],
+  ["64:ff9b:1::", 48, "ipv6", "NAT64 local-use"],
+  ["2001::", 32, "ipv6", "Teredo"],
+  ["2002::", 16, "ipv6", "6to4"],
   ["fc00::", 7, "ipv6", "unique-local"],
   ["fe80::", 10, "ipv6", "link-local"],
+  ["fec0::", 10, "ipv6", "site-local"],
   ["ff00::", 8, "ipv6", "multicast"],
 ];
 

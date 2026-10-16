@@ -539,6 +539,18 @@ describe("fetchPage destinations", () => {
     "http://2130706433/",
     // Resolved by the real lookup, from the hosts file.
     "http://localhost/",
+    // NAT64, 6to4 and Teredo wrapping a private IPv4 address (NATG-270).
+    "http://[64:ff9b::a00:1]/",
+    "http://[64:ff9b::a9fe:a9fe]/",
+    "http://[64:ff9b:1::a00:1]/",
+    "http://[2002:a9fe:a9fe::1]/",
+    "http://[2002:7f00:1::]/",
+    "http://[2001:0:a00:1::1]/",
+    "http://198.18.0.1/",
+    "http://192.0.0.1/",
+    "http://[fec0::1]/",
+    // IPv4-compatible, which URL rewrites to ::7f00:1.
+    "http://[::127.0.0.1]/",
   ])(
     "refuses %s under the default policy before any request",
     async (url, { tx }) => {
