@@ -8,6 +8,7 @@ import {
 import { healthRoutes, type HealthDeps } from "./routes/health.js";
 import { importRoutes, type ImportDeps } from "./routes/imports.js";
 import { meRoutes } from "./routes/me.js";
+import { recipeRoutes } from "./routes/recipes.js";
 
 export type AppDeps = HealthDeps & ImportDeps & AuthDeps;
 
@@ -22,6 +23,7 @@ export function buildApp(deps: AppDeps, options: FastifyServerOptions = {}) {
   app.register((signedIn, _opts, done) => {
     signedIn.addHook("onRequest", requireUser(deps));
     signedIn.register(meRoutes, deps);
+    signedIn.register(recipeRoutes, deps);
     done();
   });
   return app;

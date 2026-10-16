@@ -100,6 +100,17 @@ Routes (the web app reaches them under `/api`, e.g. `/api/auth/login`):
 - `GET /me`, `PATCH /me` `{ displayName?, locale? }`: the signed-in user's
   profile. `locale` is a BCP-47 tag, default `en-GB`.
 
+- `GET /recipes`: the signed-in user's recipes, newest first, as
+  `{ recipes: [...] }`.
+- `GET /recipes/:id`, `DELETE /recipes/:id`: one of the signed-in user's
+  recipes. Another user's recipe answers 404 `not_found`, the same as one
+  that does not exist. Delete answers 204, and 404 if repeated.
+
+Recipes are private to the account that owns them, and deleting an account
+deletes its recipes. Recipes that existed before accounts were given to the
+lowest-id admin by migration `0008_recipe_owner`, which refuses to run if
+there are recipes and no admin.
+
 `/health` and the three `/auth` routes are open. Routes registered inside the
 signed-in scope in `apps/api/src/app.ts` answer 401 `unauthenticated` without
 a valid session.

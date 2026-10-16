@@ -43,6 +43,7 @@ export type AuthErrorCode =
   | "invalid_credentials"
   | "email_taken"
   | "unauthenticated"
+  | "not_found"
   | "internal_error";
 
 export function sendError(
