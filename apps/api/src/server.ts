@@ -1,6 +1,8 @@
 import { buildApp } from "./app.js";
+import { ensureAdmin } from "./auth/accounts.js";
 import { loadConfig } from "./config.js";
 import { createDatabase } from "./db/client.js";
+import { describeError } from "./db/errors.js";
 import { importDeps } from "./routes/imports.js";
 
 const config = loadConfig();
@@ -10,7 +12,12 @@ const database = createDatabase(config.databaseUrl, (err) => {
 });
 
 const app = buildApp(
-  { pingDatabase: () => database.ping(), ...importDeps(database.db) },
+  {
+    pingDatabase: () => database.ping(),
+    ...importDeps(database.db),
+    db: database.db,
+    secureCookies: config.secureCookies,
+  },
   { logger: { level: config.logLevel } },
 );
 
@@ -29,6 +36,19 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       },
     );
   });
+}
+
+if (config.admin) {
+  try {
+    const outcome = await ensureAdmin(database.db, config.admin);
+    app.log.info({ email: config.admin.email, outcome }, "admin bootstrap");
+  } catch (err) {
+    // describeError keeps the first line of a failed query, not its
+    // parameters, which include the password hash.
+    app.log.error({ error: describeError(err) }, "admin bootstrap failed");
+    await database.close();
+    process.exit(1);
+  }
 }
 
 try {
