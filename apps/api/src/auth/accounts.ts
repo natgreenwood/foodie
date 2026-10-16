@@ -29,8 +29,10 @@ const profileColumns = {
   isAdmin: user.isAdmin,
 };
 
+// Both sides lowercased by Postgres, as the unique index is: JavaScript's
+// toLowerCase() disagrees with it on some characters (İ, for one).
 function byEmail(email: string) {
-  return eq(sql`lower(${user.email})`, email.toLowerCase());
+  return eq(sql`lower(${user.email})`, sql`lower(${email})`);
 }
 
 // argon2id with the library's defaults (64 MiB, 3 passes, 4 lanes).

@@ -199,6 +199,24 @@ describe("POST /auth/login", () => {
     expect((await me(tokenFrom(res))).statusCode).toBe(200);
   });
 
+  // JavaScript lowercases İ (U+0130) to i + U+0307, Postgres to plain i.
+  dbTest(
+    "signs in with an email Postgres and JavaScript lowercase differently",
+    async ({ tx }) => {
+      const { post } = start(tx);
+      const email = "İzmir@example.com";
+      expect(
+        (await post("/auth/register", { email, password: PASSWORD }))
+          .statusCode,
+      ).toBe(201);
+
+      const res = await post("/auth/login", { email, password: PASSWORD });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ email });
+    },
+  );
+
   dbTest(
     "answers a wrong password and an unknown email identically",
     async ({ tx }) => {

@@ -155,4 +155,21 @@ describe("ensureAdmin", () => {
       ).toBeNull();
     },
   );
+
+  // JavaScript lowercases İ (U+0130) to i + U+0307, Postgres to plain i.
+  dbTest(
+    "finds an existing account whose email Postgres and JavaScript lowercase differently",
+    async ({ tx }) => {
+      const email = "İzmir-admin@example.com";
+      await createUser(tx, { email, password: "their own one" });
+
+      expect(await ensureAdmin(tx, { email, password: "correct horse" })).toBe(
+        "promoted",
+      );
+      expect(await checkCredentials(tx, email, "their own one")).toMatchObject({
+        email,
+        isAdmin: true,
+      });
+    },
+  );
 });
