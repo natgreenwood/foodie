@@ -13,6 +13,7 @@
     "db:migrate": "tsx src/db/migrate.ts"
   },
   "dependencies": {
+    "cheerio": "^1.2.0",
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.7",
     "impit": "^0.14.6",
