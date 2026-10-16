@@ -68,15 +68,21 @@ export function extractRecipe(
     return {
       extraction,
       warnings: others.length > 0 ? ["multiple_recipes_found"] : [],
-      recipe: draft(first, ctx),
+      recipe: draft(first, $("title").first().text().trim(), ctx),
     };
   }
   return null;
 }
 
-function draft(node: SchemaNode, ctx: ExtractContext): DraftRecipe {
+// A Recipe with no name takes the page's <title>.
+function draft(
+  node: SchemaNode,
+  pageTitle: string,
+  ctx: ExtractContext,
+): DraftRecipe {
   return {
-    title: values(node.name).map(singleLine).find(Boolean) ?? "",
+    title:
+      values(node.name).map(singleLine).find(Boolean) ?? singleLine(pageTitle),
     servings: servings(node.recipeYield),
     prepMinutes: minutes(node.prepTime),
     cookMinutes: minutes(node.cookTime),
@@ -101,11 +107,10 @@ function ingredients(
   let section: string | null = null;
   for (const entry of entries) {
     const header = sectionHeader(entry);
-    if (header !== null) {
-      section = header;
-      continue;
-    }
-    const { measurementId, ...parsed } = parseIngredientLine(entry, ctx);
+    if (header !== null) section = header.section;
+    const line = header === null ? entry : header.rest;
+    if (line === null) continue;
+    const { measurementId, ...parsed } = parseIngredientLine(line, ctx);
     result.push({
       position: result.length + 1,
       rawText: parsed.rawText,
@@ -126,13 +131,24 @@ function ingredients(
   return result;
 }
 
-// NATG-244: an entry with no digits that ends in a colon or reads "For the
-// ..." is a group header, not an ingredient. Its text, less the colon, is the
-// section of the lines after it.
-function sectionHeader(entry: string): string | null {
-  if (/\d/.test(entry)) return null;
-  if (!entry.endsWith(":") && !/^for the\b/i.test(entry)) return null;
-  return entry.replace(/:+$/, "").trim() || null;
+// NATG-244, refined on NATG-245: a group header is an entry ending in a
+// colon, or "For the ..." on its own, with no digits before any colon. Its
+// text is the section of the lines after it. "For the garnish: parsley" is
+// both: the header, then "parsley" as the first line under it.
+function sectionHeader(
+  entry: string,
+): { section: string; rest: string | null } | null {
+  const colon = entry.indexOf(":");
+  const before = (colon === -1 ? entry : entry.slice(0, colon)).trim();
+  if (before === "" || /\d/.test(before)) return null;
+  if (colon === -1) {
+    return /^for the\b/i.test(before) ? { section: before, rest: null } : null;
+  }
+  const rest = entry
+    .slice(colon + 1)
+    .replace(/^:+/, "")
+    .trim();
+  return { section: before, rest: rest === "" ? null : rest };
 }
 
 // Text, HowToStep and HowToSection, flattened in order. A text value with
@@ -171,18 +187,29 @@ function tags(raw: readonly unknown[]): string[] {
 }
 
 // "4", 4, "4 servings", "Serves 4", "4-6": the first whole number in the
-// first value that has one. Absent, zero or unreadable is null.
+// first value that has one. A number followed by a mass or volume unit
+// ("500g", "1.5 l") is an amount, not servings. Absent, zero or unreadable
+// is null.
 function servings(recipeYield: unknown): number | null {
   for (const value of values(recipeYield)) {
     const n =
       typeof value === "number"
         ? Math.floor(value)
         : typeof value === "string"
-          ? Number(/\d+/.exec(value)?.[0] ?? NaN)
+          ? servingsIn(value)
           : NaN;
     if (Number.isSafeInteger(n) && n > 0) return n;
   }
   return null;
+}
+
+const AMOUNT_UNIT = /^\s*(?:g|kg|ml|l|oz|lbs?)\b/i;
+
+function servingsIn(text: string): number {
+  const match = /\d+(?:[.,]\d+)?/.exec(text);
+  if (match === null) return NaN;
+  if (AMOUNT_UNIT.test(text.slice(match.index + match[0].length))) return NaN;
+  return Math.floor(Number(match[0].replace(",", ".")));
 }
 
 const DURATION =

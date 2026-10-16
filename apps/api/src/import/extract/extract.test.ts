@@ -103,14 +103,39 @@ describe("extractRecipe: JSON-LD", () => {
     expect(result?.recipe.ingredients[0]?.section).toBe(section);
   });
 
-  it.each(["For the 2 cakes:", "Fortified wine", "1 cup flour:"])(
-    "keeps %j as an ingredient",
-    (line) => {
-      const result = extract(jsonLdPage({ recipeIngredient: [line] }));
+  it.each([
+    ["For the garnish: fresh parsley", "For the garnish", "fresh parsley"],
+    ["Sauce: 2 tbsp soy sauce", "Sauce", "2 tbsp soy sauce"],
+  ])(
+    "splits %j into a section and an ingredient",
+    (entry, section, rawText) => {
+      const result = extract(
+        jsonLdPage({ recipeIngredient: [entry, "2 eggs"] }),
+      );
 
-      expect(result?.recipe.ingredients[0]?.rawText).toBe(line);
+      expect(
+        result?.recipe.ingredients.map((i) => [
+          i.position,
+          i.rawText,
+          i.section,
+        ]),
+      ).toEqual([
+        [1, rawText, section],
+        [2, "2 eggs", section],
+      ]);
     },
   );
+
+  it.each([
+    "For the 2 cakes:",
+    "For the 2 cakes: 1 cup sugar",
+    "Fortified wine",
+    "1 cup flour:",
+  ])("keeps %j as an ingredient", (line) => {
+    const result = extract(jsonLdPage({ recipeIngredient: [line] }));
+
+    expect(result?.recipe.ingredients[0]?.rawText).toBe(line);
+  });
 
   it("finds the Recipe in an @graph, with @type as an array", () => {
     const result = extract(fixture("json-ld-graph.html"));
@@ -124,6 +149,41 @@ describe("extractRecipe: JSON-LD", () => {
       cookMinutes: 20,
       tags: [],
     });
+  });
+
+  it("finds a Recipe under a WebPage's mainEntity", () => {
+    const result = extract(fixture("json-ld-main-entity.html"));
+
+    expect(result?.extraction).toBe("json-ld");
+    expect(result?.recipe.servings).toBe(8);
+    expect(
+      result?.recipe.ingredients.map((i) => [i.rawText, i.section]),
+    ).toEqual([
+      ["200g plain flour", "For the pastry"],
+      ["4 lemons, juiced", "For the filling"],
+      ["3 eggs", "For the filling"],
+    ]);
+  });
+
+  it("takes the page's <title>, trimmed, when the Recipe has no name", () => {
+    const result = extract(fixture("json-ld-main-entity.html"));
+
+    expect(result?.recipe.title).toBe("Lemon tart | Example Kitchen");
+  });
+
+  it("returns an empty title when there is no name and no <title>", () => {
+    const result = extract(jsonLdPage({ name: undefined }));
+
+    expect(result?.recipe.title).toBe("");
+  });
+
+  it("does not search a Recipe's own properties for further recipes", () => {
+    const result = extract(
+      jsonLdPage({ hasPart: { "@type": "Recipe", name: "Inner" } }),
+    );
+
+    expect(result?.recipe.title).toBe("Test");
+    expect(result?.warnings).toEqual([]);
   });
 
   it("splits string recipeInstructions into one step per line", () => {
@@ -184,6 +244,16 @@ describe("extractRecipe: JSON-LD", () => {
     ["a crowd", null],
     ["0", null],
     [undefined, null],
+    ["1 loaf (12 slices)", 1],
+    ["4 large pancakes", 4],
+    ["500g", null],
+    ["500 g", null],
+    ["1.5 kg", null],
+    ["750ml", null],
+    ["2 l", null],
+    ["12 oz", null],
+    ["2 lbs", null],
+    [["500g", "Serves 4"], 4],
   ])("reads recipeYield %j as %j", (recipeYield, servings) => {
     const result = extract(jsonLdPage({ recipeYield }));
 
