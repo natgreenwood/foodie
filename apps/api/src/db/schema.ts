@@ -47,8 +47,12 @@ export const measurement = pgTable(
     // Shipped by migration rather than created by a user. Nothing here stops
     // a system unit being edited or deleted; that is application behaviour.
     isSystem: boolean("is_system").notNull().default(false),
+    // A stable name for a system unit that code can refer to ("cup_us"), the
+    // seed's key. Null for a unit a user creates.
+    key: text("key"),
   },
   (t) => [
+    uniqueIndex("measurement_key_key").on(t.key),
     // Postgres sorts NaN above Infinity above every number, so `> 0` alone
     // accepts both, and either one turns any sum it is part of into NaN.
     check(

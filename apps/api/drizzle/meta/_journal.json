@@ -43,6 +43,13 @@
       "when": 1792163049551,
       "tag": "0005_page_fetch",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792184379834,
+      "tag": "0006_measurement_key",
+      "breakpoints": true
     }
   ]
 }
