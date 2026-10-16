@@ -1,4 +1,8 @@
-import { FETCH_TIMEOUT_MS, type FetchStrategy } from "./strategy.js";
+import {
+  FETCH_TIMEOUT_MS,
+  readCapped,
+  type FetchStrategy,
+} from "./strategy.js";
 
 // A desktop Chrome's headers, as in the NATG-201 baseline: some sites refuse
 // Node's default user agent outright.
@@ -18,11 +22,14 @@ export const httpStrategy: FetchStrategy = {
       redirect: "follow",
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
+    const bytes = await readCapped(res.body);
     return {
       status: res.status,
       finalUrl: res.url || url,
       headers: res.headers,
-      body: await res.text(),
+      // UTF-8, as res.text() would decode it.
+      body: bytes ? new TextDecoder().decode(bytes) : "",
+      tooLarge: bytes === null,
     };
   },
 };
