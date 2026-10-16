@@ -1,19 +1,27 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { pageFetch } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import {
   CACHE_LIFETIME_MS,
   FetchFailedError,
+  MAX_REDIRECTS,
   fetchPage,
   InvalidUrlError,
   normaliseUrl,
   NotPermittedError,
+  type DestinationPolicy,
   type FetchStrategy,
 } from "./fetch.js";
 import { cloudflareBlock } from "./fetch/cloudflare.js";
+import {
+  isPublicAddress,
+  publicOnly,
+  type Address,
+} from "./fetch/destination.js";
 import { httpStrategy } from "./fetch/http.js";
 import { MAX_BODY_BYTES } from "./fetch/strategy.js";
 
@@ -41,6 +49,8 @@ const PNG = await readFile(new URL("./fixtures/tomato.png", import.meta.url));
 // "<h>", NUL, "A": the smallest body that broke the page_fetch insert.
 const NUL_BODY = Buffer.from([0x3c, 0x68, 0x3e, 0x00, 0x41]);
 
+const FIXTURE_BODY = "<html>fixture</html>";
+
 // Each path answers with its own status, headers and static body (the shared
 // FIXTURE_BODY unless it names one): request input is recorded below, never
 // echoed back.
@@ -63,10 +73,33 @@ const routes: Record<
   "/png": { status: 200, headers: { "content-type": "image/png" }, body: PNG },
   "/png-as-html": { status: 200, body: PNG },
   "/nul": { status: 200, body: NUL_BODY },
+  "/gzip": {
+    status: 200,
+    headers: { "content-encoding": "gzip" },
+    body: gzipSync(FIXTURE_BODY),
+  },
+  "/br": {
+    status: 200,
+    headers: { "content-encoding": "br" },
+    body: brotliCompressSync(FIXTURE_BODY),
+  },
   "/at-cap": { status: 200, body: Buffer.alloc(MAX_BODY_BYTES, "a") },
   "/over-cap": { status: 200, body: Buffer.alloc(MAX_BODY_BYTES + 1, "a") },
+  "/to-private": {
+    status: 302,
+    headers: { location: "http://192.168.1.1/admin" },
+  },
+  "/to-localhost": { status: 301, headers: { location: "http://localhost/" } },
+  "/to-ftp": { status: 302, headers: { location: "ftp://example.com/pie" } },
+  // /redirect/n is n redirects from /ok.
+  "/redirect/1": { status: 302, headers: { location: "/ok" } },
 };
-const FIXTURE_BODY = "<html>fixture</html>";
+for (let n = 2; n <= MAX_REDIRECTS + 1; n++) {
+  routes[`/redirect/${n}`] = {
+    status: n % 2 === 0 ? 301 : 307,
+    headers: { location: `/redirect/${n - 1}` },
+  };
+}
 const requests: string[] = [];
 const userAgents: (string | undefined)[] = [];
 let server: Server;
@@ -91,8 +124,19 @@ afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
+// The fixture server is on loopback, which the real policy refuses.
+const allowLoopback: DestinationPolicy = {
+  ...publicOnly,
+  allows: (address) => isPublicAddress(address) || address === "127.0.0.1",
+};
+
 function deps(tx: TestTransaction, impit = fakeImpit(), now = new Date()) {
-  return { db: tx, strategies: [httpStrategy, impit], now: () => now };
+  return {
+    db: tx,
+    strategies: [httpStrategy, impit],
+    destination: allowLoopback,
+    now: () => now,
+  };
 }
 
 describe("normaliseUrl", () => {
@@ -217,6 +261,7 @@ describe("fetchPage strategies", () => {
     const err = await fetchPage(`${base}/challenge-200`, {
       db: tx,
       strategies: [httpStrategy, impit],
+      destination: allowLoopback,
     }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(FetchFailedError);
@@ -242,6 +287,7 @@ describe("fetchPage strategies", () => {
     const err = await fetchPage(`${base}/challenge`, {
       db: tx,
       strategies: [httpStrategy, impit],
+      destination: allowLoopback,
     }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(FetchFailedError);
@@ -315,6 +361,12 @@ describe("fetchPage strategies", () => {
 });
 
 describe("fetchPage bodies", () => {
+  dbTest.for(["/gzip", "/br"])("decodes %s", async (path, { tx }) => {
+    const page = await fetchPage(`${base}${path}`, deps(tx));
+
+    expect(page.html).toBe(FIXTURE_BODY);
+  });
+
   dbTest("accepts application/xhtml+xml", async ({ tx }) => {
     const page = await fetchPage(`${base}/xhtml`, deps(tx));
 
@@ -435,4 +487,188 @@ describe("fetchPage cache", () => {
     expect(page.cached).toBe(false);
     expect(requests).toEqual(["/ok"]);
   });
+});
+
+describe("fetchPage destinations", () => {
+  // allowLoopback with a fake DNS that answers every name with `address`.
+  function resolvingTo(address: Address) {
+    const asked: string[] = [];
+    const policy: DestinationPolicy = {
+      ...allowLoopback,
+      lookup(hostname) {
+        asked.push(hostname);
+        return Promise.resolve([address]);
+      },
+    };
+    return { policy, asked };
+  }
+
+  // Stands in for impit: answers the first request with `first`, any later
+  // one with a page.
+  function redirectingImpit(first: {
+    status: number;
+    location: string;
+  }): FetchStrategy & { calls: string[] } {
+    const calls: string[] = [];
+    return {
+      name: "impit",
+      calls,
+      fetch(url) {
+        calls.push(url);
+        return Promise.resolve(
+          calls.length === 1
+            ? {
+                status: first.status,
+                finalUrl: url,
+                headers: new Headers({ location: first.location }),
+                body: "",
+              }
+            : {
+                status: 200,
+                finalUrl: url,
+                headers: new Headers({ "content-type": "text/html" }),
+                body: "<html>from impit</html>",
+              },
+        );
+      },
+    };
+  }
+
+  async function expectRefused(promise: Promise<unknown>) {
+    const err = await promise.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InvalidUrlError);
+    expect((err as Error).message).toBe("destination not allowed");
+  }
+
+  dbTest("refuses loopback by default, before any request", async ({ tx }) => {
+    const impit = fakeImpit();
+    requests.length = 0;
+
+    await expectRefused(
+      fetchPage(`${base}/ok`, { db: tx, strategies: [httpStrategy, impit] }),
+    );
+    expect(requests).toEqual([]);
+    expect(impit.calls).toEqual([]);
+    expect(await tx.select().from(pageFetch)).toEqual([]);
+  });
+
+  dbTest(
+    "refuses a name that resolves to a private address",
+    async ({ tx }) => {
+      const { policy, asked } = resolvingTo({ address: "10.0.0.5", family: 4 });
+      const impit = fakeImpit();
+
+      await expectRefused(
+        fetchPage("https://recipes.example/pie", {
+          db: tx,
+          strategies: [httpStrategy, impit],
+          destination: policy,
+        }),
+      );
+      expect(asked).toEqual(["recipes.example"]);
+      expect(impit.calls).toEqual([]);
+    },
+  );
+
+  dbTest(
+    "connects the http strategy to the checked address",
+    async ({ tx }) => {
+      // recipes.test resolves nowhere real: the request can only reach the
+      // fixture server through the address the policy returned.
+      const { policy, asked } = resolvingTo({
+        address: "127.0.0.1",
+        family: 4,
+      });
+      const port = (server.address() as AddressInfo).port;
+      requests.length = 0;
+
+      const page = await fetchPage(`http://recipes.test:${port}/ok`, {
+        db: tx,
+        strategies: [httpStrategy, fakeImpit()],
+        destination: policy,
+      });
+
+      expect(page).toMatchObject({ strategy: "http", html: FIXTURE_BODY });
+      expect(asked).toEqual(["recipes.test"]);
+      expect(requests).toEqual(["/ok"]);
+    },
+  );
+
+  dbTest.for(["/to-private", "/to-localhost", "/to-ftp"])(
+    "serves the first hop of %s, then refuses the redirect",
+    async (path, { tx }) => {
+      const impit = fakeImpit();
+      requests.length = 0;
+
+      await expectRefused(fetchPage(`${base}${path}`, deps(tx, impit)));
+      expect(requests).toEqual([path]);
+      expect(impit.calls).toEqual([]);
+      expect(await tx.select().from(pageFetch)).toEqual([]);
+    },
+  );
+
+  dbTest(
+    "refuses a redirect to a private address from impit",
+    async ({ tx }) => {
+      const impit = redirectingImpit({
+        status: 302,
+        location: "http://169.254.169.254/latest/meta-data/",
+      });
+
+      await expectRefused(fetchPage(`${base}/challenge`, deps(tx, impit)));
+      expect(impit.calls).toEqual([`${base}/challenge`]);
+      expect(await tx.select().from(pageFetch)).toEqual([]);
+    },
+  );
+
+  dbTest("follows an allowed redirect from impit", async ({ tx }) => {
+    const impit = redirectingImpit({ status: 301, location: "/moved" });
+
+    const page = await fetchPage(`${base}/challenge`, deps(tx, impit));
+
+    expect(impit.calls).toEqual([`${base}/challenge`, `${base}/moved`]);
+    expect(page).toMatchObject({
+      strategy: "impit",
+      finalUrl: `${base}/moved`,
+    });
+  });
+
+  dbTest(`follows ${MAX_REDIRECTS} redirects`, async ({ tx }) => {
+    requests.length = 0;
+
+    const page = await fetchPage(`${base}/redirect/${MAX_REDIRECTS}`, deps(tx));
+
+    expect(page).toMatchObject({
+      status: 200,
+      finalUrl: `${base}/ok`,
+      html: FIXTURE_BODY,
+    });
+    expect(requests).toHaveLength(MAX_REDIRECTS + 1);
+    const rows = await tx.select().from(pageFetch);
+    expect(rows.map((r) => [r.normalisedUrl, r.finalUrl])).toEqual([
+      [`${base}/redirect/${MAX_REDIRECTS}`, `${base}/ok`],
+    ]);
+  });
+
+  dbTest(
+    `fails unreachable after more than ${MAX_REDIRECTS} redirects`,
+    async ({ tx }) => {
+      const impit = fakeImpit();
+      requests.length = 0;
+
+      const err = await fetchPage(
+        `${base}/redirect/${MAX_REDIRECTS + 1}`,
+        deps(tx, impit),
+      ).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(FetchFailedError);
+      expect(err).toMatchObject({ reason: "unreachable", status: null });
+      expect((err as Error).message).toContain(
+        `http: more than ${MAX_REDIRECTS} redirects`,
+      );
+      // The sixth redirect is never followed.
+      expect(requests).toHaveLength(MAX_REDIRECTS + 1);
+      expect(impit.calls).toEqual([]);
+    },
+  );
 });

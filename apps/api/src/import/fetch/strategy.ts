@@ -1,10 +1,16 @@
+import type { Address } from "./destination.js";
+
 // One way of getting a page. fetchPage tries its strategies in order and
 // decides from each response whether to stop or fall back to the next, so a
 // strategy only fetches: it does not judge the response. Network failures
-// (refused, DNS, timeout) reject.
+// (refused, timeout) reject.
+//
+// One request, without following redirects: fetchPage follows them, checking
+// each destination first. `addresses` are what fetchPage checked url's host
+// resolves to; a strategy that can should connect only to those.
 export interface FetchStrategy {
   name: StrategyName;
-  fetch(url: string): Promise<FetchResponse>;
+  fetch(url: string, addresses: readonly Address[]): Promise<FetchResponse>;
 }
 
 // Headless Chromium is parked (NATG-239); it would add a name here.
@@ -12,7 +18,7 @@ export type StrategyName = "http" | "impit";
 
 export interface FetchResponse {
   status: number;
-  // After redirects.
+  // The URL requested; after redirects once fetchPage has followed them.
   finalUrl: string;
   headers: Headers;
   // Empty when tooLarge is set.

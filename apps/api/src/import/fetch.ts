@@ -5,6 +5,11 @@ import { describeError } from "../db/errors.js";
 import { pageFetch } from "../db/schema.js";
 import type * as schema from "../db/schema.js";
 import { cloudflareBlock } from "./fetch/cloudflare.js";
+import {
+  publicOnly,
+  resolveDestination,
+  type DestinationPolicy,
+} from "./fetch/destination.js";
 import { httpStrategy } from "./fetch/http.js";
 import { impitStrategy } from "./fetch/impit.js";
 import {
@@ -15,6 +20,7 @@ import {
 } from "./fetch/strategy.js";
 
 export type { FetchStrategy, StrategyName } from "./fetch/strategy.js";
+export type { DestinationPolicy } from "./fetch/destination.js";
 
 // Plain HTTP first; impit only when Cloudflare stops it (NATG-239).
 export const defaultStrategies: readonly FetchStrategy[] = [
@@ -23,6 +29,9 @@ export const defaultStrategies: readonly FetchStrategy[] = [
 ];
 
 export const CACHE_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
+// Redirects followed per strategy before the fetch fails as unreachable.
+export const MAX_REDIRECTS = 5;
 
 export interface FetchedPage {
   html: string;
@@ -37,6 +46,9 @@ export interface FetchPageDeps {
   // The api's database or a transaction on it.
   db: PgDatabase<NodePgQueryResultHKT, typeof schema>;
   strategies: readonly FetchStrategy[];
+  // Where a fetch may connect, on the first request and every redirect;
+  // publicOnly when not given.
+  destination?: DestinationPolicy;
   now?: () => Date;
 }
 
@@ -143,8 +155,9 @@ function decodeQueryKey(key: string): string {
 
 // The page at `rawUrl`, from the page_fetch cache if it was fetched in the
 // last 24 hours, otherwise from the first strategy that gets it. Rejects with
-// InvalidUrlError, NotPermittedError or FetchFailedError. Database errors are
-// not caught.
+// InvalidUrlError (including a destination deps.destination refuses, on the
+// first request or any redirect), NotPermittedError or FetchFailedError.
+// Database errors are not caught.
 export async function fetchPage(
   rawUrl: string,
   deps: FetchPageDeps,
@@ -170,7 +183,11 @@ export async function fetchPage(
     }
   }
 
-  const res = await fetchWithStrategies(url, deps.strategies);
+  const res = await fetchWithStrategies(
+    url,
+    deps.strategies,
+    deps.destination ?? publicOnly,
+  );
   const row = {
     normalisedUrl: url,
     finalUrl: res.finalUrl,
@@ -198,6 +215,7 @@ export async function fetchPage(
 async function fetchWithStrategies(
   url: string,
   strategies: readonly FetchStrategy[],
+  destination: DestinationPolicy,
 ): Promise<FetchResponse & { strategy: StrategyName }> {
   const attempts: string[] = [];
   let failure: FetchFailedError | undefined;
@@ -205,8 +223,9 @@ async function fetchWithStrategies(
   for (const strategy of strategies) {
     let res: FetchResponse;
     try {
-      res = await strategy.fetch(url);
+      res = await fetchFollowingRedirects(strategy, url, destination);
     } catch (err) {
+      if (err instanceof InvalidUrlError) throw err;
       // No response at all; nothing suggests another strategy would differ.
       attempts.push(`${strategy.name}: ${describeError(err)}`);
       throw new FetchFailedError(url, "unreachable", null, attempts, {
@@ -247,6 +266,43 @@ async function fetchWithStrategies(
 
   throw failure ?? new FetchFailedError(url, "unreachable", null, attempts);
 }
+
+// `strategy`'s response for `url` after following up to MAX_REDIRECTS
+// redirects, each to a destination `policy` allows. Rejects with
+// InvalidUrlError for a refused destination, so no request is made to it;
+// any other rejection (DNS, refused, timeout, too many redirects) means no
+// usable response.
+async function fetchFollowingRedirects(
+  strategy: FetchStrategy,
+  url: string,
+  policy: DestinationPolicy,
+): Promise<FetchResponse> {
+  let current = new URL(url);
+  for (let redirects = 0; ; redirects++) {
+    const addresses = await resolveDestination(current, policy);
+    if (!addresses) {
+      // Not echoed: the message goes back to the caller, and which internal
+      // host a redirect pointed at is not theirs to learn.
+      throw new InvalidUrlError("destination not allowed");
+    }
+    const res = await strategy.fetch(current.href, addresses);
+    const location = REDIRECT_STATUSES.has(res.status)
+      ? res.headers.get("location")
+      : null;
+    if (location === null) return res;
+    if (redirects === MAX_REDIRECTS) {
+      throw new Error(`more than ${MAX_REDIRECTS} redirects`);
+    }
+    try {
+      current = new URL(location, current);
+    } catch {
+      throw new Error(`redirect to an invalid URL from ${current.href}`);
+    }
+  }
+}
+
+// A 3xx without a Location is a response like any other non-2xx.
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 const HTML_TYPES = new Set(["text/html", "application/xhtml+xml"]);
 
