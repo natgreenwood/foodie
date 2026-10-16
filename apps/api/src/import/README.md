@@ -18,7 +18,9 @@ stores nothing as a recipe.
    ends the attempt:
    - 2xx with a `content-type` of `text/html` or `application/xhtml+xml` and
      a body within the cap: NUL bytes are removed (Postgres `text` cannot
-     hold them), then it is stored in `page_fetch` and returned.
+     hold them), then it is stored in `page_fetch` and returned. The same
+     transaction deletes rows 24 hours old or more, then the oldest rows
+     beyond `MAX_CACHED_PAGES` (500), never the one just written.
    - 2xx with any other or no `content-type` (a PDF, an image):
      `FetchFailedError` with `reason: "not_html"`.
    - 2xx over the cap: `FetchFailedError` with `reason: "too_large"`.

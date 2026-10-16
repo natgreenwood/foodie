@@ -10,6 +10,7 @@ import {
   FetchFailedError,
   fetchPage,
   InvalidUrlError,
+  MAX_CACHED_PAGES,
   MAX_REDIRECTS,
   normaliseUrl,
   NotPermittedError,
@@ -520,6 +521,95 @@ describe("fetchPage cache", () => {
 
     expect(page.cached).toBe(false);
     expect(requests).toEqual(["/ok"]);
+  });
+});
+
+describe("fetchPage cache bounds", () => {
+  const now = new Date("2026-10-16T12:00:00Z");
+
+  // A cached row for `url`, fetched `ageMs` before now.
+  function cached(url: string, ageMs: number) {
+    return {
+      normalisedUrl: url,
+      finalUrl: url,
+      status: 200,
+      strategy: "http",
+      html: FIXTURE_BODY,
+      fetchedAt: new Date(now.getTime() - ageMs),
+    };
+  }
+
+  async function cachedUrls(tx: TestTransaction): Promise<string[]> {
+    const rows = await tx.select().from(pageFetch);
+    return rows.map((r) => r.normalisedUrl).sort();
+  }
+
+  it("caps the table at 500 rows", () => {
+    expect(MAX_CACHED_PAGES).toBe(500);
+  });
+
+  dbTest("deletes rows older than 24 hours on a write", async ({ tx }) => {
+    await tx
+      .insert(pageFetch)
+      .values([
+        cached("https://recipes.test/stale", CACHE_LIFETIME_MS + 1),
+        cached("https://recipes.test/fresh", CACHE_LIFETIME_MS - 1),
+      ]);
+
+    await fetchPage(`${base}/ok`, deps(tx, fakeImpit(), now));
+
+    expect(await cachedUrls(tx)).toEqual(
+      [`${base}/ok`, "https://recipes.test/fresh"].sort(),
+    );
+  });
+
+  dbTest(
+    "evicts the oldest row when a write passes the cap",
+    async ({ tx }) => {
+      await tx
+        .insert(pageFetch)
+        .values([
+          cached("https://recipes.test/a", 3000),
+          cached("https://recipes.test/b", 2000),
+          cached("https://recipes.test/c", 1000),
+        ]);
+      expect(await cachedUrls(tx)).toHaveLength(3);
+
+      await fetchPage(`${base}/ok`, {
+        ...deps(tx, fakeImpit(), now),
+        maxCachedPages: 3,
+      });
+
+      expect(await cachedUrls(tx)).toEqual(
+        [
+          `${base}/ok`,
+          "https://recipes.test/b",
+          "https://recipes.test/c",
+        ].sort(),
+      );
+    },
+  );
+
+  dbTest("does not count a refresh as a new row", async ({ tx }) => {
+    await tx
+      .insert(pageFetch)
+      .values([
+        cached("https://recipes.test/a", 2000),
+        cached("https://recipes.test/b", 1000),
+      ]);
+    const capped = (at: Date) => ({
+      ...deps(tx, fakeImpit(), at),
+      maxCachedPages: 3,
+    });
+    await fetchPage(`${base}/ok`, capped(now));
+
+    await fetchPage(`${base}/ok`, capped(new Date(now.getTime() + 1000)), {
+      refresh: true,
+    });
+
+    expect(await cachedUrls(tx)).toEqual(
+      [`${base}/ok`, "https://recipes.test/a", "https://recipes.test/b"].sort(),
+    );
   });
 });
 

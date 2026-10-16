@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, lte, notInArray, sql } from "drizzle-orm";
 import type { NodePgQueryResultHKT } from "drizzle-orm/node-postgres";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import { describeError } from "../db/errors.js";
@@ -33,6 +33,10 @@ export const defaultStrategies: readonly FetchStrategy[] = [
 
 export const CACHE_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
+// Most page_fetch rows kept; every write evicts the oldest beyond it. At
+// MAX_BODY_BYTES each that is about 2.5 GiB at worst (SEC-3).
+export const MAX_CACHED_PAGES = 500;
+
 // Redirects followed per strategy; the next one fails too_many_redirects.
 export const MAX_REDIRECTS = 5;
 
@@ -53,6 +57,8 @@ export interface FetchPageDeps {
   // Checked before every request. Defaults to public addresses only; tests
   // that fetch from a loopback fixture pass one that allows it.
   destinationPolicy?: DestinationPolicy;
+  // Defaults to MAX_CACHED_PAGES; tests pass a small one.
+  maxCachedPages?: number;
 }
 
 export interface FetchPageOptions {
@@ -205,11 +211,35 @@ export async function fetchPage(
     html: res.body.replaceAll("\u0000", ""),
     fetchedAt: now(),
   };
-  // An upsert, so a retry or a refresh overwrites rather than conflicts.
-  await deps.db
-    .insert(pageFetch)
-    .values(row)
-    .onConflictDoUpdate({ target: pageFetch.normalisedUrl, set: row });
+  await deps.db.transaction(async (tx) => {
+    // Expired rows would never be served again.
+    await tx
+      .delete(pageFetch)
+      .where(
+        lte(
+          pageFetch.fetchedAt,
+          new Date(row.fetchedAt.getTime() - CACHE_LIFETIME_MS),
+        ),
+      );
+    // An upsert, so a retry or a refresh overwrites rather than conflicts.
+    await tx
+      .insert(pageFetch)
+      .values(row)
+      .onConflictDoUpdate({ target: pageFetch.normalisedUrl, set: row });
+    // Keeps this row and the newest others up to the cap. Concurrent writes
+    // can each miss the other's row, so the table can briefly pass the cap
+    // by the number of writes in flight; the next write trims it.
+    const kept = tx
+      .select({ normalisedUrl: pageFetch.normalisedUrl })
+      .from(pageFetch)
+      .orderBy(
+        sql`${pageFetch.normalisedUrl} = ${url} desc`,
+        sql`${pageFetch.fetchedAt} desc`,
+        pageFetch.normalisedUrl,
+      )
+      .limit(deps.maxCachedPages ?? MAX_CACHED_PAGES);
+    await tx.delete(pageFetch).where(notInArray(pageFetch.normalisedUrl, kept));
+  });
   return {
     html: row.html,
     finalUrl: row.finalUrl,
