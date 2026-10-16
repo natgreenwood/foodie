@@ -33,7 +33,8 @@ function fakeImpit(status = 200): FetchStrategy & { calls: string[] } {
   };
 }
 
-// Each path answers with its own status and headers; requests are counted.
+// Each path answers with its own status and headers and the same static body:
+// request input is recorded below, never echoed back.
 const routes: Record<string, { status: number; headers?: object }> = {
   "/ok": { status: 200 },
   "/challenge": { status: 403, headers: { "cf-mitigated": "challenge" } },
@@ -43,19 +44,22 @@ const routes: Record<string, { status: number; headers?: object }> = {
   "/missing": { status: 404 },
   "/licensed": { status: 402 },
 };
+const FIXTURE_BODY = "<html>fixture</html>";
 const requests: string[] = [];
+const userAgents: (string | undefined)[] = [];
 let server: Server;
 let base: string;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
     requests.push(req.url ?? "");
+    userAgents.push(req.headers["user-agent"]);
     const route = routes[req.url ?? ""] ?? { status: 500 };
     res.writeHead(route.status, {
       "content-type": "text/html",
       ...route.headers,
     });
-    res.end(`<html>${req.url} ${req.headers["user-agent"]}</html>`);
+    res.end(FIXTURE_BODY);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -127,6 +131,7 @@ describe("cloudflareBlock", () => {
 describe("fetchPage strategies", () => {
   dbTest("returns a 200 from the http strategy", async ({ tx }) => {
     const impit = fakeImpit();
+    userAgents.length = 0;
 
     const page = await fetchPage(`${base}/ok`, deps(tx, impit));
 
@@ -136,7 +141,8 @@ describe("fetchPage strategies", () => {
       cached: false,
     });
     expect(page.finalUrl).toBe(`${base}/ok`);
-    expect(page.html).toContain("Chrome/");
+    expect(page.html).toBe(FIXTURE_BODY);
+    expect(userAgents).toEqual([expect.stringContaining("Chrome/")]);
     expect(impit.calls).toEqual([]);
   });
 
@@ -260,7 +266,7 @@ describe("fetchPage cache", () => {
       cached: true,
       fetchedAt: now,
     });
-    expect(page.html).toContain("/ok");
+    expect(page.html).toBe(FIXTURE_BODY);
     expect(requests).toEqual([]);
   });
 
