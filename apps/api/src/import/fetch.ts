@@ -7,10 +7,11 @@ import type * as schema from "../db/schema.js";
 import { cloudflareBlock } from "./fetch/cloudflare.js";
 import { httpStrategy } from "./fetch/http.js";
 import { impitStrategy } from "./fetch/impit.js";
-import type {
-  FetchResponse,
-  FetchStrategy,
-  StrategyName,
+import {
+  MAX_BODY_BYTES,
+  type FetchResponse,
+  type FetchStrategy,
+  type StrategyName,
 } from "./fetch/strategy.js";
 
 export type { FetchStrategy, StrategyName } from "./fetch/strategy.js";
@@ -66,8 +67,15 @@ export class NotPermittedError extends Error {
 // - challenged: Cloudflare still served a challenge to the last strategy.
 // - blocked: a 403, or a 503 from a Cloudflare edge.
 // - http_error: any other non-2xx status, such as 404 or 500.
+// - not_html: a 2xx whose content-type is not HTML, such as a PDF or image.
+// - too_large: a 2xx whose body passed MAX_BODY_BYTES.
 export type FetchFailureReason =
-  "unreachable" | "challenged" | "blocked" | "http_error";
+  | "unreachable"
+  | "challenged"
+  | "blocked"
+  | "http_error"
+  | "not_html"
+  | "too_large";
 
 export class FetchFailedError extends Error {
   override name = "FetchFailedError";
@@ -168,7 +176,8 @@ export async function fetchPage(
     finalUrl: res.finalUrl,
     status: res.status,
     strategy: res.strategy,
-    html: res.body,
+    // Postgres text cannot hold NUL, and no HTML needs one.
+    html: res.body.replaceAll("\u0000", ""),
     fetchedAt: now(),
   };
   // An upsert, so a retry or a refresh overwrites rather than conflicts.
@@ -205,12 +214,28 @@ async function fetchWithStrategies(
       });
     }
 
+    // Before the 2xx check: Cloudflare can serve a challenge with a 200
+    // (NATG-258), and that page must not be returned or cached.
+    const block = cloudflareBlock(res);
     if (res.status === 402) throw new NotPermittedError(url, strategy.name);
-    if (res.status >= 200 && res.status < 300) {
+    if (!block && res.status >= 200 && res.status < 300) {
+      // Final: another strategy would get the same file.
+      const contentType = mediaType(res.headers);
+      if (!HTML_TYPES.has(contentType)) {
+        attempts.push(
+          `${strategy.name}: ${res.status} not_html (${contentType || "no content-type"})`,
+        );
+        throw new FetchFailedError(url, "not_html", res.status, attempts);
+      }
+      if (res.tooLarge) {
+        attempts.push(
+          `${strategy.name}: ${res.status} too_large (over ${MAX_BODY_BYTES} bytes)`,
+        );
+        throw new FetchFailedError(url, "too_large", res.status, attempts);
+      }
       return { ...res, strategy: strategy.name };
     }
 
-    const block = cloudflareBlock(res);
     attempts.push(`${strategy.name}: ${res.status}${block ? ` ${block}` : ""}`);
     const reason: FetchFailureReason =
       block ?? (res.status === 403 ? "blocked" : "http_error");
@@ -221,4 +246,12 @@ async function fetchWithStrategies(
   }
 
   throw failure ?? new FetchFailedError(url, "unreachable", null, attempts);
+}
+
+const HTML_TYPES = new Set(["text/html", "application/xhtml+xml"]);
+
+// "text/html; charset=utf-8" -> "text/html"; "" when there is no header.
+function mediaType(headers: Headers): string {
+  const [type = ""] = (headers.get("content-type") ?? "").split(";", 1);
+  return type.trim().toLowerCase();
 }
