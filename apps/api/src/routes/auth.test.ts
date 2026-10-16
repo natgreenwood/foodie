@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
 import { describe, expect, onTestFinished } from "vitest";
 import { buildApp } from "../app.js";
+import { ensureAdmin } from "../auth/accounts.js";
 import { user } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE } from "./auth.js";
@@ -280,6 +281,95 @@ describe("POST /auth/login", () => {
       expect(login.statusCode).toBe(401);
       expect(login.json()).toMatchObject({ error: "invalid_credentials" });
       expect((await me(token)).statusCode).toBe(401);
+    },
+  );
+});
+
+describe("POST /auth/login with an over-length password", () => {
+  dbTest(
+    "answers 400 and writes the failed sign-in line with only email and ip",
+    async ({ tx }) => {
+      const { post, logLines } = start(tx);
+      const password = "p".repeat(1025);
+
+      const res = await post("/auth/login", { email: ` ${EMAIL} `, password });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({
+        error: "invalid_request",
+        message: "password must be at most 1024 characters",
+      });
+      const failures = logLines.filter((l) => l.msg === "auth: sign-in failed");
+      expect(failures).toHaveLength(1);
+      // pino's own fields, plus the two the decision allows.
+      const { level, time, pid, hostname, reqId, msg, ...rest } = failures[0]!;
+      expect({ level, msg }).toEqual({
+        level: 40,
+        msg: "auth: sign-in failed",
+      });
+      expect([time, pid, hostname, reqId]).not.toContain(undefined);
+      expect(rest).toEqual({ email: EMAIL, ip: "127.0.0.1" });
+      expect(JSON.stringify(logLines)).not.toContain(password);
+    },
+  );
+});
+
+describe("admin bootstrap of a self-registered account", () => {
+  const ADMIN_PASSWORD = "the operator's one";
+
+  dbTest(
+    "takes the account over: old password and cookie refused, ADMIN_PASSWORD works",
+    async ({ tx }) => {
+      const { post, me } = start(tx);
+      const token = tokenFrom(
+        await post("/auth/register", { email: EMAIL, password: PASSWORD }),
+      );
+
+      expect(
+        await ensureAdmin(tx, { email: EMAIL, password: ADMIN_PASSWORD }),
+      ).toBe("promoted");
+
+      expect((await me(token)).statusCode).toBe(401);
+      expect(
+        (await post("/auth/login", { email: EMAIL, password: PASSWORD }))
+          .statusCode,
+      ).toBe(401);
+      const login = await post("/auth/login", {
+        email: EMAIL,
+        password: ADMIN_PASSWORD,
+      });
+      expect(login.statusCode).toBe(200);
+      expect(login.json()).toMatchObject({ isAdmin: true });
+    },
+  );
+
+  dbTest(
+    "changes nothing on a second start with a different ADMIN_PASSWORD",
+    async ({ tx }) => {
+      const { post, me } = start(tx);
+      await post("/auth/register", { email: EMAIL, password: PASSWORD });
+      await ensureAdmin(tx, { email: EMAIL, password: ADMIN_PASSWORD });
+      const token = tokenFrom(
+        await post("/auth/login", { email: EMAIL, password: ADMIN_PASSWORD }),
+      );
+
+      expect(
+        await ensureAdmin(tx, { email: EMAIL, password: "a different one" }),
+      ).toBe("unchanged");
+
+      expect((await me(token)).statusCode).toBe(200);
+      expect(
+        (await post("/auth/login", { email: EMAIL, password: ADMIN_PASSWORD }))
+          .statusCode,
+      ).toBe(200);
+      expect(
+        (
+          await post("/auth/login", {
+            email: EMAIL,
+            password: "a different one",
+          })
+        ).statusCode,
+      ).toBe(401);
     },
   );
 });

@@ -167,7 +167,13 @@ export const authRoutes: FastifyPluginCallback<AuthDeps> = (
         "email and password must be strings",
       );
     }
+    const email = body.email.trim();
+    // The one line a failed sign-in writes: who was tried, from where.
+    const logFailure = () =>
+      request.log.warn({ email, ip: request.ip }, "auth: sign-in failed");
+    // Refused before hashing, but still a failed sign-in.
     if (body.password.length > PASSWORD_MAX_LENGTH) {
+      logFailure();
       return sendError(
         reply,
         400,
@@ -175,11 +181,9 @@ export const authRoutes: FastifyPluginCallback<AuthDeps> = (
         `password must be at most ${PASSWORD_MAX_LENGTH} characters`,
       );
     }
-    const email = body.email.trim();
     const found = await checkCredentials(db, email, body.password);
     if (!found) {
-      // The one line a failed sign-in writes: who was tried, from where.
-      request.log.warn({ email, ip: request.ip }, "auth: sign-in failed");
+      logFailure();
       return sendError(
         reply,
         401,
