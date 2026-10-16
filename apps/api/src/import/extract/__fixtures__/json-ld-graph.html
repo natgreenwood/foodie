@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://example.com/#org",
+            "name": "Example Kitchen"
+          },
+          {
+            "@type": "WebPage",
+            "@id": "https://example.com/pancakes",
+            "name": "Pancakes"
+          },
+          {
+            "@type": ["Recipe", "NewsArticle"],
+            "name": "Pancakes",
+            "recipeYield": "Serves 6",
+            "prepTime": "PT10M",
+            "cookTime": "PT20M",
+            "recipeIngredient": ["1 cup milk", "1 egg"],
+            "recipeInstructions": "Whisk everything together.\nCook in a hot pan.\n\nServe warm."
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body></body>
+</html>
