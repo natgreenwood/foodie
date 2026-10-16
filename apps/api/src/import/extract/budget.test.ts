@@ -5,7 +5,7 @@ import {
   MAX_LINE_CHARS,
   type ExtractContext,
 } from "./extract.js";
-import { measurements, unitKeys } from "./__fixtures__/units.js";
+import { measurements } from "./__fixtures__/units.js";
 
 // SEC-2 on NATG-245: pages built to make extraction slow. Each must fail
 // fast, as no recipe, rather than hold the event loop. These took 50-230 ms
@@ -17,7 +17,6 @@ const BOUND_MS = 2_000;
 const ctx: ExtractContext = {
   sourceHost: "example.com",
   measurements,
-  unitKeys,
 };
 
 function timed(html: string): { ms: number; error: unknown } {

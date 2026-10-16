@@ -3,11 +3,7 @@ import { Writable } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../app.js";
-import {
-  measurements,
-  UNIT,
-  unitKeys,
-} from "../import/extract/__fixtures__/units.js";
+import { measurements, UNIT } from "../import/extract/__fixtures__/units.js";
 import {
   FetchFailedError,
   InvalidUrlError,
@@ -58,8 +54,7 @@ function start(
     {
       pingDatabase: () => Promise.resolve(),
       fetchPage,
-      loadUnits:
-        loadUnits ?? (() => Promise.resolve({ measurements, unitKeys })),
+      loadUnits: loadUnits ?? (() => Promise.resolve({ measurements })),
     },
     { logger: { level: "info", stream } },
   );

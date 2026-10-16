@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { extractRecipe, type ExtractContext } from "./extract.js";
-import { measurements, UNIT, unitKeys } from "./__fixtures__/units.js";
+import { measurements, UNIT } from "./__fixtures__/units.js";
 
 function fixture(name: string): string {
   return readFileSync(
@@ -13,7 +13,6 @@ function fixture(name: string): string {
 const ctx: ExtractContext = {
   sourceHost: "www.example.com.au",
   measurements,
-  unitKeys,
 };
 
 function extract(html: string, context = ctx) {

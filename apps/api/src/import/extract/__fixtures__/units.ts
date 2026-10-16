@@ -2,7 +2,8 @@ import { buildMeasurementLookup } from "../../measurement-lookup.js";
 
 // A few of the seeded units (drizzle/0001_seed_measurement_units.sql) with
 // their en-GB names (and en-US for the cups, which "cup" names both of),
-// keyed as the seed keys them, and made-up ids.
+// keyed as the seed keys them, and made-up ids. The handful has a null key,
+// as a unit the seed did not ship would.
 export const UNIT = {
   gram: 1,
   tablespoon: 8,
@@ -19,6 +20,7 @@ export const measurements = buildMeasurementLookup([
     factorToBase: "1",
     name: "gram",
     abbreviation: "g",
+    key: "gram",
   },
   {
     measurementId: UNIT.tablespoon,
@@ -26,6 +28,7 @@ export const measurements = buildMeasurementLookup([
     factorToBase: "15",
     name: "tablespoon",
     abbreviation: "tbsp",
+    key: "tablespoon",
   },
   {
     measurementId: UNIT.cupUs,
@@ -33,6 +36,7 @@ export const measurements = buildMeasurementLookup([
     factorToBase: "236.5882365",
     name: "US cup",
     abbreviation: "US cup",
+    key: "cup_us",
   },
   {
     measurementId: UNIT.cupUs,
@@ -40,6 +44,7 @@ export const measurements = buildMeasurementLookup([
     factorToBase: "236.5882365",
     name: "cup",
     abbreviation: "cup",
+    key: "cup_us",
   },
   {
     measurementId: UNIT.cupMetric,
@@ -47,6 +52,7 @@ export const measurements = buildMeasurementLookup([
     factorToBase: "250",
     name: "cup",
     abbreviation: "cup",
+    key: "cup_metric",
   },
   {
     measurementId: UNIT.cupMetric,
@@ -54,6 +60,7 @@ export const measurements = buildMeasurementLookup([
     factorToBase: "250",
     name: "metric cup",
     abbreviation: "metric cup",
+    key: "cup_metric",
   },
   {
     measurementId: UNIT.clove,
@@ -61,6 +68,7 @@ export const measurements = buildMeasurementLookup([
     factorToBase: null,
     name: "clove",
     abbreviation: null,
+    key: "clove",
   },
   {
     measurementId: UNIT.handful,
@@ -68,14 +76,6 @@ export const measurements = buildMeasurementLookup([
     factorToBase: null,
     name: "handful",
     abbreviation: null,
+    key: null,
   },
-]);
-
-// The handful is left out, as a unit without a seed key would be.
-export const unitKeys: ReadonlyMap<number, string> = new Map([
-  [UNIT.gram, "gram"],
-  [UNIT.tablespoon, "tablespoon"],
-  [UNIT.cupUs, "cup_us"],
-  [UNIT.cupMetric, "cup_metric"],
-  [UNIT.clove, "clove"],
 ]);

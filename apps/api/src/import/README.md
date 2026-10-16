@@ -117,3 +117,20 @@ commit;
 the last row of `drizzle.__drizzle_migrations`. If later migrations have
 been applied, reverse those first. The cached pages are lost, which costs
 only a refetch.
+
+## Reversing the measurement key migration (manual)
+
+To undo `drizzle/0006_measurement_key.sql`, while it is still the latest
+migration applied, run against the database:
+
+```sql
+begin;
+alter table measurement drop column key;
+delete from drizzle.__drizzle_migrations where created_at = 1792184379834;
+commit;
+```
+
+Dropping the column drops its unique index with it. `1792184379834` is the
+`when` of `0006_measurement_key` in `drizzle/meta/_journal.json`. The
+measurement lookup selects the column, so deploy code from before the
+migration first or every import preview fails.
