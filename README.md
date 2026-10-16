@@ -109,10 +109,12 @@ To have an admin account, set both of these (in `.env` for compose):
 - `ADMIN_USER`: the admin's email address.
 - `ADMIN_PASSWORD`: their password, at least 8 characters.
 
-On every start the api makes sure that account exists and is an admin. If it
-already exists, its password is left alone, so changing `ADMIN_PASSWORD`
-later does not change the password. Setting only one of the two stops the
-api from starting.
+On every start the api makes sure that account exists and is an admin. An
+account that is already an admin is left alone, so changing `ADMIN_PASSWORD`
+later does not change its password. If someone registered that email before
+it was made admin, the api takes the account over: it sets the password to
+`ADMIN_PASSWORD` and signs out all its sessions. Setting only one of the two
+stops the api from starting.
 
 ## Secrets
 

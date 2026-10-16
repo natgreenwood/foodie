@@ -152,9 +152,14 @@ export async function deleteSession(db: Db, token: string): Promise<void> {
 export type AdminBootstrapOutcome = "created" | "promoted" | "unchanged";
 
 // Makes sure the account configured by ADMIN_USER exists and is an admin.
-// An existing account keeps its password, so a password changed after the
-// first start is not reset by the next one; a disabled account stays
-// disabled. Safe to run on every start, and from two api instances at once.
+// An account that is already an admin is never touched, so a restart is a
+// no-op and a password changed since the first start is kept. An existing
+// account that is not yet an admin is promoted: there is no email
+// verification, so whoever registered the address may not be the operator.
+// Promotion therefore also sets the password to ADMIN_PASSWORD and ends
+// every session of that account, in one transaction so a crash cannot leave
+// the old password or sessions in place. A disabled account stays disabled.
+// Safe to run on every start, and from two api instances at once.
 export async function ensureAdmin(
   db: Db,
   admin: { email: string; password: string },
@@ -164,23 +169,25 @@ export async function ensureAdmin(
     .from(user)
     .where(byEmail(admin.email));
   if (existing?.isAdmin) return "unchanged";
+  const passwordHash = await hashPassword(admin.password);
   if (!existing) {
     const [created] = await db
       .insert(user)
-      .values({
-        email: admin.email,
-        passwordHash: await hashPassword(admin.password),
-        isAdmin: true,
-      })
+      .values({ email: admin.email, passwordHash, isAdmin: true })
       .onConflictDoNothing()
       .returning({ id: user.id });
     if (created) return "created";
   }
-  // Exists without the role, or another instance created it just now.
-  const promoted = await db
-    .update(user)
-    .set({ isAdmin: true, updatedAt: sql`now()` })
-    .where(and(byEmail(admin.email), eq(user.isAdmin, false)))
-    .returning({ id: user.id });
-  return promoted.length > 0 ? "promoted" : "unchanged";
+  // Exists without the role, or another instance or a registration created
+  // it just now. Matches nothing if that row is already an admin.
+  return db.transaction(async (t) => {
+    const [promoted] = await t
+      .update(user)
+      .set({ isAdmin: true, passwordHash, updatedAt: sql`now()` })
+      .where(and(byEmail(admin.email), eq(user.isAdmin, false)))
+      .returning({ id: user.id });
+    if (!promoted) return "unchanged";
+    await t.delete(session).where(eq(session.userId, promoted.id));
+    return "promoted";
+  });
 }

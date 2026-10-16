@@ -138,21 +138,50 @@ describe("ensureAdmin", () => {
   );
 
   dbTest(
-    "promotes an existing account and keeps its password",
+    "promotes an existing account, replacing its password and ending its sessions",
     async ({ tx }) => {
-      await createUser(tx, {
+      const existing = await createUser(tx, {
         email: "Admin@Example.com",
         password: "their own one",
       });
+      const { token } = await createSession(tx, existing!.id);
 
       expect(await ensureAdmin(tx, admin)).toBe("promoted");
 
       expect(
         await checkCredentials(tx, admin.email, "their own one"),
-      ).toMatchObject({ isAdmin: true });
+      ).toBeNull();
       expect(
         await checkCredentials(tx, admin.email, admin.password),
+      ).toMatchObject({ id: existing!.id, isAdmin: true });
+      expect(await sessionUser(tx, token)).toBeNull();
+      expect(
+        await tx.select().from(session).where(eq(session.userId, existing!.id)),
+      ).toEqual([]);
+    },
+  );
+
+  dbTest(
+    "leaves an admin's password and sessions alone on a later start",
+    async ({ tx }) => {
+      await ensureAdmin(tx, admin);
+      const [row] = await tx
+        .select()
+        .from(user)
+        .where(eq(user.email, admin.email));
+      const { token } = await createSession(tx, row!.id);
+
+      expect(
+        await ensureAdmin(tx, { ...admin, password: "a different one" }),
+      ).toBe("unchanged");
+
+      expect(
+        await checkCredentials(tx, admin.email, admin.password),
+      ).toMatchObject({ isAdmin: true });
+      expect(
+        await checkCredentials(tx, admin.email, "a different one"),
       ).toBeNull();
+      expect(await sessionUser(tx, token)).toMatchObject({ id: row!.id });
     },
   );
 
@@ -166,7 +195,7 @@ describe("ensureAdmin", () => {
       expect(await ensureAdmin(tx, { email, password: "correct horse" })).toBe(
         "promoted",
       );
-      expect(await checkCredentials(tx, email, "their own one")).toMatchObject({
+      expect(await checkCredentials(tx, email, "correct horse")).toMatchObject({
         email,
         isAdmin: true,
       });
