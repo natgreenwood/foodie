@@ -27,4 +27,22 @@ describe("measurement", () => {
       expect(result.rows).toEqual([{ total: "700.0" }]);
     },
   );
+
+  // NaN sorts above every number in Postgres, so a bare `> 0` lets it in.
+  dbTest.for(["NaN", "Infinity"])(
+    "rejects a factor_to_base of %s",
+    async (factorToBase, { tx }) => {
+      await expect(
+        tx.transaction((sp) =>
+          sp.insert(measurement).values({ type: "mass", factorToBase }),
+        ),
+      ).rejects.toMatchObject({
+        cause: { constraint: "measurement_factor_to_base_positive" },
+      });
+    },
+  );
+
+  dbTest("holds a count unit with no factor_to_base", async ({ tx }) => {
+    await tx.insert(measurement).values({ type: "count" });
+  });
 });
