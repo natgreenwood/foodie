@@ -23,7 +23,7 @@ import {
 import { cloudflareBlock } from "./fetch/cloudflare.js";
 import { publicOnly, type Resolver } from "./fetch/destination.js";
 import { httpStrategy } from "./fetch/http.js";
-import { impitStrategy } from "./fetch/impit.js";
+import { createImpitStrategy, impitStrategy } from "./fetch/impit.js";
 import { MAX_BODY_BYTES } from "./fetch/strategy.js";
 
 // Stands in for impit: CI never reaches a real site.
@@ -197,7 +197,20 @@ beforeAll(async () => {
       res.end();
       return;
     }
-    if (req.url === "/cookie/check") {
+    // Through the fixture as a proxy (absolute-form URLs): a cookie for the
+    // whole domain, set on www. and wanted on the bare name.
+    if (req.url === "http://www.recipes.test/cookie/www") {
+      res.writeHead(302, {
+        "set-cookie": "consent=yes; Domain=recipes.test; Path=/",
+        location: "http://recipes.test/cookie/check",
+      });
+      res.end();
+      return;
+    }
+    if (
+      req.url === "/cookie/check" ||
+      req.url === "http://recipes.test/cookie/check"
+    ) {
       cookies.push(req.headers.cookie);
       const ok = req.headers.cookie === "consent=yes";
       res.writeHead(ok ? 200 : 403, { "content-type": "text/html" });
@@ -1073,6 +1086,58 @@ describe("fetchPage destinations", () => {
         finalUrl: `${base}/cookie/check`,
       });
       expect(cookies).toEqual(["consent=yes"]);
+    },
+  );
+
+  dbTest(
+    "the real impit strategy keeps no cookie for the next call",
+    async ({ tx }) => {
+      const deps = {
+        db: tx,
+        strategies: [impitStrategy],
+        destinationPolicy: allowFixtures,
+      };
+      await fetchPage(`${base}/cookie/same`, deps);
+      cookies.length = 0;
+
+      const err = await fetchPage(`${base}/cookie/check`, deps).catch(
+        (e: unknown) => e,
+      );
+
+      expect(err).toMatchObject({ reason: "blocked", status: 403 });
+      expect(cookies).toEqual([undefined]);
+    },
+  );
+
+  dbTest(
+    "the real impit strategy sends a www. domain cookie to the bare name",
+    async ({ tx }) => {
+      cookies.length = 0;
+      const checked: string[] = [];
+      // Nothing resolves these names: impit sends every hop to the fixture.
+      const allowAll: DestinationPolicy = (url) => {
+        checked.push(url.host);
+        return Promise.resolve({ refused: null, addresses: ["127.0.0.1"] });
+      };
+
+      const page = await fetchPage("http://www.recipes.test/cookie/www", {
+        db: tx,
+        strategies: [createImpitStrategy({ proxyUrl: base })],
+        destinationPolicy: allowAll,
+      });
+
+      expect(page).toMatchObject({
+        status: 200,
+        strategy: "impit",
+        finalUrl: "http://recipes.test/cookie/check",
+      });
+      expect(cookies).toEqual(["consent=yes"]);
+      // Both hops, and the cache check before them, went through the policy.
+      expect(checked).toEqual([
+        "www.recipes.test",
+        "www.recipes.test",
+        "recipes.test",
+      ]);
     },
   );
 
