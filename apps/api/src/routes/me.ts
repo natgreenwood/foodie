@@ -1,12 +1,8 @@
 import type { FastifyPluginCallback } from "fastify";
 import { updateProfile, type Profile } from "../auth/accounts.js";
 import { canonicalLocale, displayNameProblem } from "../auth/credentials.js";
-import {
-  authErrorHandler,
-  isRecord,
-  sendError,
-  type AuthDeps,
-} from "./auth.js";
+import { isRecord, type AuthDeps } from "./auth.js";
+import { apiErrorHandler, sendError } from "./errors.js";
 
 // GET /me and PATCH /me: the signed-in user's own profile. Registered behind
 // requireUser, so request.user is always set here.
@@ -15,7 +11,7 @@ export const meRoutes: FastifyPluginCallback<AuthDeps> = (
   { db },
   done,
 ) => {
-  app.setErrorHandler(authErrorHandler);
+  app.setErrorHandler(apiErrorHandler("me"));
 
   app.get("/me", (request, reply) => {
     const profile: Profile = request.user!;

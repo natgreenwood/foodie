@@ -5,7 +5,8 @@ import {
   listOwnedRecipes,
   type Recipe,
 } from "../db/recipes.js";
-import { authErrorHandler, sendError, type AuthDeps } from "./auth.js";
+import type { AuthDeps } from "./auth.js";
+import { apiErrorHandler, sendError } from "./errors.js";
 
 export interface RecipeListResponse {
   recipes: Recipe[];
@@ -33,7 +34,7 @@ export const recipeRoutes: FastifyPluginCallback<AuthDeps> = (
   { db },
   done,
 ) => {
-  app.setErrorHandler(authErrorHandler);
+  app.setErrorHandler(apiErrorHandler("recipes"));
 
   app.get("/recipes", async (request): Promise<RecipeListResponse> => {
     return { recipes: await listOwnedRecipes(db, request.user!) };
