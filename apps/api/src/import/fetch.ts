@@ -212,6 +212,10 @@ export async function fetchPage(
     fetchedAt: now(),
   };
   await deps.db.transaction(async (tx) => {
+    // One cache write at a time, across connections and processes, until
+    // this transaction ends. Without it two writes could each count only
+    // their own new row and both commit past the cap (SEC-3.1).
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('page_fetch'))`);
     // Expired rows would never be served again.
     await tx
       .delete(pageFetch)
@@ -226,9 +230,8 @@ export async function fetchPage(
       .insert(pageFetch)
       .values(row)
       .onConflictDoUpdate({ target: pageFetch.normalisedUrl, set: row });
-    // Keeps this row and the newest others up to the cap. Concurrent writes
-    // can each miss the other's row, so the table can briefly pass the cap
-    // by the number of writes in flight; the next write trims it.
+    // Keeps this row and the newest others up to the cap. The lock above is
+    // what makes the cap hard: no other write can add a row this count misses.
     const kept = tx
       .select({ normalisedUrl: pageFetch.normalisedUrl })
       .from(pageFetch)

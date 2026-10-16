@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { brotliCompressSync, gzipSync } from "node:zlib";
+import { like } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { pageFetch } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
@@ -135,6 +136,9 @@ const routes: Record<
   "/to-ftp": { status: 302, headers: { location: "ftp://example.com/pie" } },
   // /hops/n redirects n times, by relative location, before a page.
   "/hops/0": { status: 200 },
+  // Only the overlapping-writes test, which commits, fetches these.
+  "/race/a": { status: 200 },
+  "/race/b": { status: 200 },
   ...Object.fromEntries(
     Array.from({ length: MAX_REDIRECTS + 1 }, (_, i) => [
       `/hops/${i + 1}`,
@@ -610,6 +614,85 @@ describe("fetchPage cache bounds", () => {
     expect(await cachedUrls(tx)).toEqual(
       [`${base}/ok`, "https://recipes.test/a", "https://recipes.test/b"].sort(),
     );
+  });
+
+  // Two writers on their own connections, so this one commits to the real
+  // table. Its rows all start with `${base}/race/` and are deleted after.
+  dbTest("holds the cap when two writes overlap", async ({ database }) => {
+    const { db } = database;
+    const prefix = `${base}/race/`;
+    const raceUrls = async () =>
+      (
+        await db
+          .select({ url: pageFetch.normalisedUrl })
+          .from(pageFetch)
+          .where(like(pageFetch.normalisedUrl, `${prefix}%`))
+      )
+        .map((r) => r.url)
+        .sort();
+    const writer = (at: Date) => ({
+      strategies: [httpStrategy],
+      now: () => at,
+      destinationPolicy: allowFixtures,
+      maxCachedPages: 3,
+    });
+
+    let release = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let first: Promise<unknown> = Promise.resolve();
+    let second: Promise<unknown> = Promise.resolve();
+    try {
+      // One short of the cap, so each write alone would evict nothing.
+      await db
+        .insert(pageFetch)
+        .values([
+          cached(`${prefix}seed-old`, 2000),
+          cached(`${prefix}seed-new`, 1000),
+        ]);
+
+      let firstWritten = () => {};
+      const written = new Promise<void>((resolve) => (firstWritten = resolve));
+      first = db.transaction(async (t) => {
+        await fetchPage(`${prefix}a`, { ...writer(now), db: t });
+        firstWritten();
+        await held;
+      });
+      await written;
+
+      let secondFetched = () => {};
+      const fetched = new Promise<void>((resolve) => (secondFetched = resolve));
+      let settled = false;
+      second = fetchPage(`${prefix}b`, {
+        ...writer(new Date(now.getTime() + 1000)),
+        db,
+        strategies: [
+          {
+            name: "http",
+            fetch: async (url, addresses) => {
+              const res = await httpStrategy.fetch(url, addresses);
+              secondFetched();
+              return res;
+            },
+          },
+        ],
+      }).finally(() => (settled = true));
+      await fetched;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(settled).toBe(false);
+
+      release();
+      await first;
+      await second;
+      expect(await raceUrls()).toEqual(
+        [`${prefix}a`, `${prefix}b`, `${prefix}seed-new`].sort(),
+      );
+    } finally {
+      release();
+      await Promise.allSettled([first, second]);
+      await db
+        .delete(pageFetch)
+        .where(like(pageFetch.normalisedUrl, `${prefix}%`));
+    }
   });
 });
 
