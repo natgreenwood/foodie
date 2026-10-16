@@ -5,11 +5,15 @@ export interface PreviewIngredient {
   rawText: string;
   quantity: string | null;
   quantityText: string | null;
-  unit: { measurementId: number; key: string } | null;
+  unit: { measurementId: number; key: string | null } | null;
   unitText: string | null;
   ingredientText: string;
   prepNotes: string | null;
+  // The parser keeps what it could not split here: the whole line for mixed
+  // amounts and ranges ("1 lb 4 oz chicken"), and "to taste".
   notes: string | null;
+  // The page's group header, such as "For the sauce"; null when there is none.
+  section: string | null;
   flags: string[];
 }
 

@@ -3,6 +3,7 @@ import {
   ImportPreviewError,
   previewImport,
   type ImportPreview as Preview,
+  type PreviewIngredient,
 } from "./imports";
 
 type Request = { url: string; refresh: boolean };
@@ -25,6 +26,7 @@ const flagLabels: Record<string, string> = {
   mixed_amount: "Mixed amount",
   range: "Range",
   no_quantity: "No quantity",
+  unit_ambiguous: "Unit ambiguous",
 };
 
 const extractionLabels: Record<string, string> = {
@@ -75,6 +77,17 @@ function minutes(value: number | null): string {
   return m === 0 ? `${h} h` : `${h} h ${m} min`;
 }
 
+// Consecutive lines that share a section, so each section gets one heading.
+function groupBySection(lines: PreviewIngredient[]) {
+  const groups: { section: string | null; lines: PreviewIngredient[] }[] = [];
+  for (const line of lines) {
+    const last = groups.at(-1);
+    if (last && last.section === line.section) last.lines.push(line);
+    else groups.push({ section: line.section, lines: [line] });
+  }
+  return groups;
+}
+
 function Draft({ preview }: { preview: Preview }) {
   const { recipe } = preview;
   return (
@@ -117,23 +130,37 @@ function Draft({ preview }: { preview: Preview }) {
                 <th scope="col">Flags</th>
               </tr>
             </thead>
-            <tbody>
-              {recipe.ingredients.map((line) => (
-                <tr key={line.position}>
-                  <td>{line.quantityText ?? "—"}</td>
-                  <td>{line.unitText ?? "—"}</td>
-                  <td>{line.ingredientText}</td>
-                  <td>{line.prepNotes ?? "—"}</td>
-                  <td>
-                    {line.flags.map((flag) => (
-                      <span key={flag} className="badge">
-                        {flagLabels[flag] ?? flag}
-                      </span>
-                    ))}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
+            {groupBySection(recipe.ingredients).map((group) => (
+              <tbody key={group.lines[0]?.position}>
+                {group.section !== null && (
+                  <tr>
+                    <th colSpan={5} scope="rowgroup" className="section">
+                      {group.section}
+                    </th>
+                  </tr>
+                )}
+                {group.lines.map((line) => (
+                  <tr key={line.position}>
+                    <td>{line.quantityText ?? "—"}</td>
+                    <td>{line.unitText ?? "—"}</td>
+                    <td>
+                      {line.ingredientText}
+                      {line.notes !== null && (
+                        <span className="line-notes">Note: {line.notes}</span>
+                      )}
+                    </td>
+                    <td>{line.prepNotes ?? "—"}</td>
+                    <td>
+                      {line.flags.map((flag) => (
+                        <span key={flag} className="badge">
+                          {flagLabels[flag] ?? flag}
+                        </span>
+                      ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            ))}
           </table>
         </div>
       )}

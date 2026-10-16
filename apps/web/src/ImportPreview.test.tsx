@@ -30,6 +30,7 @@ const preview = {
         ingredientText: "plain flour",
         prepNotes: "sifted",
         notes: null,
+        section: null,
         flags: [],
       },
       {
@@ -42,6 +43,7 @@ const preview = {
         ingredientText: "salt to taste",
         prepNotes: null,
         notes: null,
+        section: null,
         flags: ["no_quantity", "something_new"],
       },
     ],
@@ -121,6 +123,101 @@ describe("ImportPreview", () => {
     const draft = screen.getByRole("article");
     expect(within(draft).queryByRole("textbox")).toBeNull();
     expect(within(draft).queryByRole("button")).toBeNull();
+  });
+
+  function respondWithIngredients(ingredients: unknown[]) {
+    vi.stubGlobal("fetch", () =>
+      respondWith(200, {
+        ...preview,
+        recipe: { ...preview.recipe, ingredients },
+      }),
+    );
+  }
+
+  // NATG-262: the parser keeps the rest of a mixed amount in notes.
+  it("shows an ingredient's notes so a mixed amount is not lost", async () => {
+    respondWithIngredients([
+      {
+        position: 1,
+        rawText: "1 lb 4 oz chicken",
+        quantity: "1",
+        quantityText: "1",
+        unit: { measurementId: 1, key: "pound" },
+        unitText: "lb",
+        ingredientText: "chicken",
+        prepNotes: null,
+        notes: "1 lb 4 oz chicken",
+        section: null,
+        flags: ["mixed_amount"],
+      },
+    ]);
+    render(<ImportPreview />);
+
+    await importUrl();
+
+    expect(await screen.findByText(/1 lb 4 oz/)).toBeDefined();
+    const rows = within(screen.getByRole("table")).getAllByRole("row");
+    expect(rows[1]?.textContent).toBe(
+      "1lbchickenNote: 1 lb 4 oz chicken—Mixed amount",
+    );
+  });
+
+  // NATG-263: group headers on the page arrive as each line's section.
+  it("groups ingredients under their section headings", async () => {
+    const sugar = {
+      rawText: "1 cup sugar",
+      quantity: "1",
+      quantityText: "1",
+      unit: { measurementId: 9, key: "cup_us" },
+      unitText: "cup",
+      ingredientText: "sugar",
+      prepNotes: null,
+      notes: null,
+      flags: [],
+    };
+    respondWithIngredients([
+      { ...sugar, position: 1, section: "For the cake" },
+      { ...sugar, position: 2, section: "For the icing" },
+    ]);
+    render(<ImportPreview />);
+
+    await importUrl();
+
+    const table = await screen.findByRole("table");
+    expect(
+      within(table)
+        .getAllByRole("row")
+        .map((row) => row.textContent),
+    ).toEqual([
+      "QuantityUnitIngredientPrep notesFlags",
+      "For the cake",
+      "1cupsugar—",
+      "For the icing",
+      "1cupsugar—",
+    ]);
+  });
+
+  it("labels the unit_ambiguous flag and accepts a unit without a key", async () => {
+    respondWithIngredients([
+      {
+        position: 1,
+        rawText: "1 c milk",
+        quantity: "1",
+        quantityText: "1",
+        unit: { measurementId: 9, key: null },
+        unitText: "c",
+        ingredientText: "milk",
+        prepNotes: null,
+        notes: null,
+        section: null,
+        flags: ["unit_ambiguous"],
+      },
+    ]);
+    render(<ImportPreview />);
+
+    await importUrl();
+
+    expect(await screen.findByText("Unit ambiguous")).toBeDefined();
   });
 
   it("says when the page lists no ingredients, steps or tags", async () => {
