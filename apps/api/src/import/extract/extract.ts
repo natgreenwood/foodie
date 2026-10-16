@@ -131,24 +131,29 @@ function ingredients(
   return result;
 }
 
-// NATG-244, refined on NATG-245: a group header is an entry ending in a
-// colon, or "For the ..." on its own, with no digits before any colon. Its
-// text is the section of the lines after it. "For the garnish: parsley" is
-// both: the header, then "parsley" as the first line under it.
+// NATG-244, refined on NATG-245. A group header is an entry ending in a
+// colon (no ingredient line does), or "For the ..." on its own with no
+// digits. Its text is the section of the lines after it. A "For ..." entry
+// with text after the colon is both: "For the garnish: parsley" is the
+// header, then "parsley" as the first line under it. Any other entry,
+// "Salt: to taste" included, is an ingredient line.
 function sectionHeader(
   entry: string,
 ): { section: string; rest: string | null } | null {
-  const colon = entry.indexOf(":");
-  const before = (colon === -1 ? entry : entry.slice(0, colon)).trim();
-  if (before === "" || /\d/.test(before)) return null;
-  if (colon === -1) {
-    return /^for the\b/i.test(before) ? { section: before, rest: null } : null;
+  const trimmed = entry.trim();
+  if (trimmed.endsWith(":")) {
+    const section = trimmed.replace(/:+$/, "").trim();
+    return section === "" ? null : { section, rest: null };
   }
-  const rest = entry
-    .slice(colon + 1)
-    .replace(/^:+/, "")
-    .trim();
-  return { section: before, rest: rest === "" ? null : rest };
+  const colon = trimmed.indexOf(":");
+  if (colon === -1) {
+    return /^for the\b/i.test(trimmed) && !/\d/.test(trimmed)
+      ? { section: trimmed, rest: null }
+      : null;
+  }
+  const before = trimmed.slice(0, colon).trim();
+  if (!/^for\b/i.test(before)) return null;
+  return { section: before, rest: trimmed.slice(colon + 1).trim() };
 }
 
 // Text, HowToStep and HowToSection, flattened in order. A text value with

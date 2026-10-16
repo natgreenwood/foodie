@@ -94,6 +94,8 @@ describe("extractRecipe: JSON-LD", () => {
     ["For the sauce", "For the sauce"],
     ["for the topping", "for the topping"],
     ["Dressing:", "Dressing"],
+    // A trailing colon is a header whatever precedes it.
+    ["For the 2 cakes:", "For the 2 cakes"],
   ])("treats %j as a section header", (header, section) => {
     const result = extract(
       jsonLdPage({ recipeIngredient: [header, "2 eggs"] }),
@@ -105,7 +107,8 @@ describe("extractRecipe: JSON-LD", () => {
 
   it.each([
     ["For the garnish: fresh parsley", "For the garnish", "fresh parsley"],
-    ["Sauce: 2 tbsp soy sauce", "Sauce", "2 tbsp soy sauce"],
+    ["For serving: lemon wedges", "For serving", "lemon wedges"],
+    ["FOR THE 2 CAKES: 1 cup sugar", "FOR THE 2 CAKES", "1 cup sugar"],
   ])(
     "splits %j into a section and an ingredient",
     (entry, section, rawText) => {
@@ -127,10 +130,11 @@ describe("extractRecipe: JSON-LD", () => {
   );
 
   it.each([
-    "For the 2 cakes:",
-    "For the 2 cakes: 1 cup sugar",
+    // Only a "For ..." line splits at its colon.
+    "Salt: to taste",
+    "Sauce: 2 tbsp soy sauce",
     "Fortified wine",
-    "1 cup flour:",
+    "For the 2 cakes",
   ])("keeps %j as an ingredient", (line) => {
     const result = extract(jsonLdPage({ recipeIngredient: [line] }));
 
