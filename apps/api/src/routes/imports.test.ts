@@ -213,6 +213,29 @@ describe("POST /imports/preview", () => {
     expect(fetchPage).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["JSON that does not parse", "{bad json"],
+    ["an empty JSON body", ""],
+  ])("returns 400 invalid_url for %s", async (_, payload) => {
+    const fetchPage = vi.fn();
+    start(fetchPage);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/imports/preview",
+      headers: { "content-type": "application/json" },
+      payload,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: "invalid_url",
+      message: "body must be JSON",
+      url: "",
+    });
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
   it("returns 400 invalid_url when fetchPage rejects the URL, without logging it", async () => {
     const raw = "ftp://user:hunter2@example.com/pie";
     start(() =>

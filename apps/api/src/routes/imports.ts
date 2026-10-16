@@ -1,4 +1,8 @@
-import type { FastifyPluginCallback, FastifyReply } from "fastify";
+import type {
+  FastifyError,
+  FastifyPluginCallback,
+  FastifyReply,
+} from "fastify";
 import type { Database } from "../db/client.js";
 import {
   extractRecipe,
@@ -64,6 +68,19 @@ export const importRoutes: FastifyPluginCallback<ImportDeps> = (
   deps,
   done,
 ) => {
+  // A body Fastify cannot parse as JSON never reaches the handler; answer it
+  // in the contract's shape too (NATG-266). Scoped to this plugin.
+  app.setErrorHandler<FastifyError>((err, request, reply) => {
+    if (
+      err.code === "FST_ERR_CTP_INVALID_JSON_BODY" ||
+      err.code === "FST_ERR_CTP_EMPTY_JSON_BODY"
+    ) {
+      request.log.info({ code: err.code }, "import preview: unparseable body");
+      return sendError(reply, 400, "invalid_url", "body must be JSON", "");
+    }
+    throw err;
+  });
+
   app.post<{ Body: unknown }>(
     "/imports/preview",
     async (request, reply): Promise<PreviewResponse> => {
