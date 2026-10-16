@@ -133,6 +133,18 @@ export const importRoutes: FastifyPluginCallback<ImportDeps> = (
             },
             "import preview: fetch failed",
           );
+          // A private or otherwise refused address, the URL's own or a
+          // redirect's (SEC-1). The message is fixed: the attempts name the
+          // refused address, which is for the log, not the caller.
+          if (err.reason === "blocked_destination") {
+            return sendError(
+              reply,
+              400,
+              "invalid_url",
+              "destination not allowed",
+              err.url,
+            );
+          }
           return reply.code(422).send({
             error: "fetch_failed",
             message: err.message,

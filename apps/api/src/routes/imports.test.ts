@@ -336,6 +336,46 @@ describe("POST /imports/preview", () => {
     },
   );
 
+  it("returns 400 invalid_url for a destination fetchPage refuses", async () => {
+    const err = new FetchFailedError(URL_, "blocked_destination", 302, [
+      "http: 302 to 10.0.0.5, blocked_destination (private address 10.0.0.5)",
+    ]);
+    start(() => Promise.reject(err));
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: "invalid_url",
+      message: "destination not allowed",
+      url: URL_,
+    });
+    expect(res.body).not.toContain("10.0.0.5");
+    expect(previewLog()).toEqual([
+      expect.objectContaining({
+        msg: "import preview: fetch failed",
+        reason: "blocked_destination",
+      }),
+    ]);
+  });
+
+  it("returns 422 fetch_failed with reason too_many_redirects", async () => {
+    const err = new FetchFailedError(URL_, "too_many_redirects", 301, [
+      "http: 301 too_many_redirects (over 5)",
+    ]);
+    start(() => Promise.reject(err));
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json()).toEqual({
+      error: "fetch_failed",
+      message: err.message,
+      url: URL_,
+      reason: "too_many_redirects",
+    });
+  });
+
   it("returns 500 without the cause when the fetch fails unexpectedly", async () => {
     start(() =>
       Promise.reject(
