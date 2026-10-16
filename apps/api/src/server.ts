@@ -1,6 +1,7 @@
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createDatabase } from "./db/client.js";
+import { importDeps } from "./routes/imports.js";
 
 const config = loadConfig();
 
@@ -9,7 +10,7 @@ const database = createDatabase(config.databaseUrl, (err) => {
 });
 
 const app = buildApp(
-  { pingDatabase: () => database.ping() },
+  { pingDatabase: () => database.ping(), ...importDeps(database.db) },
   { logger: { level: config.logLevel } },
 );
 

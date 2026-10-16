@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../app.js";
+import type { ImportDeps } from "./imports.js";
+
+// The import routes are not exercised here.
+const unused = () => Promise.reject(new Error("not used by these tests"));
+const importDeps: ImportDeps = { fetchPage: unused, loadUnits: unused };
 
 describe("GET /health", () => {
   let app: FastifyInstance;
@@ -10,7 +15,7 @@ describe("GET /health", () => {
   });
 
   it("returns 200 and db up when the database answers", async () => {
-    app = buildApp({ pingDatabase: () => Promise.resolve() });
+    app = buildApp({ pingDatabase: () => Promise.resolve(), ...importDeps });
 
     const res = await app.inject({ method: "GET", url: "/health" });
 
@@ -24,6 +29,7 @@ describe("GET /health", () => {
         Promise.reject(
           new Error("connect ECONNREFUSED 10.0.0.5:5432 password=hunter2"),
         ),
+      ...importDeps,
     });
 
     const res = await app.inject({ method: "GET", url: "/health" });
