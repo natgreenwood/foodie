@@ -293,3 +293,55 @@ export const pageFetch = pgTable("page_fetch", {
   html: text("html").notNull(),
   fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
 });
+
+// One account. Email is the sign-in identifier, unique ignoring case; it is
+// stored as entered (trimmed) and always looked up through lower(email).
+// password_hash is an argon2id hash, null for an account that can only sign
+// in another way (OIDC, NATG-226). A disabled account cannot sign in and its
+// sessions are refused.
+export const user = pgTable(
+  "user",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    email: text("email").notNull(),
+    passwordHash: text("password_hash"),
+    displayName: text("display_name"),
+    // A BCP-47 tag, as in measurement_name.locale.
+    locale: text("locale").notNull().default("en-GB"),
+    isAdmin: boolean("is_admin").notNull().default(false),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Set on insert only; whatever updates a user sets it.
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("user_email_key").on(sql`lower(${t.email})`),
+    check("user_email_not_blank", sql`btrim(${t.email}) <> ''`),
+  ],
+);
+
+// A signed-in browser. The cookie carries a random token; `id` is its
+// SHA-256, so a copy of this table cannot be replayed as a cookie. Kept in
+// Postgres so sessions survive an api restart. Rows past expires_at are
+// refused and deleted when next presented.
+export const session = pgTable(
+  "session",
+  {
+    id: text("id").primaryKey(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  // Serves the cascade on user delete.
+  (t) => [index("session_user_id_idx").on(t.userId)],
+);

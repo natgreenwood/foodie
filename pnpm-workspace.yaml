@@ -2,3 +2,5 @@ packages:
   - "apps/*"
 allowBuilds:
   esbuild: false
+  # Native binding; its install script picks the prebuilt binary for the platform.
+  argon2: true

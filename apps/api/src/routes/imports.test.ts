@@ -11,6 +11,7 @@ import {
   type FetchedPage,
   type FetchFailureReason,
 } from "../import/fetch.js";
+import type { AuthDeps } from "./auth.js";
 import type { ImportDeps } from "./imports.js";
 
 const URL_ = "https://www.example.com.au/recipes/spaghetti";
@@ -55,6 +56,9 @@ function start(
       pingDatabase: () => Promise.resolve(),
       fetchPage,
       loadUnits: loadUnits ?? (() => Promise.resolve({ measurements })),
+      // The auth routes are not exercised here.
+      db: {} as AuthDeps["db"],
+      secureCookies: false,
     },
     { logger: { level: "info", stream } },
   );

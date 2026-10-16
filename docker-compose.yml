@@ -10,6 +10,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-foodie}:${POSTGRES_PASSWORD:-foodie}@postgres:5432/${POSTGRES_DB:-foodie}
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Empty means unset; see .env.example.
+      ADMIN_USER: ${ADMIN_USER:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     ports:
       - "${API_PORT:-3000}:3000"
     volumes:

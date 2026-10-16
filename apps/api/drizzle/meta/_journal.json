@@ -50,6 +50,13 @@
       "when": 1792184379834,
       "tag": "0006_measurement_key",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792186274957,
+      "tag": "0007_user_session",
+      "breakpoints": true
     }
   ]
 }
