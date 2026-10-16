@@ -4,6 +4,7 @@ import type {
   FastifyReply,
 } from "fastify";
 import type { Database } from "../db/client.js";
+import { BudgetExceededError } from "../import/extract/budget.js";
 import {
   extractRecipe,
   type ExtractedRecipe,
@@ -157,6 +158,26 @@ export const importRoutes: FastifyPluginCallback<ImportDeps> = (
           ...units,
         });
       } catch (err) {
+        // A page past the extraction budget is answered as having no recipe;
+        // the log says which limit it hit.
+        if (err instanceof BudgetExceededError) {
+          request.log.warn(
+            {
+              url: page.finalUrl,
+              strategy: page.strategy,
+              cached: page.cached,
+              budgetExceeded: err.limit,
+            },
+            "import preview: extraction budget exceeded",
+          );
+          return sendError(
+            reply,
+            404,
+            "no_recipe_found",
+            "the page has no schema.org Recipe that could be read",
+            page.finalUrl,
+          );
+        }
         request.log.error(
           { err, url: page.finalUrl },
           "import preview: extraction error",

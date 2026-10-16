@@ -193,6 +193,28 @@ describe("POST /imports/preview", () => {
     ]);
   });
 
+  it("returns 404 no_recipe_found for a page past the extraction budget", async () => {
+    const html = `<html><body><div itemscope itemtype="https://schema.org/Recipe">${'<meta itemprop="name" content="a">'.repeat(2_000)}</div></body></html>`;
+    start(() => Promise.resolve(page(html)));
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({
+      error: "no_recipe_found",
+      message: "the page has no schema.org Recipe that could be read",
+      url: URL_,
+    });
+    expect(previewLog()).toEqual([
+      expect.objectContaining({
+        level: 40,
+        msg: "import preview: extraction budget exceeded",
+        url: URL_,
+        budgetExceeded: "valuesPerProperty",
+      }),
+    ]);
+  });
+
   it.each([
     ["no body", undefined, "", "url must be a string"],
     ["a non-string url", { url: 42 }, "", "url must be a string"],

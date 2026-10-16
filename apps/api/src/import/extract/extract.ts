@@ -1,6 +1,7 @@
 import { load } from "cheerio";
 import type { MeasurementLookup } from "../measurement-lookup.js";
 import { parseIngredientLine, type ParseFlag } from "../parse-line.js";
+import { Budget } from "./budget.js";
 import { jsonLdRecipes } from "./json-ld.js";
 import { microdataRecipes } from "./microdata.js";
 import { isType, type SchemaNode } from "./schema-node.js";
@@ -52,15 +53,17 @@ export interface ExtractContext {
 
 // The first Recipe the page declares, or null if it declares none. When the
 // method that found it found more than one, a warning says so: the others are
-// not returned.
+// not returned. Throws BudgetExceededError for a page that needs more work
+// than budget.ts allows; the route answers that as no_recipe_found.
 export function extractRecipe(
   html: string,
   ctx: ExtractContext,
 ): ExtractedRecipe | null {
   const $ = load(html);
+  const budget = new Budget();
   const methods: [Extraction, () => SchemaNode[]][] = [
-    ["json-ld", () => jsonLdRecipes($)],
-    ["microdata", () => microdataRecipes($)],
+    ["json-ld", () => jsonLdRecipes($, budget)],
+    ["microdata", () => microdataRecipes($, budget)],
   ];
   for (const [extraction, find] of methods) {
     const [first, ...others] = find();
@@ -68,30 +71,36 @@ export function extractRecipe(
     return {
       extraction,
       warnings: others.length > 0 ? ["multiple_recipes_found"] : [],
-      recipe: draft(first, $("title").first().text().trim(), ctx),
+      recipe: draft(first, $("title").first().text().trim(), budget, ctx),
     };
   }
   return null;
 }
 
 // A Recipe with no name takes the page's <title>.
+// A text value split into lines can hold more lines than the budget let it
+// hold values, so the lines are checked too.
 function draft(
   node: SchemaNode,
   pageTitle: string,
+  budget: Budget,
   ctx: ExtractContext,
 ): DraftRecipe {
+  // Older microdata uses the retired `ingredients` property.
+  const entries = values(node.recipeIngredient ?? node.ingredients).flatMap(
+    lines,
+  );
+  budget.check("valuesPerProperty", entries.length);
+  const stepTexts = steps(node.recipeInstructions);
+  budget.check("valuesPerProperty", stepTexts.length);
   return {
     title:
       values(node.name).map(singleLine).find(Boolean) ?? singleLine(pageTitle),
     servings: servings(node.recipeYield),
     prepMinutes: minutes(node.prepTime),
     cookMinutes: minutes(node.cookTime),
-    ingredients: ingredients(
-      // Older microdata uses the retired `ingredients` property.
-      values(node.recipeIngredient ?? node.ingredients).flatMap(lines),
-      ctx,
-    ),
-    steps: steps(node.recipeInstructions).map((text, i) => ({
+    ingredients: ingredients(entries, ctx),
+    steps: stepTexts.map((text, i) => ({
       position: i + 1,
       text,
     })),
