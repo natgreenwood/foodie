@@ -17,7 +17,7 @@ export interface DraftIngredient {
   rawText: string;
   quantity: string | null;
   quantityText: string | null;
-  // key is null for a unit the seed did not ship (see unit-keys.ts).
+  // key is measurement.key: null for a unit the seed did not ship.
   unit: { measurementId: number; key: string | null } | null;
   unitText: string | null;
   ingredientText: string;
@@ -48,7 +48,6 @@ export interface ExtractContext {
   // The page's host, for the cup rules.
   sourceHost: string;
   measurements: MeasurementLookup;
-  unitKeys: ReadonlyMap<number, string>;
 }
 
 // The first Recipe the page declares, or null if it declares none. When the
@@ -138,7 +137,10 @@ function ingredients(
       unit:
         measurementId === null
           ? null
-          : { measurementId, key: ctx.unitKeys.get(measurementId) ?? null },
+          : {
+              measurementId,
+              key: ctx.measurements.keys.get(measurementId) ?? null,
+            },
       unitText: parsed.unitText,
       ingredientText: parsed.ingredientText,
       prepNotes: parsed.prepNotes,

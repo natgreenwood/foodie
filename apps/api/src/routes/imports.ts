@@ -22,29 +22,19 @@ import {
   loadMeasurementLookup,
   type MeasurementLookup,
 } from "../import/measurement-lookup.js";
-import { loadUnitKeys } from "../import/unit-keys.js";
 
 export interface ImportDeps {
   // fetchPage with the api's database and strategies bound.
   fetchPage: (url: string, opts: FetchPageOptions) => Promise<FetchedPage>;
   // Read on every preview, so a unit added since is matched.
-  loadUnits: () => Promise<{
-    measurements: MeasurementLookup;
-    unitKeys: ReadonlyMap<number, string>;
-  }>;
+  loadUnits: () => Promise<{ measurements: MeasurementLookup }>;
 }
 
 export function importDeps(db: Database["db"]): ImportDeps {
   return {
     fetchPage: (url, opts) =>
       fetchPage(url, { db, strategies: defaultStrategies }, opts),
-    loadUnits: async () => {
-      const [measurements, unitKeys] = await Promise.all([
-        loadMeasurementLookup(db),
-        loadUnitKeys(db),
-      ]);
-      return { measurements, unitKeys };
-    },
+    loadUnits: async () => ({ measurements: await loadMeasurementLookup(db) }),
   };
 }
 

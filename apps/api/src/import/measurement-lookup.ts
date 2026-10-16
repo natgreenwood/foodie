@@ -12,6 +12,9 @@ export interface MeasurementLookup {
   // cup rules, not by locale.
   byName: ReadonlyMap<string, readonly number[]>;
   cup: Readonly<Record<CupSize, number>>;
+  // measurement id to measurement.key, for the units that have one (the
+  // system units the seed shipped).
+  keys: ReadonlyMap<number, string>;
 }
 
 export interface MeasurementNameRow {
@@ -20,13 +23,16 @@ export interface MeasurementNameRow {
   factorToBase: string | null;
   name: string;
   abbreviation: string | null;
+  key: string | null;
 }
 
 export function buildMeasurementLookup(
   rows: readonly MeasurementNameRow[],
 ): MeasurementLookup {
   const byName = new Map<string, number[]>();
+  const keys = new Map<number, string>();
   for (const row of rows) {
+    if (row.key !== null) keys.set(row.measurementId, row.key);
     for (const text of [row.name, row.abbreviation]) {
       if (text === null) continue;
       const key = normaliseUnit(text);
@@ -41,6 +47,7 @@ export function buildMeasurementLookup(
       cup_us: cupId(rows, "cup_us"),
       cup_metric: cupId(rows, "cup_metric"),
     },
+    keys,
   };
 }
 
@@ -77,6 +84,7 @@ export async function loadMeasurementLookup(
       factorToBase: measurement.factorToBase,
       name: measurementName.name,
       abbreviation: measurementName.abbreviation,
+      key: measurement.key,
     })
     .from(measurementName)
     .innerJoin(measurement, eq(measurement.id, measurementName.measurementId));
