@@ -275,3 +275,17 @@ export const recipeTag = pgTable(
     check("recipe_tag_tag_not_blank", sql`${t.normalisedTag} <> ''`),
   ],
 );
+
+// The last successful fetch of each page an import asked for, so a repeat
+// within the cache lifetime does not hit the site again. Keyed on the
+// normalised URL. Failed fetches are not stored. Nothing here is a recipe.
+export const pageFetch = pgTable("page_fetch", {
+  normalisedUrl: text("normalised_url").primaryKey(),
+  // Where redirects ended.
+  finalUrl: text("final_url").notNull(),
+  status: integer("status").notNull(),
+  // The FetchStrategy name that got the page, for example http or impit.
+  strategy: text("strategy").notNull(),
+  html: text("html").notNull(),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
+});
