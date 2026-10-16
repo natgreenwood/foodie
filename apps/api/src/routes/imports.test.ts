@@ -286,6 +286,34 @@ describe("POST /imports/preview", () => {
     });
   });
 
+  // NATG-257: a 2xx that is not an HTML page, or is too big to read.
+  it.each<[FetchFailureReason, string]>([
+    ["not_html", "http: 200 not_html (application/pdf)"],
+    ["too_large", "http: 200 too_large (over 5242880 bytes)"],
+  ])(
+    "returns 422 fetch_failed with reason %s for a 200 fetchPage refuses",
+    async (reason, attempt) => {
+      const err = new FetchFailedError(URL_, reason, 200, [attempt]);
+      start(() => Promise.reject(err));
+
+      const res = await preview({ url: URL_ });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toEqual({
+        error: "fetch_failed",
+        message: err.message,
+        url: URL_,
+        reason,
+      });
+      expect(previewLog()).toEqual([
+        expect.objectContaining({
+          msg: "import preview: fetch failed",
+          reason,
+        }),
+      ]);
+    },
+  );
+
   it("returns 500 without the cause when the fetch fails unexpectedly", async () => {
     start(() =>
       Promise.reject(
