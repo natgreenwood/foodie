@@ -40,7 +40,11 @@ default, `publicOnly()`, allows only http and https to a host whose every
 address is public: it resolves the host with `dns.lookup` (all records) and
 refuses if any one is loopback, private (RFC 1918), CGNAT, link-local
 (including the 169.254.169.254 metadata service), multicast, unspecified,
-reserved, IPv4-mapped IPv6, or unique-local or link-local IPv6. A refused
+reserved, IPv4-mapped IPv6, or unique-local or link-local IPv6. It also
+refuses benchmarking, IETF protocol assignment, IPv4-compatible and
+site-local addresses, and the NAT64, 6to4 and Teredo translator prefixes
+whatever IPv4 address they carry (NATG-270). `NON_PUBLIC` in
+`fetch/destination.ts` is the authoritative list. A refused
 URL is a `FetchFailedError` with `reason: "blocked_destination"`; nothing
 is sent to it, no other strategy is tried and nothing is stored. A host
 that does not resolve is `unreachable`, as before.
@@ -49,6 +53,13 @@ The strategies never follow a redirect themselves. `fetchPage` follows at
 most 5 (`MAX_REDIRECTS`), checking each new location against the policy;
 the sixth is a `FetchFailedError` with `reason: "too_many_redirects"`. The
 returned and stored `finalUrl` is the last hop's.
+
+impit keeps one cookie jar (tough-cookie) for all the hops of one
+`fetchPage` call, so a consent page that sets a cookie and redirects gets it
+back on the next hop, on the same host or, for a `Domain` cookie, a sibling
+such as `www.` to the bare name. The jar's own rules keep a cookie from any
+other host, and it is dropped when the call ends: nothing carries over to
+another call (NATG-271). The http strategy keeps no cookies.
 
 The policy also decides which addresses the request goes to: it returns
 the ones it checked, and the http strategy (`node:http` / `node:https`)

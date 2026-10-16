@@ -211,6 +211,9 @@ importers:
       pg:
         specifier: ^8.23.1
         version: 8.23.1
+      tough-cookie:
+        specifier: ^6.0.2
+        version: 6.0.2
     devDependencies:
       '@types/node':
         specifier: ^24.19.2
