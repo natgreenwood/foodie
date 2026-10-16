@@ -62,29 +62,38 @@ export function parseIngredientLine(
   // "(375ml)" straight after the unit: a metric equivalent, not part of the
   // ingredient. Kept in notes; decides the cup under rule 1.
   let metricEquivalent: MetricEquivalent | null = null;
+  // parse-ingredient's descriptionMeasurements index the description before
+  // the bracket is removed.
+  let consumed = 0;
   const bracket = BRACKETED_EQUIVALENT.exec(description);
   if (unitText !== null && bracket !== null) {
     const [whole, inner = "", amount = "", unit = ""] = bracket;
     notes.push(inner.trim());
     description = description.slice(whole.length);
+    consumed = whole.length;
     const mlPerUnit = ML_PER_UNIT[normaliseUnit(unit)];
     if (mlPerUnit !== undefined) metricEquivalent = { amount, mlPerUnit };
   }
 
   // A second amount straight after the first ("1 lb 4 oz", "1 cup plus 2
-  // tbsp") is left for the user to resolve on the review screen.
-  const second = parsed?.descriptionMeasurements?.[0];
+  // tbsp") is left for the user to resolve on the review screen, also when a
+  // metric equivalent sits between them: "1 cup (250ml) plus 2 tbsp".
+  const second = parsed?.descriptionMeasurements?.find(
+    (m) => m.startIndex >= consumed,
+  );
   if (
     unitText !== null &&
-    bracket === null &&
     second !== undefined &&
     MIXED_CONNECTORS.has(
-      description.slice(0, second.startIndex).trim().toLowerCase(),
+      description
+        .slice(0, second.startIndex - consumed)
+        .trim()
+        .toLowerCase(),
     )
   ) {
     flags.push("mixed_amount");
     notes.push(rawText);
-    description = description.slice(second.endIndex);
+    description = description.slice(second.endIndex - consumed);
   }
 
   // "Salt, to taste": no quantity and no unit, the phrase in notes. A line

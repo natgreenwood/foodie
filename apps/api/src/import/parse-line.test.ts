@@ -242,6 +242,17 @@ describe("parseIngredientLine", () => {
     },
   );
 
+  test("a metric equivalent does not hide a mixed amount", () => {
+    const line = "1 cup (250ml) plus 2 tbsp sugar";
+    expect(parse(line, "example.com")).toMatchObject({
+      quantity: "1",
+      measurementId: ID.cupMetric,
+      ingredientText: "sugar",
+      notes: `250ml; ${line}`,
+      flags: ["mixed_amount"],
+    });
+  });
+
   test("an empty line parses to nothing", () => {
     expect(parse("  ")).toMatchObject({
       rawText: "",
