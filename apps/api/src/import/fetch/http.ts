@@ -19,13 +19,13 @@ export const httpStrategy: FetchStrategy = {
   async fetch(url) {
     const res = await fetch(url, {
       headers: BROWSER_HEADERS,
-      redirect: "follow",
+      // fetchPage follows redirects itself, so it can check each hop.
+      redirect: "manual",
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     const bytes = await readCapped(res.body);
     return {
       status: res.status,
-      finalUrl: res.url || url,
       headers: res.headers,
       // UTF-8, as res.text() would decode it.
       body: bytes ? new TextDecoder().decode(bytes) : "",

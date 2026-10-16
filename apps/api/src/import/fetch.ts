@@ -5,6 +5,10 @@ import { describeError } from "../db/errors.js";
 import { pageFetch } from "../db/schema.js";
 import type * as schema from "../db/schema.js";
 import { cloudflareBlock } from "./fetch/cloudflare.js";
+import {
+  defaultDestinationPolicy,
+  type DestinationPolicy,
+} from "./fetch/destination.js";
 import { httpStrategy } from "./fetch/http.js";
 import { impitStrategy } from "./fetch/impit.js";
 import {
@@ -15,6 +19,7 @@ import {
 } from "./fetch/strategy.js";
 
 export type { FetchStrategy, StrategyName } from "./fetch/strategy.js";
+export type { DestinationPolicy } from "./fetch/destination.js";
 
 // Plain HTTP first; impit only when Cloudflare stops it (NATG-239).
 export const defaultStrategies: readonly FetchStrategy[] = [
@@ -23,6 +28,9 @@ export const defaultStrategies: readonly FetchStrategy[] = [
 ];
 
 export const CACHE_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
+// Redirects followed per strategy; the next one fails too_many_redirects.
+export const MAX_REDIRECTS = 5;
 
 export interface FetchedPage {
   html: string;
@@ -38,6 +46,9 @@ export interface FetchPageDeps {
   db: PgDatabase<NodePgQueryResultHKT, typeof schema>;
   strategies: readonly FetchStrategy[];
   now?: () => Date;
+  // Checked before every request. Defaults to public addresses only; tests
+  // that fetch from a loopback fixture pass one that allows it.
+  destinationPolicy?: DestinationPolicy;
 }
 
 export interface FetchPageOptions {
@@ -64,6 +75,9 @@ export class NotPermittedError extends Error {
 
 // - unreachable: the request failed without a response (refused, DNS,
 //   timeout).
+// - blocked_destination: the URL, or a redirect from it, is not a public
+//   http or https address. Nothing was sent to it.
+// - too_many_redirects: more than MAX_REDIRECTS redirects.
 // - challenged: Cloudflare still served a challenge to the last strategy.
 // - blocked: a 403, or a 503 from a Cloudflare edge.
 // - http_error: any other non-2xx status, such as 404 or 500.
@@ -71,6 +85,8 @@ export class NotPermittedError extends Error {
 // - too_large: a 2xx whose body passed MAX_BODY_BYTES.
 export type FetchFailureReason =
   | "unreachable"
+  | "blocked_destination"
+  | "too_many_redirects"
   | "challenged"
   | "blocked"
   | "http_error"
@@ -170,7 +186,11 @@ export async function fetchPage(
     }
   }
 
-  const res = await fetchWithStrategies(url, deps.strategies);
+  const res = await fetchWithStrategies(
+    url,
+    deps.strategies,
+    deps.destinationPolicy ?? defaultDestinationPolicy,
+  );
   const row = {
     normalisedUrl: url,
     finalUrl: res.finalUrl,
@@ -198,21 +218,13 @@ export async function fetchPage(
 async function fetchWithStrategies(
   url: string,
   strategies: readonly FetchStrategy[],
-): Promise<FetchResponse & { strategy: StrategyName }> {
+  policy: DestinationPolicy,
+): Promise<FetchResponse & { finalUrl: string; strategy: StrategyName }> {
   const attempts: string[] = [];
   let failure: FetchFailedError | undefined;
 
   for (const strategy of strategies) {
-    let res: FetchResponse;
-    try {
-      res = await strategy.fetch(url);
-    } catch (err) {
-      // No response at all; nothing suggests another strategy would differ.
-      attempts.push(`${strategy.name}: ${describeError(err)}`);
-      throw new FetchFailedError(url, "unreachable", null, attempts, {
-        cause: err,
-      });
-    }
+    const res = await fetchFollowingRedirects(url, strategy, policy, attempts);
 
     // Before the 2xx check: Cloudflare can serve a challenge with a 200
     // (NATG-258), and that page must not be returned or cached.
@@ -246,6 +258,77 @@ async function fetchWithStrategies(
   }
 
   throw failure ?? new FetchFailedError(url, "unreachable", null, attempts);
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+// `strategy`'s response from `url` after following at most MAX_REDIRECTS
+// redirects, with the URL it came from. Every hop, the first included, is
+// checked against `policy` before it is requested, so a refused destination
+// is never sent anything. Each failure is final, as unreachable is: another
+// strategy would be sent to the same place.
+async function fetchFollowingRedirects(
+  url: string,
+  strategy: FetchStrategy,
+  policy: DestinationPolicy,
+  attempts: string[],
+): Promise<FetchResponse & { finalUrl: string }> {
+  let current = new URL(url);
+  // The redirect that led to `current`, for the error; null on the first.
+  let via: number | null = null;
+  for (let redirects = 0; ; redirects++) {
+    // The host only: a redirect's path and query are the remote's to choose
+    // and need not be in the log.
+    const hop = via === null ? "" : ` ${via} to ${current.host},`;
+    let refused: string | null;
+    try {
+      refused = await policy(current);
+    } catch (err) {
+      attempts.push(`${strategy.name}:${hop} ${describeError(err)}`);
+      throw new FetchFailedError(url, "unreachable", via, attempts, {
+        cause: err,
+      });
+    }
+    if (refused) {
+      attempts.push(`${strategy.name}:${hop} blocked_destination (${refused})`);
+      throw new FetchFailedError(url, "blocked_destination", via, attempts);
+    }
+
+    let res: FetchResponse;
+    try {
+      res = await strategy.fetch(current.toString());
+    } catch (err) {
+      // No response at all; nothing suggests another strategy would differ.
+      attempts.push(`${strategy.name}:${hop} ${describeError(err)}`);
+      throw new FetchFailedError(url, "unreachable", via, attempts, {
+        cause: err,
+      });
+    }
+
+    // A 3xx without a location is an answer, judged like any other status.
+    const location = res.headers.get("location");
+    if (!REDIRECT_STATUSES.has(res.status) || location === null) {
+      return { ...res, finalUrl: current.toString() };
+    }
+    if (redirects === MAX_REDIRECTS) {
+      attempts.push(
+        `${strategy.name}: ${res.status} too_many_redirects (over ${MAX_REDIRECTS})`,
+      );
+      throw new FetchFailedError(
+        url,
+        "too_many_redirects",
+        res.status,
+        attempts,
+      );
+    }
+    try {
+      current = new URL(location, current);
+    } catch {
+      attempts.push(`${strategy.name}: ${res.status} to an invalid location`);
+      throw new FetchFailedError(url, "http_error", res.status, attempts);
+    }
+    via = res.status;
+  }
 }
 
 const HTML_TYPES = new Set(["text/html", "application/xhtml+xml"]);

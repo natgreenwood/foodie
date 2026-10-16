@@ -14,13 +14,13 @@ export const impitStrategy: FetchStrategy = {
     const impit = new Impit({
       browser: "firefox",
       timeout: FETCH_TIMEOUT_MS,
-      followRedirects: true,
+      // fetchPage follows redirects itself, so it can check each hop.
+      followRedirects: false,
     });
     const res = await impit.fetch(url);
     const bytes = await readCapped(res.body);
     return {
       status: res.status,
-      finalUrl: res.url || url,
       headers: res.headers,
       // decodeBuffer is what res.text() uses: it honours the page's charset.
       body: bytes ? res.decodeBuffer(bytes) : "",

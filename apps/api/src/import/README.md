@@ -30,6 +30,36 @@ stores nothing as a recipe.
 
    Nothing is stored for any error.
 
+## Destinations and redirects
+
+Every request a strategy makes, the first and each redirect hop, is checked
+first against `deps.destinationPolicy` (`fetch/destination.ts`). The
+default, `publicOnly()`, allows only http and https to a host whose every
+address is public: it resolves the host with `dns.lookup` (all records) and
+refuses if any one is loopback, private (RFC 1918), CGNAT, link-local
+(including the 169.254.169.254 metadata service), multicast, unspecified,
+reserved, IPv4-mapped IPv6, or unique-local or link-local IPv6. A refused
+URL is a `FetchFailedError` with `reason: "blocked_destination"`; nothing
+is sent to it, no other strategy is tried and nothing is stored. A host
+that does not resolve is `unreachable`, as before.
+
+The strategies never follow a redirect themselves. `fetchPage` follows at
+most 5 (`MAX_REDIRECTS`), checking each new location against the policy;
+the sixth is a `FetchFailedError` with `reason: "too_many_redirects"`. The
+returned and stored `finalUrl` is the last hop's.
+
+**Residual risk: DNS rebinding.** The policy resolves the host, then the
+strategy resolves it again to connect. A DNS server that answers with a
+public address the first time and a private one the second can still steer
+a request inward. Pinning the checked address needs a resolver hook that
+impit does not have, and Node's `fetch` takes one only through undici's
+`Agent`, which would be a new dependency, so the window is accepted. Egress
+rules on the container network are what close it.
+
+Tests fetch from fixtures on `127.0.0.1`, which the default refuses, so they
+pass a policy that allows that host and applies `publicOnly` with a fake
+resolver to every other.
+
 Each error's message carries the URL, the final status and what every
 strategy got, so one log line is enough to see what happened.
 
