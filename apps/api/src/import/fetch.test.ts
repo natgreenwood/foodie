@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { brotliCompressSync, gzipSync } from "node:zlib";
 import { like } from "drizzle-orm";
+import { Impit } from "impit";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { pageFetch } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
@@ -90,6 +91,9 @@ const allowFixtures: DestinationPolicy = (url) =>
 const PNG = await readFile(new URL("./fixtures/tomato.png", import.meta.url));
 // "<h>", NUL, "A": the smallest body that broke the page_fetch insert.
 const NUL_BODY = Buffer.from([0x3c, 0x68, 0x3e, 0x00, 0x41]);
+// Accented text in single-byte ISO-8859-1, which is not valid UTF-8.
+const LATIN1_TEXT = "<p>Crème brûlée, café</p>";
+const latin1 = (html: string) => Buffer.from(html, "latin1");
 
 // Each path answers with its own status, headers and static body (the shared
 // FIXTURE_BODY unless it names one): request input is recorded below, never
@@ -122,6 +126,27 @@ const routes: Record<
     status: 200,
     headers: { "content-encoding": "br" },
     body: brotliCompressSync("<html>fixture</html>"),
+  },
+  "/latin1": {
+    status: 200,
+    headers: { "content-type": "text/html; charset=iso-8859-1" },
+    body: latin1(LATIN1_TEXT),
+  },
+  // No charset in the header: only the page itself says what it is.
+  "/meta-latin1": {
+    status: 200,
+    body: latin1(`<meta charset="iso-8859-1">${LATIN1_TEXT}`),
+  },
+  // The header wins over the page.
+  "/header-over-meta": {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+    body: Buffer.from(`<meta charset="iso-8859-1">${LATIN1_TEXT}`),
+  },
+  "/unknown-charset": {
+    status: 200,
+    headers: { "content-type": "text/html; charset=x-no-such-charset" },
+    body: Buffer.from(LATIN1_TEXT),
   },
   "/at-cap": { status: 200, body: Buffer.alloc(MAX_BODY_BYTES, "a") },
   "/over-cap": { status: 200, body: Buffer.alloc(MAX_BODY_BYTES + 1, "a") },
@@ -406,6 +431,14 @@ describe("fetchPage bodies", () => {
     expect(page.html).toBe(FIXTURE_BODY);
   });
 
+  dbTest("decodes a latin-1 page by its charset", async ({ tx }) => {
+    const page = await fetchPage(`${base}/latin1`, deps(tx));
+
+    expect(page).toMatchObject({ strategy: "http", html: LATIN1_TEXT });
+    const rows = await tx.select().from(pageFetch);
+    expect(rows.map((r) => r.html)).toEqual([LATIN1_TEXT]);
+  });
+
   dbTest("accepts application/xhtml+xml", async ({ tx }) => {
     const page = await fetchPage(`${base}/xhtml`, deps(tx));
 
@@ -473,6 +506,26 @@ describe("fetchPage bodies", () => {
     expect(page.html.length).toBeGreaterThan(0);
     const rows = await tx.select().from(pageFetch);
     expect(rows.map((r) => r.html)).toEqual([page.html]);
+  });
+});
+
+describe("strategy charsets", () => {
+  it.for([
+    ["/latin1", LATIN1_TEXT],
+    ["/meta-latin1", `<meta charset="iso-8859-1">${LATIN1_TEXT}`],
+    ["/header-over-meta", `<meta charset="iso-8859-1">${LATIN1_TEXT}`],
+    // Falls back to UTF-8, which this body is.
+    ["/unknown-charset", LATIN1_TEXT],
+  ])("decodes %s as impit's own text() does", async ([path, expected]) => {
+    const url = `${base}${path}`;
+    const native = await (await new Impit().fetch(url)).text();
+
+    const http = await httpStrategy.fetch(url, ["127.0.0.1"]);
+    const impit = await impitStrategy.fetch(url, ["127.0.0.1"]);
+
+    expect(native).toBe(expected);
+    expect(http.body).toBe(expected);
+    expect(impit.body).toBe(expected);
   });
 });
 

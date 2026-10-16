@@ -1,4 +1,5 @@
 import { Impit } from "impit";
+import { decodeBody } from "./decode.js";
 import {
   FETCH_TIMEOUT_MS,
   readCapped,
@@ -22,8 +23,7 @@ export const impitStrategy: FetchStrategy = {
     return {
       status: res.status,
       headers: res.headers,
-      // decodeBuffer is what res.text() uses: it honours the page's charset.
-      body: bytes ? res.decodeBuffer(bytes) : "",
+      body: bytes ? decodeBody(bytes, res.headers.get("content-type")) : "",
       tooLarge: bytes === null,
     };
   },
