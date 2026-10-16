@@ -132,6 +132,25 @@ describe("recipe_ingredient", () => {
     });
   });
 
+  // NaN sorts above every number in Postgres, so a bare `> 0` lets it in.
+  dbTest.for(["NaN", "Infinity"])(
+    "rejects a quantity of %s",
+    async (quantity, { tx }) => {
+      const id = await newRecipe(tx);
+      const ingredientId = await newIngredient(tx);
+
+      await expect(
+        tx.transaction((sp) =>
+          sp
+            .insert(recipeIngredient)
+            .values({ recipeId: id, position: 1, ingredientId, quantity }),
+        ),
+      ).rejects.toMatchObject({
+        cause: { constraint: "recipe_ingredient_quantity_positive" },
+      });
+    },
+  );
+
   dbTest("blocks deleting an ingredient a line uses", async ({ tx }) => {
     const ingredientId = await newIngredient(tx);
     await tx

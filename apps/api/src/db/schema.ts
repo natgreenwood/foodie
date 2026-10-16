@@ -49,7 +49,12 @@ export const measurement = pgTable(
     isSystem: boolean("is_system").notNull().default(false),
   },
   (t) => [
-    check("measurement_factor_to_base_positive", sql`${t.factorToBase} > 0`),
+    // Postgres sorts NaN above Infinity above every number, so `> 0` alone
+    // accepts both, and either one turns any sum it is part of into NaN.
+    check(
+      "measurement_factor_to_base_positive",
+      sql`${t.factorToBase} > 0 AND ${t.factorToBase} < 'Infinity'`,
+    ),
   ],
 );
 
@@ -220,7 +225,11 @@ export const recipeIngredient = pgTable(
     // Serve the restrict check when an ingredient or measurement is deleted.
     index("recipe_ingredient_ingredient_id_idx").on(t.ingredientId),
     index("recipe_ingredient_measurement_id_idx").on(t.measurementId),
-    check("recipe_ingredient_quantity_positive", sql`${t.quantity} > 0`),
+    // Finite as well as positive: see measurement_factor_to_base_positive.
+    check(
+      "recipe_ingredient_quantity_positive",
+      sql`${t.quantity} > 0 AND ${t.quantity} < 'Infinity'`,
+    ),
   ],
 );
 
