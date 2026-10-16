@@ -1,7 +1,8 @@
 // One way of getting a page. fetchPage tries its strategies in order and
 // decides from each response whether to stop or fall back to the next, so a
 // strategy only fetches: it does not judge the response. Network failures
-// (refused, DNS, timeout) reject.
+// (refused, DNS, timeout) reject. A strategy never follows a redirect: it
+// returns the 3xx, and fetchPage checks the next hop before requesting it.
 export interface FetchStrategy {
   name: StrategyName;
   fetch(url: string): Promise<FetchResponse>;
@@ -12,8 +13,6 @@ export type StrategyName = "http" | "impit";
 
 export interface FetchResponse {
   status: number;
-  // After redirects.
-  finalUrl: string;
   headers: Headers;
   // Empty when tooLarge is set.
   body: string;
