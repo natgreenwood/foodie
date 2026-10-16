@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { BudgetExceededError, LIMITS } from "./budget.js";
-import { extractRecipe, type ExtractContext } from "./extract.js";
+import {
+  extractRecipe,
+  MAX_LINE_CHARS,
+  type ExtractContext,
+} from "./extract.js";
 import { measurements, unitKeys } from "./__fixtures__/units.js";
 
 // SEC-2 on NATG-245: pages built to make extraction slow. Each must fail
 // fast, as no recipe, rather than hold the event loop. These took 50-230 ms
-// locally, nearly all of it cheerio parsing the page; the bound leaves room
-// for a slower CI runner. The reader they replace took 7.8 s on 40,000
-// repeated properties and grew quadratically.
-const BOUND_MS = 500;
+// locally and up to about 600 ms on CI, nearly all of it cheerio parsing the
+// page. The reader they replace took 7.8 s on 40,000 repeated properties and
+// grew quadratically, so 2 s still catches it with room for a slow runner.
+const BOUND_MS = 2_000;
 
 const ctx: ExtractContext = {
   sourceHost: "example.com",
@@ -108,6 +112,31 @@ describe("extraction budget", () => {
 
     expect(() => extractRecipe(html, ctx)).toThrow(
       new BudgetExceededError("valuesPerProperty"),
+    );
+  });
+
+  it("cuts each ingredient line and step at MAX_LINE_CHARS before parsing", () => {
+    const long = "1 cup " + "flour ".repeat(1_000);
+    const html = jsonLd(
+      JSON.stringify({
+        "@type": "Recipe",
+        name: "Long lines",
+        recipeIngredient: [long, "2 eggs"],
+        recipeInstructions: [
+          { "@type": "HowToStep", text: "Stir ".repeat(1_000) },
+        ],
+      }),
+    );
+
+    const recipe = extractRecipe(html, ctx)?.recipe;
+
+    expect(recipe?.ingredients[0]?.rawText).toBe(
+      long.slice(0, MAX_LINE_CHARS).trimEnd(),
+    );
+    expect(recipe?.ingredients[0]?.quantity).toBe("1");
+    expect(recipe?.ingredients[1]?.rawText).toBe("2 eggs");
+    expect(recipe?.steps[0]?.text).toBe(
+      "Stir ".repeat(1_000).slice(0, MAX_LINE_CHARS).trimEnd(),
     );
   });
 });

@@ -87,11 +87,11 @@ function draft(
   ctx: ExtractContext,
 ): DraftRecipe {
   // Older microdata uses the retired `ingredients` property.
-  const entries = values(node.recipeIngredient ?? node.ingredients).flatMap(
-    lines,
-  );
+  const entries = values(node.recipeIngredient ?? node.ingredients)
+    .flatMap(lines)
+    .map(capLength);
   budget.check("valuesPerProperty", entries.length);
-  const stepTexts = steps(node.recipeInstructions);
+  const stepTexts = steps(node.recipeInstructions).map(capLength);
   budget.check("valuesPerProperty", stepTexts.length);
   return {
     title:
@@ -106,6 +106,16 @@ function draft(
     })),
     tags: tags([...values(node.keywords), ...values(node.recipeCategory)]),
   };
+}
+
+// No real ingredient line or step comes near this. Longer text is cut
+// rather than handed whole to the line parser (SEC-2 on NATG-245).
+export const MAX_LINE_CHARS = 1_000;
+
+function capLength(text: string): string {
+  return text.length > MAX_LINE_CHARS
+    ? text.slice(0, MAX_LINE_CHARS).trimEnd()
+    : text;
 }
 
 function ingredients(
