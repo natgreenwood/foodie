@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { connect, type AddressInfo } from "node:net";
 import { Writable } from "node:stream";
 import { eq, sql } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
@@ -796,6 +797,38 @@ describe("GET /auth/oidc/callback", () => {
     expect(logLines).toContainEqual(
       expect.objectContaining({
         req: expect.objectContaining({ method: "GET", url: "/me" }) as unknown,
+      }),
+    );
+  });
+
+  // app.inject drops a fragment before Fastify sees it, so this one is sent
+  // over a socket, as a hand-rolled client could. The callback is unknown
+  // with a trailing slash, so both the request line and the 404 line log it.
+  dbTest("never logs a raw fragment on the wire", async ({ tx }) => {
+    const { app, logLines } = start(tx);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const { port } = app.server.address() as AddressInfo;
+
+    const response = await new Promise<string>((resolve, reject) => {
+      let received = "";
+      const socket = connect(port, "127.0.0.1", () => {
+        socket.write(
+          "GET /auth/oidc/callback/#code=FRAGMENT_SENTINEL HTTP/1.1\r\n" +
+            "Host: localhost\r\nConnection: close\r\n\r\n",
+        );
+      });
+      socket.on("data", (chunk: Buffer) => (received += chunk.toString()));
+      socket.on("end", () => resolve(received));
+      socket.on("error", reject);
+    });
+
+    expect(response).toMatch(/^HTTP\/1\.1 404 /);
+    expect(response).not.toContain("FRAGMENT_SENTINEL");
+    expect(JSON.stringify(logLines)).not.toContain("FRAGMENT_SENTINEL");
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        msg: "route not found",
+        path: "/auth/oidc/callback/",
       }),
     );
   });

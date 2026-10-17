@@ -17,10 +17,11 @@ export type ApiErrorCode =
   | "internal_error";
 
 // A request's path as a log line may carry it: percent-decoded, so every
-// spelling of a route reads the same, and never the query string, which can
-// hold an authorization code or a credential a client put there.
+// spelling of a route reads the same, and never the query string or a
+// fragment, which can hold an authorization code or a credential a client
+// put there. The cut comes before decoding, so an encoded ? or # stays path.
 export function pathForLog(url: string): string {
-  const [path = ""] = url.split("?", 1);
+  const path = url.replace(/[?#].*$/s, "");
   try {
     return decodeURIComponent(path);
   } catch {
