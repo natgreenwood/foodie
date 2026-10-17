@@ -66,6 +66,31 @@ pnpm --filter @foodie/web dev     # in another shell; proxies /api to localhost:
 `NODE_ENV=development` lets the session cookie work over plain HTTP; see
 [Accounts and sign-in](#accounts-and-sign-in).
 
+### Supplying the key from Bitwarden Secrets Manager (`bws`)
+
+Instead of writing the key into `.env`, you can inject it with
+[`bws run`](https://bitwarden.com/help/secrets-manager-cli/). `bws run` sets
+one environment variable per secret, named after the secret's key, so the
+secret must be named exactly `SETTINGS_ENCRYPTION_KEY`. It needs
+`BWS_ACCESS_TOKEN` set; pass `--project-id <id>` to limit it to one project.
+
+Both the migration and the server read the key, so both must run under
+`bws run`:
+
+```sh
+# Docker: the api container migrates, then starts, with the injected key.
+bws run -- 'docker compose up --build'
+
+# Without Docker: source .env first, then run both commands under bws.
+set -a; . ./.env; set +a
+bws run -- 'pnpm --filter @foodie/api db:migrate && NODE_ENV=development pnpm --filter @foodie/api dev'
+```
+
+Delete the `SETTINGS_ENCRYPTION_KEY=` line from your `.env` when you use
+`bws`. Sourcing a `.env` that still has it empty, after `bws run` has injected
+the key (for example `bws run -- sh -c '. ./.env && …'`), replaces the key
+with an empty value and the api refuses to start.
+
 ### Checks
 
 Run from the repository root; CI runs the same three on every pull request.
