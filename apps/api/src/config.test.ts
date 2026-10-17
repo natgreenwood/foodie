@@ -21,6 +21,7 @@ describe("loadConfig", () => {
       admin: null,
       secureCookies: true,
       settingsEncryptionKey: settingsKeyBytes,
+      oidc: null,
     });
   });
 
@@ -171,5 +172,98 @@ describe("loadConfig", () => {
         message: expect.not.stringContaining(raw) as string,
       }) as Error,
     );
+  });
+
+  const oidcEnv = {
+    OIDC_ISSUER_URL: "https://id.example.com",
+    OIDC_CLIENT_ID: "foodie",
+    OIDC_CLIENT_SECRET: "not-a-real-secret",
+    OIDC_REDIRECT_URL: "https://foodie.example.com/api/auth/oidc/callback",
+  };
+
+  it("reads the OIDC provider when all four variables are set", () => {
+    const config = loadConfig({
+      DATABASE_URL: databaseUrl,
+      SETTINGS_ENCRYPTION_KEY: settingsKey,
+      ...oidcEnv,
+      OIDC_DISPLAY_NAME: " Home SSO ",
+    });
+    expect(config.oidc).toEqual({
+      issuerUrl: new URL("https://id.example.com"),
+      clientId: "foodie",
+      clientSecret: "not-a-real-secret",
+      redirectUrl: new URL("https://foodie.example.com/api/auth/oidc/callback"),
+      displayName: "Home SSO",
+    });
+  });
+
+  it("leaves OIDC off when none of its variables are set, or all are empty", () => {
+    const base = {
+      DATABASE_URL: databaseUrl,
+      SETTINGS_ENCRYPTION_KEY: settingsKey,
+    };
+    expect(loadConfig(base).oidc).toBeNull();
+    expect(
+      loadConfig({
+        ...base,
+        OIDC_ISSUER_URL: "",
+        OIDC_CLIENT_ID: "",
+        OIDC_CLIENT_SECRET: "",
+        OIDC_REDIRECT_URL: "",
+        OIDC_DISPLAY_NAME: "Home SSO",
+      }).oidc,
+    ).toBeNull();
+  });
+
+  it.each(Object.keys(oidcEnv))(
+    "fails naming %s when only it is missing, without echoing the secret",
+    (missing) => {
+      const env: NodeJS.ProcessEnv = {
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        ...oidcEnv,
+      };
+      delete env[missing];
+      expect(() => loadConfig(env)).toThrow(
+        expect.objectContaining({
+          name: "ConfigError",
+          message: expect.stringMatching(
+            new RegExp(`missing ${missing}$`),
+          ) as string,
+        }) as Error,
+      );
+      expect(() => loadConfig(env)).toThrow(
+        expect.objectContaining({
+          message: expect.not.stringContaining("not-a-real-secret") as string,
+        }) as Error,
+      );
+    },
+  );
+
+  it.each([
+    ["OIDC_ISSUER_URL", "not a url"],
+    ["OIDC_ISSUER_URL", "http://id.example.com"],
+    ["OIDC_REDIRECT_URL", "ftp://foodie.example.com/callback"],
+  ])("rejects %s of %s", (name, value) => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        ...oidcEnv,
+        [name]: value,
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("accepts http OIDC URLs only in development", () => {
+    const config = loadConfig({
+      DATABASE_URL: databaseUrl,
+      SETTINGS_ENCRYPTION_KEY: settingsKey,
+      NODE_ENV: "development",
+      ...oidcEnv,
+      OIDC_ISSUER_URL: "http://localhost:1411",
+      OIDC_REDIRECT_URL: "http://localhost:5173/api/auth/oidc/callback",
+    });
+    expect(config.oidc?.issuerUrl.href).toBe("http://localhost:1411/");
   });
 });

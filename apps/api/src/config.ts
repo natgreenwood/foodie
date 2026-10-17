@@ -14,6 +14,21 @@ export interface Config {
   secureCookies: boolean;
   // AES-256 key for settings stored encrypted, such as AI provider API keys.
   settingsEncryptionKey: Buffer;
+  // The OIDC provider users may sign in with (NATG-226); null when none of
+  // OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET and OIDC_REDIRECT_URL
+  // is set.
+  oidc: OidcConfig | null;
+}
+
+export interface OidcConfig {
+  issuerUrl: URL;
+  clientId: string;
+  clientSecret: string;
+  // Where the provider sends the browser back: the api's
+  // /auth/oidc/callback as the browser reaches it, e.g. through /api/.
+  redirectUrl: URL;
+  // The sign-in button's label; null for the web app's generic one.
+  displayName: string | null;
 }
 
 export class ConfigError extends Error {
@@ -71,6 +86,52 @@ function parseSettingsKey(raw: string | undefined): Buffer {
   return key;
 }
 
+const OIDC_REQUIRED = [
+  "OIDC_ISSUER_URL",
+  "OIDC_CLIENT_ID",
+  "OIDC_CLIENT_SECRET",
+  "OIDC_REDIRECT_URL",
+] as const;
+
+// All four or none. Plain http is accepted only in development, where a
+// local provider may have no certificate. The secret is never echoed back.
+function parseOidc(
+  env: NodeJS.ProcessEnv,
+  development: boolean,
+): OidcConfig | null {
+  const set = OIDC_REQUIRED.filter((name) => env[name]);
+  if (set.length === 0) return null;
+  if (set.length < OIDC_REQUIRED.length) {
+    const missing = OIDC_REQUIRED.filter((name) => !env[name]);
+    throw new ConfigError(
+      `${OIDC_REQUIRED.join(", ")} must be set together, or none; missing ${missing.join(", ")}`,
+    );
+  }
+  const url = (name: "OIDC_ISSUER_URL" | "OIDC_REDIRECT_URL") => {
+    const raw = env[name]!;
+    const parsed = URL.canParse(raw) ? new URL(raw) : null;
+    if (
+      !parsed ||
+      !(
+        parsed.protocol === "https:" ||
+        (development && parsed.protocol === "http:")
+      )
+    ) {
+      throw new ConfigError(
+        `${name} must be an https URL${development ? " (or http in development)" : ""}, got "${raw}"`,
+      );
+    }
+    return parsed;
+  };
+  return {
+    issuerUrl: url("OIDC_ISSUER_URL"),
+    clientId: env.OIDC_CLIENT_ID!,
+    clientSecret: env.OIDC_CLIENT_SECRET!,
+    redirectUrl: url("OIDC_REDIRECT_URL"),
+    displayName: env.OIDC_DISPLAY_NAME?.trim() || null,
+  };
+}
+
 // Reads configuration from the environment and fails fast on anything
 // missing or malformed. Values are never echoed back for DATABASE_URL because
 // it carries the database password.
@@ -87,5 +148,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     admin: parseAdmin(env),
     secureCookies: env.NODE_ENV !== "development",
     settingsEncryptionKey: parseSettingsKey(env.SETTINGS_ENCRYPTION_KEY),
+    oidc: parseOidc(env, env.NODE_ENV === "development"),
   };
 }
