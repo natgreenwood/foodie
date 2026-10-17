@@ -198,9 +198,10 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   // alone would not stop it. SameSite does not tell a sibling origin on the
   // same site from the web app, so the request must also come from the
   // trusted origin: 403 untrusted_origin otherwise, before a trip is
-  // recorded or the provider contacted. A refused request still counts
-  // against the per-client limit, which counts every request to the route
-  // before the session check and this guard run.
+  // recorded or the provider contacted. The order: requireUser (this scope's
+  // onRequest) answers 401 first and counts nothing; then the per-client
+  // limit (this route's onRequest) counts the signed-in request; then this
+  // guard. So a refused origin still counts against the limit.
   app.post("/auth/oidc/connect", limited, async (request, reply) => {
     if (!oidc) return notConfigured(reply);
     const origin = request.headers.origin;
