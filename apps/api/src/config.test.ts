@@ -21,6 +21,7 @@ describe("loadConfig", () => {
       admin: null,
       secureCookies: true,
       settingsEncryptionKey: settingsKeyBytes,
+      trustProxy: false,
     });
   });
 
@@ -171,5 +172,56 @@ describe("loadConfig", () => {
         message: expect.not.stringContaining(raw) as string,
       }) as Error,
     );
+  });
+
+  it.each([
+    ["one address", "127.0.0.1", ["127.0.0.1"]],
+    [
+      "a list of ranges",
+      " 10.0.0.0/8, 172.16.0.0/12 ",
+      ["10.0.0.0/8", "172.16.0.0/12"],
+    ],
+    ["IPv6", "::1,fd00::/8", ["::1", "fd00::/8"]],
+  ])("reads TRUST_PROXY as %s", (_, raw, expected) => {
+    expect(
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        TRUST_PROXY: raw,
+      }).trustProxy,
+    ).toEqual(expected);
+  });
+
+  it("treats an empty TRUST_PROXY as unset", () => {
+    expect(
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        TRUST_PROXY: "",
+      }).trustProxy,
+    ).toBe(false);
+  });
+
+  // "1" is the hop count of the original proposal, which Fastify ignores.
+  it.each([
+    "1",
+    "0",
+    "true",
+    "yes",
+    "loopback",
+    "10.0.0.0/99",
+    "::1/129",
+    "10.0.0.0/8/8",
+    "10.0.0.0/",
+    "256.0.0.1",
+    "127.0.0.1,",
+  ])("rejects TRUST_PROXY %j", (raw) => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        TRUST_PROXY: raw,
+      }),
+    ).toThrow(ConfigError);
   });
 });

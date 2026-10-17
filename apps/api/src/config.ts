@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { normaliseEmail, passwordProblem } from "./auth/credentials.js";
 import { parseEncryptionKey } from "./settings/encryption.js";
 
@@ -14,6 +15,11 @@ export interface Config {
   secureCookies: boolean;
   // AES-256 key for settings stored encrypted, such as AI provider API keys.
   settingsEncryptionKey: Buffer;
+  // Fastify's trustProxy: the addresses or CIDR ranges of the proxies whose
+  // X-Forwarded-For is believed, or false to believe none and use the socket
+  // address. Never true or a hop count, which would let a client that
+  // reaches the api directly choose its own request.ip.
+  trustProxy: string[] | false;
 }
 
 export class ConfigError extends Error {
@@ -71,6 +77,32 @@ function parseSettingsKey(raw: string | undefined): Buffer {
   return key;
 }
 
+// An IPv4 or IPv6 address, optionally with a /prefix in range for it.
+function isAddressOrRange(entry: string): boolean {
+  const [address = "", prefix, ...rest] = entry.split("/");
+  const family = isIP(address);
+  if (family === 0 || rest.length > 0) return false;
+  if (prefix === undefined) return true;
+  return (
+    /^\d{1,3}$/.test(prefix) && Number(prefix) <= (family === 4 ? 32 : 128)
+  );
+}
+
+// Comma-separated proxy addresses or CIDRs; unset or empty means trust none.
+// A bare number such as "1" is refused rather than read as a hop count.
+function parseTrustProxy(raw: string | undefined): string[] | false {
+  if (raw === undefined || raw.trim() === "") return false;
+  const entries = raw.split(",").map((entry) => entry.trim());
+  for (const entry of entries) {
+    if (!isAddressOrRange(entry)) {
+      throw new ConfigError(
+        `TRUST_PROXY must be a comma-separated list of IP addresses or CIDR ranges, e.g. "127.0.0.1" or "10.0.0.0/8"; "${entry}" is not one`,
+      );
+    }
+  }
+  return entries;
+}
+
 // Reads configuration from the environment and fails fast on anything
 // missing or malformed. Values are never echoed back for DATABASE_URL because
 // it carries the database password.
@@ -87,5 +119,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     admin: parseAdmin(env),
     secureCookies: env.NODE_ENV !== "development",
     settingsEncryptionKey: parseSettingsKey(env.SETTINGS_ENCRYPTION_KEY),
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
   };
 }
