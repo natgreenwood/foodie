@@ -219,7 +219,8 @@ function buildRequest(
     return {
       url: OPENAI_URL,
       headers: { authorization: `Bearer ${credential}` },
-      // OpenAI's reasoning models refuse max_tokens; every model takes this.
+      // Not max_tokens: OpenAI's reasoning models refuse it with a 400, and
+      // every OpenAI model takes max_completion_tokens. Do not change it back.
       body: { model, messages, max_completion_tokens: maxTokens },
     };
   }
@@ -237,8 +238,10 @@ function buildRequest(
 }
 
 // Ollama's credential is its server's base URL, as the admin saved it (e.g.
-// http://ollama:11434, or behind a proxy at a path). fetch refuses a URL
-// with a user and password in it, so those become a Basic header instead.
+// http://ollama:11434, or behind a proxy at a path). One trailing /v1 is
+// dropped, since Ollama's own docs show the base URL with it. The stored
+// value stays as the admin typed it. fetch refuses a URL with a user and
+// password in it, so those become a Basic header instead.
 function ollamaEndpoint(baseUrl: string): Omit<ProviderRequest, "body"> {
   const base = new URL(baseUrl);
   const headers: Record<string, string> = {};
@@ -248,7 +251,7 @@ function ollamaEndpoint(baseUrl: string): Omit<ProviderRequest, "body"> {
     base.username = "";
     base.password = "";
   }
-  if (!base.pathname.endsWith("/")) base.pathname += "/";
+  base.pathname = `${base.pathname.replace(/\/+$/, "").replace(/\/v1$/, "")}/`;
   return { url: new URL("v1/chat/completions", base).toString(), headers };
 }
 

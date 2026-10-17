@@ -175,6 +175,19 @@ dbTest(
   },
 );
 
+for (const baseUrl of ["http://ollama:11434/v1", "http://ollama:11434/v1/"]) {
+  dbTest(
+    `does not repeat /v1 from the Ollama base URL ${baseUrl}`,
+    async ({ tx }) => {
+      await configure(tx, "ollama", "llama3.1:8b", baseUrl);
+      respond(200, chatAnswer);
+
+      await complete({ db: tx, settingsKey }, request);
+      expect(sent().url).toBe("http://ollama:11434/v1/chat/completions");
+    },
+  );
+}
+
 dbTest("refuses when no provider is selected", async ({ tx }) => {
   await setProviderCredential(tx, settingsKey, "openai", API_KEY);
 
