@@ -1,3 +1,5 @@
+import { reportUnauthenticated } from "./auth";
+
 // Mirrors the POST /imports/preview contract in NATG-245
 // (apps/api/src/routes/imports.ts once it lands).
 export interface PreviewIngredient {
@@ -35,7 +37,7 @@ export interface ImportPreview {
 }
 
 // `code` is the api's error code (invalid_url, no_recipe_found, fetch_failed,
-// import_not_permitted) or null when we never got a contract error back.
+// import_not_permitted, unauthenticated) or null when we never got a contract error back.
 export class ImportPreviewError extends Error {
   override name = "ImportPreviewError";
   constructor(
@@ -92,6 +94,7 @@ export async function previewImport(
     );
   }
 
+  if (res.status === 401) reportUnauthenticated();
   const body: unknown = await res.json().catch(() => undefined);
   if (res.ok) {
     if (isPreview(body)) return body;

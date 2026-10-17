@@ -322,6 +322,7 @@ async function fetchFollowingRedirects(
   policy: DestinationPolicy,
   attempts: string[],
 ): Promise<FetchResponse & { finalUrl: string }> {
+  const session = strategy.session?.() ?? strategy;
   let current = new URL(url);
   // The redirect that led to `current`, for the error; null on the first.
   let via: number | null = null;
@@ -347,7 +348,7 @@ async function fetchFollowingRedirects(
 
     let res: FetchResponse;
     try {
-      res = await strategy.fetch(current.toString(), check.addresses);
+      res = await session.fetch(current.toString(), check.addresses);
     } catch (err) {
       // No response at all; nothing suggests another strategy would differ.
       attempts.push(`${strategy.name}:${hop} ${describeError(err)}`);

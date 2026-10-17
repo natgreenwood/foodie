@@ -9,7 +9,13 @@
 export interface FetchStrategy {
   name: StrategyName;
   fetch(url: string, addresses: readonly string[]): Promise<FetchResponse>;
+  // If present, fetchPage asks for one session per call and makes every hop
+  // through it, so the hops can share state such as cookies. The session is
+  // dropped when the call ends; nothing in it reaches another call.
+  session?(): FetchSession;
 }
+
+export type FetchSession = Pick<FetchStrategy, "fetch">;
 
 // Headless Chromium is parked (NATG-239); it would add a name here.
 export type StrategyName = "http" | "impit";

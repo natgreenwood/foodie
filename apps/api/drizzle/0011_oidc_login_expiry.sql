@@ -1,0 +1,1 @@
+CREATE INDEX "oidc_login_expires_at_idx" ON "oidc_login" USING btree ("expires_at");

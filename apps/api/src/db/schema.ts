@@ -163,8 +163,8 @@ export const ingredientName = pgTable(
   ],
 );
 
-// One recipe, imported from a URL or entered by hand. There is no owner yet:
-// auth adds owner_id in its own migration. source_url is not unique, so
+// One recipe, imported from a URL or entered by hand. Only its owner sees
+// it, and deleting the owner deletes it. source_url is not unique, so
 // importing the same page twice gives two recipes.
 export const recipe = pgTable(
   "recipe",
@@ -172,6 +172,9 @@ export const recipe = pgTable(
     id: bigint("id", { mode: "number" })
       .primaryKey()
       .generatedAlwaysAsIdentity(),
+    ownerId: bigint("owner_id", { mode: "number" })
+      .notNull()
+      .references((): AnyPgColumn => user.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
     sourceUrl: text("source_url"),
     servings: integer("servings"),
@@ -186,6 +189,8 @@ export const recipe = pgTable(
       .defaultNow(),
   },
   (t) => [
+    // Serves listing a user's recipes and the cascade on user delete.
+    index("recipe_owner_id_idx").on(t.ownerId),
     check("recipe_title_not_blank", sql`${normalised(t.title)} <> ''`),
     check("recipe_servings_positive", sql`${t.servings} > 0`),
     check("recipe_prep_minutes_not_negative", sql`${t.prepMinutes} >= 0`),
@@ -293,3 +298,154 @@ export const pageFetch = pgTable("page_fetch", {
   html: text("html").notNull(),
   fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
 });
+
+// One account. Email is the sign-in identifier, unique ignoring case; it is
+// stored as entered (trimmed) and always looked up through lower(email).
+// password_hash is an argon2id hash, null for an account that can only sign
+// in another way (OIDC, NATG-226). A disabled account cannot sign in and its
+// sessions are refused.
+export const user = pgTable(
+  "user",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    email: text("email").notNull(),
+    passwordHash: text("password_hash"),
+    displayName: text("display_name"),
+    // A BCP-47 tag, as in measurement_name.locale.
+    locale: text("locale").notNull().default("en-GB"),
+    isAdmin: boolean("is_admin").notNull().default(false),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Set on insert only; whatever updates a user sets it.
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("user_email_key").on(sql`lower(${t.email})`),
+    check("user_email_not_blank", sql`btrim(${t.email}) <> ''`),
+  ],
+);
+
+// A signed-in browser. The cookie carries a random token; `id` is its
+// SHA-256, so a copy of this table cannot be replayed as a cookie. Kept in
+// Postgres so sessions survive an api restart. Rows past expires_at are
+// refused and deleted when next presented.
+export const session = pgTable(
+  "session",
+  {
+    id: text("id").primaryKey(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  // Serves the cascade on user delete.
+  (t) => [index("session_user_id_idx").on(t.userId)],
+);
+
+// A provider identity that signs in to an account (NATG-226). Matched on
+// issuer and subject only, never on email, so an email changed at the
+// provider neither breaks nor moves the link. One identity per provider per
+// account. Deleting the account deletes the link, so the same identity then
+// gets a new account.
+export const oidcIdentity = pgTable(
+  "oidc_identity",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    issuer: text("issuer").notNull(),
+    subject: text("subject").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("oidc_identity_issuer_subject_key").on(t.issuer, t.subject),
+    // Also serves the cascade on user delete.
+    uniqueIndex("oidc_identity_user_issuer_key").on(t.userId, t.issuer),
+  ],
+);
+
+// A browser on its way through the provider: the state, nonce and PKCE
+// verifier its callback is checked against. The browser holds a random token
+// in its own cookie; `id` is its SHA-256, as for session. Used once: the
+// callback deletes the row it reads. `user_id` is set when a signed-in user
+// is connecting an identity rather than signing in.
+export const oidcLogin = pgTable(
+  "oidc_login",
+  {
+    id: text("id").primaryKey(),
+    state: text("state").notNull(),
+    nonce: text("nonce").notNull(),
+    codeVerifier: text("code_verifier").notNull(),
+    userId: bigint("user_id", { mode: "number" }).references(() => user.id, {
+      onDelete: "cascade",
+    }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    // Serves the cascade on user delete.
+    index("oidc_login_user_id_idx").on(t.userId),
+    // Serves the bounded cleanup and the count of trips in progress.
+    index("oidc_login_expires_at_idx").on(t.expiresAt),
+  ],
+);
+
+// The AI providers the admin can configure (NATG-277). Both AI settings
+// tables check against this list, so adding a provider is a migration.
+const aiProviderCheck = (column: AnyPgColumn) =>
+  sql`${column} IN ('anthropic', 'openai', 'openrouter', 'ollama')`;
+
+// The platform-wide credential for each configured AI provider: its API key,
+// or for Ollama the server's base URL. Clearing a provider deletes its row.
+// `credential` is AES-256-GCM ciphertext under SETTINGS_ENCRYPTION_KEY
+// (src/settings/encryption.ts); the plain value is never stored.
+export const aiProviderSetting = pgTable(
+  "ai_provider_setting",
+  {
+    provider: text("provider").primaryKey(),
+    credential: text("credential").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check("ai_provider_setting_provider_known", aiProviderCheck(t.provider)),
+  ],
+);
+
+// The provider and model each AI procedure uses, one row per procedure.
+// `default` is what a procedure without its own row falls back to; adding a
+// procedure is a row, not a migration. Per-procedure settings such as a
+// reasoning level or usage quota (NATG-241) are later columns here.
+export const aiModelSelection = pgTable(
+  "ai_model_selection",
+  {
+    procedure: text("procedure").primaryKey(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check("ai_model_selection_provider_known", aiProviderCheck(t.provider)),
+    check(
+      "ai_model_selection_procedure_not_blank",
+      sql`btrim(${t.procedure}) <> ''`,
+    ),
+    check("ai_model_selection_model_not_blank", sql`btrim(${t.model}) <> ''`),
+  ],
+);

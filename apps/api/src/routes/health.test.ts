@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../app.js";
+import type { AdminAiDeps } from "./admin-ai.js";
 import type { ImportDeps } from "./imports.js";
 
-// The import routes are not exercised here.
+// The import, auth and admin routes are not exercised here.
 const unused = () => Promise.reject(new Error("not used by these tests"));
 const importDeps: ImportDeps = { fetchPage: unused, loadUnits: unused };
+const authDeps: AdminAiDeps = {
+  db: {} as AdminAiDeps["db"],
+  secureCookies: false,
+  settingsKey: Buffer.alloc(32),
+};
 
 describe("GET /health", () => {
   let app: FastifyInstance;
@@ -15,7 +21,11 @@ describe("GET /health", () => {
   });
 
   it("returns 200 and db up when the database answers", async () => {
-    app = buildApp({ pingDatabase: () => Promise.resolve(), ...importDeps });
+    app = buildApp({
+      pingDatabase: () => Promise.resolve(),
+      ...importDeps,
+      ...authDeps,
+    });
 
     const res = await app.inject({ method: "GET", url: "/health" });
 
@@ -30,6 +40,7 @@ describe("GET /health", () => {
           new Error("connect ECONNREFUSED 10.0.0.5:5432 password=hunter2"),
         ),
       ...importDeps,
+      ...authDeps,
     });
 
     const res = await app.inject({ method: "GET", url: "/health" });
