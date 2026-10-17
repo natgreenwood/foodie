@@ -8,12 +8,22 @@ import {
   recipeIngredient,
   recipeStep,
   recipeTag,
+  user,
 } from "./schema.js";
+
+async function newUser(tx: TestTransaction): Promise<number> {
+  const [row] = await tx
+    .insert(user)
+    .values({ email: `cook-${crypto.randomUUID()}@recipe-table.test` })
+    .returning({ id: user.id });
+  if (!row) throw new Error("user insert returned no row");
+  return row.id;
+}
 
 async function newRecipe(tx: TestTransaction): Promise<number> {
   const [row] = await tx
     .insert(recipe)
-    .values({ title: "Shakshuka" })
+    .values({ ownerId: await newUser(tx), title: "Shakshuka" })
     .returning({ id: recipe.id });
   if (!row) throw new Error("recipe insert returned no row");
   return row.id;
@@ -39,10 +49,55 @@ async function newMeasurement(tx: TestTransaction): Promise<number> {
 
 describe("recipe", () => {
   dbTest("rejects a blank title", async ({ tx }) => {
+    const ownerId = await newUser(tx);
     await expect(
-      tx.transaction((sp) => sp.insert(recipe).values({ title: " \t " })),
+      tx.transaction((sp) =>
+        sp.insert(recipe).values({ ownerId, title: " \t " }),
+      ),
     ).rejects.toMatchObject({
       cause: { constraint: "recipe_title_not_blank" },
+    });
+  });
+
+  dbTest("is deleted with its owner, lines and all", async ({ tx }) => {
+    const ownerId = await newUser(tx);
+    const [mine] = await tx
+      .insert(recipe)
+      .values({ ownerId, title: "Shakshuka" })
+      .returning({ id: recipe.id });
+    await tx.insert(recipeStep).values({
+      recipeId: mine!.id,
+      position: 1,
+      text: "Fry the onions.",
+    });
+    const theirs = await newRecipe(tx);
+
+    await tx.delete(user).where(eq(user.id, ownerId));
+
+    expect(
+      await tx.select().from(recipe).where(eq(recipe.ownerId, ownerId)),
+    ).toEqual([]);
+    expect(
+      await tx
+        .select()
+        .from(recipeStep)
+        .where(eq(recipeStep.recipeId, mine!.id)),
+    ).toEqual([]);
+    expect(
+      await tx
+        .select({ id: recipe.id })
+        .from(recipe)
+        .where(eq(recipe.id, theirs)),
+    ).toEqual([{ id: theirs }]);
+  });
+
+  dbTest("rejects an owner that is not a user", async ({ tx }) => {
+    await expect(
+      tx.transaction((sp) =>
+        sp.insert(recipe).values({ ownerId: 0, title: "Shakshuka" }),
+      ),
+    ).rejects.toMatchObject({
+      cause: { constraint: "recipe_owner_id_user_id_fk" },
     });
   });
 

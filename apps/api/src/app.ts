@@ -12,6 +12,7 @@ import {
 import { healthRoutes, type HealthDeps } from "./routes/health.js";
 import { importRoutes, type ImportDeps } from "./routes/imports.js";
 import { meRoutes } from "./routes/me.js";
+import { recipeRoutes } from "./routes/recipes.js";
 
 export type AppDeps = HealthDeps & ImportDeps & AuthDeps;
 
@@ -38,6 +39,7 @@ export function buildApp(
   app.register((signedIn, _opts, done) => {
     signedIn.addHook("onRequest", seams.requireUser ?? requireUser(deps));
     signedIn.register(meRoutes, deps);
+    signedIn.register(recipeRoutes, deps);
     signedIn.register(importRoutes, deps);
     done();
   });

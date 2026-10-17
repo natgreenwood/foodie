@@ -1,6 +1,5 @@
 import cookie from "@fastify/cookie";
 import type {
-  FastifyError,
   FastifyInstance,
   FastifyPluginCallback,
   FastifyReply,
@@ -21,7 +20,7 @@ import {
   PASSWORD_MAX_LENGTH,
   passwordProblem,
 } from "../auth/credentials.js";
-import { describeError } from "../db/errors.js";
+import { apiErrorHandler, sendError } from "./errors.js";
 
 export interface AuthDeps {
   db: Db;
@@ -38,46 +37,11 @@ declare module "fastify" {
 
 export const SESSION_COOKIE = "foodie_session";
 
-export type AuthErrorCode =
-  | "invalid_request"
-  | "invalid_credentials"
-  | "email_taken"
-  | "unauthenticated"
-  | "internal_error";
-
-export function sendError(
-  reply: FastifyReply,
-  status: number,
-  error: AuthErrorCode,
-  message: string,
-) {
-  return reply.code(status).send({ error, message });
-}
-
 // Registers the cookie parser and the request.user slot on the root app, so
 // every plugin sees them.
 export function registerSessionSupport(app: FastifyInstance) {
   app.register(cookie);
   app.decorateRequest("user", null);
-}
-
-// For the auth and profile plugins: an unparseable body answers in the
-// contract's shape, and anything unexpected is logged as one line. Drizzle
-// puts query parameters (here a password hash or an email) in the error
-// message after the first line, and describeError keeps only the first.
-export function authErrorHandler(
-  err: FastifyError,
-  request: FastifyRequest,
-  reply: FastifyReply,
-) {
-  if (
-    err.code === "FST_ERR_CTP_INVALID_JSON_BODY" ||
-    err.code === "FST_ERR_CTP_EMPTY_JSON_BODY"
-  ) {
-    return sendError(reply, 400, "invalid_request", "body must be JSON");
-  }
-  request.log.error({ error: describeError(err) }, "auth: request failed");
-  return sendError(reply, 500, "internal_error", "something went wrong");
 }
 
 // onRequest hook for every route that needs a signed-in user: loads the
@@ -101,7 +65,7 @@ export const authRoutes: FastifyPluginCallback<AuthDeps> = (
   done,
 ) => {
   const { db } = deps;
-  app.setErrorHandler(authErrorHandler);
+  app.setErrorHandler(apiErrorHandler("auth"));
 
   async function signIn(reply: FastifyReply, userId: number) {
     const { token, expiresAt } = await createSession(db, userId);

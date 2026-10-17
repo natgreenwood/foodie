@@ -163,8 +163,8 @@ export const ingredientName = pgTable(
   ],
 );
 
-// One recipe, imported from a URL or entered by hand. There is no owner yet:
-// auth adds owner_id in its own migration. source_url is not unique, so
+// One recipe, imported from a URL or entered by hand. Only its owner sees
+// it, and deleting the owner deletes it. source_url is not unique, so
 // importing the same page twice gives two recipes.
 export const recipe = pgTable(
   "recipe",
@@ -172,6 +172,9 @@ export const recipe = pgTable(
     id: bigint("id", { mode: "number" })
       .primaryKey()
       .generatedAlwaysAsIdentity(),
+    ownerId: bigint("owner_id", { mode: "number" })
+      .notNull()
+      .references((): AnyPgColumn => user.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
     sourceUrl: text("source_url"),
     servings: integer("servings"),
@@ -186,6 +189,8 @@ export const recipe = pgTable(
       .defaultNow(),
   },
   (t) => [
+    // Serves listing a user's recipes and the cascade on user delete.
+    index("recipe_owner_id_idx").on(t.ownerId),
     check("recipe_title_not_blank", sql`${normalised(t.title)} <> ''`),
     check("recipe_servings_positive", sql`${t.servings} > 0`),
     check("recipe_prep_minutes_not_negative", sql`${t.prepMinutes} >= 0`),
