@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, expect, vi } from "vitest";
 import { dbTest } from "../test/db.js";
 import type { TestTransaction } from "../test/db.js";
@@ -22,6 +24,8 @@ const request = {
   maxTokens: 256,
 };
 
+// For the one test that needs a real request.
+const realFetch = globalThis.fetch;
 const fetchMock = vi.fn<typeof fetch>();
 vi.stubGlobal("fetch", fetchMock);
 afterEach(() => {
@@ -506,6 +510,7 @@ for (const [what, code] of [
   ["more than 64 characters", "x".repeat(65)],
   ["a number", 401],
   ["an object", { message: request.user }],
+  ["a well-formed code not in the set", "abc"],
 ] as const) {
   dbTest(
     `gives only the status for an error code of ${what}`,
@@ -525,6 +530,81 @@ for (const [what, code] of [
     },
   );
 }
+
+for (const password of ["Q", "QZ", "QZX"]) {
+  dbTest(
+    `gives only the status for a ${password.length}-character password or prompt as the code`,
+    async ({ tx }) => {
+      await configure(
+        tx,
+        "ollama",
+        "llama3.1:8b",
+        `http://Kq:${password}@ollama.lan:11434`,
+      );
+      // The prompt is as short, and placed in error.type.
+      const prompt = password.replace(/./g, "W");
+      respond(401, { error: { code: password, type: prompt } });
+
+      const err = (await complete(
+        { db: tx, settingsKey },
+        { ...request, user: prompt },
+      ).catch((e: unknown) => e)) as AiProviderError;
+      expect(err).toMatchObject({
+        code: null,
+        providerMessage: "HTTP 401",
+        message: "ollama llama3.1:8b: http_error, status 401",
+      });
+      expect(err.message).not.toContain(password);
+      expect(err.message).not.toContain(prompt);
+    },
+  );
+}
+
+dbTest(
+  "fails on a redirect without following it to the second origin",
+  async ({ tx }) => {
+    let reached = 0;
+    const second = createServer((req, res) => {
+      reached += 1;
+      req.resume();
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) =>
+      second.listen(0, "127.0.0.1", resolve),
+    );
+    const secondUrl = `http://127.0.0.1:${(second.address() as AddressInfo).port}/v1/chat/completions`;
+    const first = createServer((req, res) => {
+      req.resume();
+      res.writeHead(307, { location: secondUrl });
+      res.end();
+    });
+    await new Promise<void>((resolve) => first.listen(0, "127.0.0.1", resolve));
+    const { port } = first.address() as AddressInfo;
+    fetchMock.mockImplementation(realFetch);
+
+    try {
+      await configure(
+        tx,
+        "ollama",
+        "llama3.1:8b",
+        `http://me:s3cret-pass@127.0.0.1:${port}`,
+      );
+      const err = (await complete({ db: tx, settingsKey }, request).catch(
+        (e: unknown) => e,
+      )) as AiProviderError;
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect(err).toMatchObject({ reason: "unreachable", status: null });
+      expect(err.cause).toStrictEqual({ name: "TypeError", code: null });
+      for (const secret of ["s3cret-pass", request.user]) {
+        expect(err.message).not.toContain(secret);
+      }
+      expect(reached).toBe(0);
+    } finally {
+      first.close();
+      second.close();
+    }
+  },
+);
 
 dbTest(
   "refuses an Ollama URL whose password does not decode",

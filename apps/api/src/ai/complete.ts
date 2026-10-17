@@ -24,11 +24,33 @@ export const MAX_RESPONSE_BYTES = 1024 * 1024;
 // verbose error cannot flood the log line.
 const MAX_PROVIDER_MESSAGE = 500;
 
-// The only text taken from a provider's error body, or from a caught error
-// for `cause`: an identifier such as invalid_api_key or ECONNREFUSED. Free
-// text is never quoted, since a provider may echo a credential or the prompt
-// back in it, in part or in full, where no scrub can find it.
-const ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+// The only text ever taken from a provider's error body: a code from this
+// set, as is. Free text is never quoted, since a provider may echo a
+// credential or the prompt back in it, in part or in full, where no scrub can
+// find it; and a pattern would still let a short password or a one-word
+// fragment of the prompt through, so the set is finite.
+export const PROVIDER_ERROR_CODES: ReadonlySet<string> = new Set([
+  // Anthropic error.type.
+  "invalid_request_error",
+  "authentication_error",
+  "permission_error",
+  "not_found_error",
+  "request_too_large",
+  "rate_limit_error",
+  "api_error",
+  "overloaded_error",
+  // OpenAI-compatible error.code or error.type.
+  "invalid_api_key",
+  "insufficient_quota",
+  "rate_limit_exceeded",
+  "model_not_found",
+  "context_length_exceeded",
+  "server_error",
+]);
+
+// The name and code of a caught error, for `cause`. These come from Node,
+// not the provider, so a pattern is enough: e.g. TypeError, ECONNREFUSED.
+const NODE_ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
 
 export interface CompletionRequest {
   system: string;
@@ -99,8 +121,8 @@ export class AiProviderError extends Error {
     // The provider's HTTP status; null if there was no response.
     readonly status: number | null,
     // For http_error, the provider's error code (Anthropic's error.type; the
-    // OpenAI-compatible error.code, else error.type) when it matches
-    // ERROR_CODE; otherwise null.
+    // OpenAI-compatible error.code, else error.type) when it is in
+    // PROVIDER_ERROR_CODES; otherwise null.
     readonly code: string | null,
     // For http_error, "HTTP <status>" and the code; otherwise what went wrong.
     // Never the provider's own words.
@@ -187,6 +209,9 @@ export async function complete(
       method: "POST",
       headers: { "content-type": "application/json", ...call.headers },
       body: JSON.stringify(call.body),
+      // A redirect fails as unreachable rather than resending the
+      // credential and the prompt to wherever it points.
+      redirect: "error",
       // Covers the body too: it aborts the response stream being read.
       signal: AbortSignal.timeout(deps.timeoutMs ?? COMPLETION_TIMEOUT_MS),
     });
@@ -341,15 +366,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 // The code in an error body, { error: { type, code } }: Anthropic's
-// error.type, or the OpenAI-compatible error.code, else error.type. Null when
-// it is not a string matching ERROR_CODE. Nothing else in the body, its
-// message included, is ever quoted.
+// error.type, or the OpenAI-compatible error.code, else error.type, whichever
+// is first in PROVIDER_ERROR_CODES; null when neither is. Nothing else in the
+// body, its message included, is ever quoted.
 function errorCode(provider: AiProvider, json: unknown): string | null {
   if (!isRecord(json) || !isRecord(json.error)) return null;
   const { code, type } = json.error;
   const candidates = provider === "anthropic" ? [type] : [code, type];
-  const found = candidates.find((c) => typeof c === "string");
-  return typeof found === "string" && ERROR_CODE.test(found) ? found : null;
+  const found = candidates.find(
+    (c) => typeof c === "string" && PROVIDER_ERROR_CODES.has(c),
+  );
+  return typeof found === "string" ? found : null;
 }
 
 // Only the name and code of a caught error, for `cause`: its message and its
@@ -363,9 +390,9 @@ function causeOf(err: unknown): { name: string; code: string | null } {
     current = current.cause
   ) {
     const own = (current as { code?: unknown }).code;
-    if (typeof own === "string" && ERROR_CODE.test(own)) code = own;
+    if (typeof own === "string" && NODE_ERROR_CODE.test(own)) code = own;
   }
-  return { name: ERROR_CODE.test(name) ? name : "Error", code };
+  return { name: NODE_ERROR_CODE.test(name) ? name : "Error", code };
 }
 
 // `text` with every occurrence of each secret replaced, in one pass and
