@@ -1,4 +1,5 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
+import { clientKey } from "../auth/client-key.js";
 import { describeError } from "../db/errors.js";
 
 // The error codes the signed-in api (auth, profile, recipes, admin) answers with,
@@ -10,8 +11,32 @@ export type ApiErrorCode =
   | "unauthenticated"
   | "forbidden"
   | "cannot_change_own_account"
+  | "password_not_allowed"
+  | "no_local_password"
+  | "rate_limited"
   | "not_found"
   | "internal_error";
+
+// A request's path as a log line may carry it: percent-decoded, so every
+// spelling of a route reads the same, and never the query string or a
+// fragment, which can hold an authorization code or a credential a client
+// put there. The cut comes before decoding, so an encoded ? or # stays path.
+export function pathForLog(url: string): string {
+  const path = url.replace(/[?#].*$/s, "");
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    // A malformed escape: the raw path, still without its query.
+    return path;
+  }
+}
+
+// Thrown by @fastify/rate-limit's errorResponseBuilder for a client over a
+// route's limit; apiErrorHandler answers it as 429 rate_limited with this
+// message, which is always ours.
+export class RateLimitedError extends Error {
+  readonly statusCode = 429;
+}
 
 export function sendError(
   reply: FastifyReply,
@@ -38,12 +63,19 @@ const FASTIFY_4XX_MESSAGES: Record<string, string> = {
 // keeps only the first.
 export function apiErrorHandler(module: string) {
   return (err: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
-    const route = `${request.method} ${request.routeOptions.url ?? request.url}`;
+    const route = `${request.method} ${request.routeOptions.url ?? pathForLog(request.url)}`;
     if (
       err.code === "FST_ERR_CTP_INVALID_JSON_BODY" ||
       err.code === "FST_ERR_CTP_EMPTY_JSON_BODY"
     ) {
       return sendError(reply, 400, "invalid_request", "body must be JSON");
+    }
+    if (err instanceof RateLimitedError) {
+      request.log.warn(
+        { route, key: clientKey(request) },
+        `${module}: rate limited`,
+      );
+      return sendError(reply, 429, "rate_limited", err.message);
     }
     // Fastify's own 4xx errors (a body over the limit, an unsupported content
     // type) are the client's fault: keep the status, and log below error so
