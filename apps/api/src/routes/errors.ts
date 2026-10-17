@@ -18,18 +18,13 @@ export type ApiErrorCode =
   | "not_found"
   | "internal_error";
 
-// A request's path as a log line may carry it: percent-decoded, so every
-// spelling of a route reads the same, and never the query string or a
+// A request's path as a log line may carry it: never the query string or a
 // fragment, which can hold an authorization code or a credential a client
-// put there. The cut comes before decoding, so an encoded ? or # stays path.
+// put there, and never percent-decoded. The raw path is unambiguous and the
+// decoded one can be worked out from it; decoded, /admin%2Fai would read as
+// the real /admin/ai, and an encoded ? as a query that was never sent.
 export function pathForLog(url: string): string {
-  const path = url.replace(/[?#].*$/s, "");
-  try {
-    return decodeURIComponent(path);
-  } catch {
-    // A malformed escape: the raw path, still without its query.
-    return path;
-  }
+  return url.replace(/[?#].*$/s, "");
 }
 
 // Thrown by @fastify/rate-limit's errorResponseBuilder for a client over a
