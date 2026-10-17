@@ -511,7 +511,7 @@ describe("OIDC sign-in", () => {
     ],
     [
       "already_connected",
-      "This account already has a Household SSO identity connected.",
+      "An account with that email already uses a different Household SSO identity. Sign in with your password to manage it from your profile.",
     ],
     ["provider_error", "Household SSO didn't complete the sign-in. Try again."],
     ["email_mismatch", "Signing in with Household SSO didn't work. Try again."],
@@ -740,7 +740,7 @@ describe("Connected identities", () => {
     ],
     [
       "already_connected",
-      "This account already has a Household SSO identity connected.",
+      "That Household SSO identity is already connected to an account, so nothing was changed.",
     ],
     [
       "provider_error",

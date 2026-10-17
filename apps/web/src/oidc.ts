@@ -114,8 +114,7 @@ export async function disconnectOidc(): Promise<void> {
 
 // The words for an ?oidc_error= the api redirected back with. The api sends
 // only a code, so the copy lives here; an unknown code gets a general line.
-const alreadyConnected = (name: string) =>
-  `This account already has a ${name} identity connected.`;
+// Each line has to be true for every case the api folds into its code.
 
 // A sign-in can be refused with email_unverified, account_disabled,
 // already_connected or provider_error.
@@ -124,7 +123,8 @@ const signInRefusals: Record<string, (name: string) => string> = {
     `An account with that email already exists. Sign in with your password, then connect ${name} from your profile.`,
   account_disabled: () =>
     "This account has been disabled. Ask an administrator to re-enable it.",
-  already_connected: alreadyConnected,
+  already_connected: (name) =>
+    `An account with that email already uses a different ${name} identity. Sign in with your password to manage it from your profile.`,
   provider_error: (name) => `${name} didn't complete the sign-in. Try again.`,
 };
 
@@ -133,7 +133,8 @@ const signInRefusals: Record<string, (name: string) => string> = {
 const connectRefusals: Record<string, (name: string) => string> = {
   email_mismatch: (name) =>
     `The email ${name} returned doesn't match this account's email. Nothing was connected.`,
-  already_connected: alreadyConnected,
+  already_connected: (name) =>
+    `That ${name} identity is already connected to an account, so nothing was changed.`,
   provider_error: (name) =>
     `${name} didn't complete the connection. Try again.`,
 };
