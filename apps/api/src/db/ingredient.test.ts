@@ -96,6 +96,47 @@ describe("ingredient_name", () => {
     });
   });
 
+  // Scraped HTML is full of &nbsp;, which Postgres's own \s does not match.
+  dbTest(
+    "rejects a name that matches another once non-breaking spaces are collapsed",
+    async ({ tx }) => {
+      const id = await newIngredient(tx);
+      await tx
+        .insert(ingredientName)
+        .values({ ingredientId: id, name: "coriander leaf", locale: "en-GB" });
+
+      for (const name of [
+        "coriander leaf\u00a0",
+        "\u00a0coriander\u00a0leaf",
+        "coriander\u202fleaf",
+      ]) {
+        await expect(
+          tx.transaction((sp) =>
+            sp
+              .insert(ingredientName)
+              .values({ ingredientId: id, name, locale: "en-GB" }),
+          ),
+        ).rejects.toMatchObject({
+          cause: { constraint: "ingredient_name_locale_name_key" },
+        });
+      }
+    },
+  );
+
+  dbTest("rejects a name that is only a non-breaking space", async ({ tx }) => {
+    const id = await newIngredient(tx);
+
+    await expect(
+      tx.transaction((sp) =>
+        sp
+          .insert(ingredientName)
+          .values({ ingredientId: id, name: "\u00a0", locale: "en-GB" }),
+      ),
+    ).rejects.toMatchObject({
+      cause: { constraint: "ingredient_name_name_not_blank" },
+    });
+  });
+
   dbTest("is removed with its ingredient", async ({ tx }) => {
     const id = await newIngredient(tx);
     await tx.insert(ingredientName).values([
