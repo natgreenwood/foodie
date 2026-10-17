@@ -454,11 +454,16 @@ describe("PATCH /me", () => {
     const res = await patchMe({ displayName: " Sam ", locale: "en-au" }, token);
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ displayName: "Sam", locale: "en-AU" });
-    expect((await me(token)).json()).toMatchObject({
+    expect(res.json()).toEqual({
+      id: expect.any(Number) as number,
+      email: EMAIL,
       displayName: "Sam",
       locale: "en-AU",
+      isAdmin: false,
+      hasPassword: true,
+      oidc: { connected: false, connectedAt: null },
     });
+    expect((await me(token)).json()).toEqual(res.json());
   });
 
   dbTest(

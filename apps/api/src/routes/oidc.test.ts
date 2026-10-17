@@ -905,6 +905,30 @@ describe("connecting an identity from the profile", () => {
   );
 });
 
+describe("PATCH /me for an account signed in through the provider", () => {
+  dbTest("answers the same profile as GET /me", async ({ tx }) => {
+    const { oidcSignIn, request } = start(tx);
+    const token = cookieValue(await oidcSignIn(identity()), SESSION_COOKIE);
+
+    const res = await request(
+      "PATCH",
+      "/me",
+      { [SESSION_COOKIE]: token },
+      { displayName: "Tester" },
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      displayName: "Tester",
+      hasPassword: false,
+      oidc: { connected: true, connectedAt: expect.any(String) as string },
+    });
+    expect(
+      (await request("GET", "/me", { [SESSION_COOKIE]: token })).json(),
+    ).toEqual(res.json());
+  });
+});
+
 describe("DELETE /auth/oidc/connection", () => {
   dbTest(
     "disconnects an account with a password, and repeating it is harmless",
