@@ -20,14 +20,23 @@ const routes: Record<
   "/register": { title: "Register", access: "signedOut" },
 };
 
-// Where sign-in returns to: ?next when it is a path on this site, so the
-// link cannot send anyone elsewhere, and home otherwise.
+// Where sign-in returns to: ?next when it resolves to a page on this site,
+// so the link cannot send anyone elsewhere, and home otherwise. The parsed
+// URL is returned rather than the raw string, because the browser drops
+// tabs and newlines when it parses, so "/\t/evil.example" is really
+// "//evil.example".
 export function returnPath(search: string): string {
   const next = new URLSearchParams(search).get("next");
-  if (!next?.startsWith("/") || next.startsWith("//") || next.startsWith("/\\"))
+  if (!next) return "/";
+  let url: URL;
+  try {
+    url = new URL(next, window.location.origin);
+  } catch {
     return "/";
-  const { pathname } = new URL(next, window.location.origin);
-  return routes[pathname]?.access === "signedOut" ? "/" : next;
+  }
+  if (url.origin !== window.location.origin) return "/";
+  if (routes[url.pathname]?.access === "signedOut") return "/";
+  return url.pathname + url.search + url.hash;
 }
 
 function signInPath(from: string): string {

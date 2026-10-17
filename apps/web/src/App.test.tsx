@@ -152,6 +152,20 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: "Sign in" })).toBeNull();
   });
 
+  it("sends a signed-in user home when next hides another site behind a tab", async () => {
+    stubApi({
+      "GET /api/me": () => respondWith(200, sam),
+      "GET /api/health": health,
+    });
+
+    visit("/sign-in?next=%2F%09%2Fevil.example");
+
+    expect(
+      await screen.findByRole("heading", { name: "Import from URL" }),
+    ).toBeDefined();
+    expect(window.location.href).toBe(`${window.location.origin}/`);
+  });
+
   it("explains a refused sign-in and stays on the page", async () => {
     stubApi({
       "GET /api/me": () => respondWith(401, unauthenticated),
@@ -381,6 +395,11 @@ describe("returnPath", () => {
     ["?next=%2F%2Fevil.example", "/"],
     ["?next=%2F%5Cevil.example", "/"],
     ["?next=%2Fsign-in", "/"],
+    ["?next=%2F%09%2Fevil.example", "/"],
+    ["?next=%2F%0A%2Fevil.example", "/"],
+    ["?next=%2F%0D%2Fevil.example", "/"],
+    ["?next=javascript%3Aalert(1)", "/"],
+    ["?next=%2Fprofile%23top", "/profile#top"],
   ])("%s -> %s", (search, expected) => {
     expect(returnPath(search)).toBe(expected);
   });
