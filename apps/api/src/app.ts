@@ -30,6 +30,8 @@ export type AppDeps = HealthDeps & ImportDeps & AdminAiDeps & OidcDeps;
 // Log paths pino replaces with "[Redacted]". Nothing logs a request body or
 // an AI provider credential; this is the backstop should a later change
 // start to, so a key sent to /admin/ai never reaches a log line.
+// err.rawPacket is the request bytes, query and cookies included, on the
+// parser error Fastify logs at trace level for a malformed request.
 export const logRedactPaths = [
   "req.body",
   "body",
@@ -37,6 +39,7 @@ export const logRedactPaths = [
   "baseUrl",
   "*.apiKey",
   "*.baseUrl",
+  "err.rawPacket",
 ];
 
 // Fastify's request log line, with the path only: no route logs its query

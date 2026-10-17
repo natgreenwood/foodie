@@ -11,7 +11,7 @@ import {
   onTestFinished,
   vi,
 } from "vitest";
-import { buildApp, logSerializers } from "../app.js";
+import { buildApp, logRedactPaths, logSerializers } from "../app.js";
 import { createUser } from "../auth/accounts.js";
 import { oidcProvider, type OidcProvider } from "../auth/oidc-provider.js";
 import {
@@ -73,7 +73,11 @@ function identity(overrides: Partial<MockIdentity> = {}): MockIdentity {
 type Cookies = Record<string, string>;
 
 // The app on the test transaction, with its log lines collected.
-function start(tx: TestTransaction, oidc: OidcProvider | null = provider()) {
+function start(
+  tx: TestTransaction,
+  oidc: OidcProvider | null = provider(),
+  level = "info",
+) {
   const logLines: Record<string, unknown>[] = [];
   const stream = new Writable({
     write(chunk: Buffer, _enc, cb) {
@@ -91,8 +95,15 @@ function start(tx: TestTransaction, oidc: OidcProvider | null = provider()) {
       settingsKey: Buffer.alloc(32),
       oidc,
     },
-    // The server's serializers, so the request lines are as it logs them.
-    { logger: { level: "info", stream, serializers: logSerializers } },
+    // The server's serializers and redaction, so the lines are as it logs them.
+    {
+      logger: {
+        level,
+        stream,
+        serializers: logSerializers,
+        redact: logRedactPaths,
+      },
+    },
   );
   onTestFinished(() => app.close());
 
@@ -832,6 +843,66 @@ describe("GET /auth/oidc/callback", () => {
       }),
     );
   });
+
+  // SEC-1: Node's parser error carries the request bytes as err.rawPacket,
+  // and Fastify logs that error at trace level before any route runs.
+  dbTest.for([
+    {
+      header: "Bad Header: x",
+      status: 400,
+      body: '{"error":"Bad Request","message":"Client Error","statusCode":400}',
+    },
+    {
+      header: `X-Pad: ${"x".repeat(20_000)}`,
+      status: 431,
+      body: '{"error":"Request Header Fields Too Large","message":"Exceeded maximum allowed HTTP header size","statusCode":431}',
+    },
+  ])(
+    "never logs the raw packet of a request that fails to parse ($status)",
+    async ({ header, status, body }, { tx }) => {
+      const { app, logLines } = start(tx, provider(), "trace");
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const { port } = app.server.address() as AddressInfo;
+
+      const response = await new Promise<string>((resolve, reject) => {
+        let received = "";
+        const socket = connect(port, "127.0.0.1", () => {
+          socket.write(
+            "GET /auth/oidc/callback?code=CODE_SENTINEL&state=STATE_SENTINEL HTTP/1.1\r\n" +
+              "Host: localhost\r\nCookie: foodie_session=COOKIE_SENTINEL\r\n" +
+              `${header}\r\n\r\n`,
+          );
+        });
+        socket.on("data", (chunk: Buffer) => (received += chunk.toString()));
+        socket.on("close", () => resolve(received));
+        socket.on("error", reject);
+      });
+
+      expect(response).toMatch(new RegExp(`^HTTP/1\\.1 ${status} `));
+      expect(response).toContain(body);
+      expect(logLines).toContainEqual(
+        expect.objectContaining({
+          msg: expect.stringMatching(/^client /) as unknown,
+        }),
+      );
+      // A Buffer is logged as { type: "Buffer", data: [...bytes] }, so the
+      // bytes are decoded as well as the text searched.
+      const logged = JSON.stringify(logLines);
+      const bytes = JSON.stringify(logLines, (_key, value: unknown) =>
+        Array.isArray(value) && value.every((b) => typeof b === "number")
+          ? Buffer.from(value).toString("latin1")
+          : value,
+      );
+      for (const sentinel of [
+        "CODE_SENTINEL",
+        "STATE_SENTINEL",
+        "COOKIE_SENTINEL",
+      ]) {
+        expect(logged).not.toContain(sentinel);
+        expect(bytes).not.toContain(sentinel);
+      }
+    },
+  );
 });
 
 // The ID token's signature is checked against the discovered JWKS.
