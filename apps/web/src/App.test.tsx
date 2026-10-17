@@ -2,6 +2,14 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, returnPath } from "./App";
+import { leaveFor } from "./router";
+
+// Full page loads (to the api's OIDC routes and the provider) cannot happen
+// in jsdom; the tests check where the page was sent instead.
+vi.mock("./router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./router")>()),
+  leaveFor: vi.fn(),
+}));
 
 function respondWith(status: number, body?: unknown) {
   return Promise.resolve(
@@ -24,13 +32,23 @@ const unauthenticated = {
   message: "sign in required",
 };
 
+const oidcOff = () => respondWith(200, { enabled: false, displayName: null });
+
+const oidcOn = () =>
+  respondWith(200, { enabled: true, displayName: "Household SSO" });
+
 type Handler = (init?: RequestInit) => Promise<Response>;
+
+// OIDC is off unless a test says otherwise.
+const defaultRoutes: Record<string, Handler> = {
+  "GET /api/auth/oidc/config": oidcOff,
+};
 
 // Answers each "METHOD /path" from `routes`; anything else fails the test.
 function stubApi(routes: Record<string, Handler>) {
   const fetchMock = vi.fn((input: string, init?: RequestInit) => {
     const key = `${init?.method ?? "GET"} ${input}`;
-    const handler = routes[key];
+    const handler = { ...defaultRoutes, ...routes }[key];
     if (!handler) throw new Error(`unexpected request: ${key}`);
     return handler(init);
   });
@@ -64,6 +82,7 @@ async function signInAs(email: string, password: string) {
 describe("App", () => {
   beforeEach(() => {
     vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(leaveFor).mockClear();
   });
 
   afterEach(() => {
@@ -383,6 +402,397 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "Page not found" }),
     ).toBeDefined();
     await waitFor(() => expect(document.title).toBe("Page not found · Foodie"));
+  });
+});
+
+describe("OIDC sign-in", () => {
+  const signedOut = () => respondWith(401, unauthenticated);
+
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(leaveFor).mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("shows nothing about OIDC on either page when it is off", async () => {
+    let signedIn = false;
+    const fetchMock = stubApi({
+      "GET /api/me": () =>
+        signedIn ? respondWith(200, sam) : respondWith(401, unauthenticated),
+      "POST /api/auth/login": () => {
+        signedIn = true;
+        return respondWith(200, sam);
+      },
+    });
+
+    visit("/sign-in?next=%2Fprofile&oidc_error=account_disabled");
+
+    expect(await screen.findByLabelText("Email")).toBeDefined();
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/auth/oidc/config",
+        expect.anything(),
+      ),
+    );
+    expect(screen.queryByRole("button", { name: /Sign in with/ })).toBeNull();
+    expect(screen.queryByText("or")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await signInAs("sam@example.com", "correct horse");
+    await screen.findByRole("heading", { name: "Profile" });
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input]) => input === "/api/auth/oidc/config",
+        ),
+      ).toHaveLength(2),
+    );
+    expect(
+      screen.queryByRole("heading", { name: "Connected identities" }),
+    ).toBeNull();
+    // Only the session's own load, before signing in.
+    expect(
+      fetchMock.mock.calls.filter(([input]) => input === "/api/me"),
+    ).toHaveLength(1);
+  });
+
+  it("offers single sign-on under the form, named by the api, and goes to the provider", async () => {
+    stubApi({
+      "GET /api/me": signedOut,
+      "GET /api/auth/oidc/config": oidcOn,
+    });
+    const user = userEvent.setup();
+
+    visit("/sign-in");
+    const sso = await screen.findByRole("button", {
+      name: "Sign in with Household SSO",
+    });
+    await user.click(sso);
+
+    expect(leaveFor).toHaveBeenCalledWith("/api/auth/oidc/start");
+    expect(screen.getByRole("status").textContent).toBe(
+      "Taking you to Household SSO…",
+    );
+    expect(sso.hasAttribute("disabled")).toBe(true);
+    expect(
+      screen.getByRole("button", { name: "Sign in" }).hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
+  it("calls it single sign-on when the api has no display name", async () => {
+    stubApi({
+      "GET /api/me": signedOut,
+      "GET /api/auth/oidc/config": () =>
+        respondWith(200, { enabled: true, displayName: null }),
+    });
+
+    visit("/sign-in");
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Sign in with single sign-on",
+      }),
+    ).toBeDefined();
+  });
+
+  it.each([
+    [
+      "email_unverified",
+      "An account with that email already exists. Sign in with your password, then connect Household SSO from your profile.",
+    ],
+    [
+      "account_disabled",
+      "This account has been disabled. Ask an administrator to re-enable it.",
+    ],
+    [
+      "already_connected",
+      "An account with that email already uses a different Household SSO identity. Sign in with your password to manage it from your profile.",
+    ],
+    ["provider_error", "Household SSO didn't complete the sign-in. Try again."],
+    ["email_mismatch", "Signing in with Household SSO didn't work. Try again."],
+    ["toString", "Signing in with Household SSO didn't work. Try again."],
+    ["something_new", "Signing in with Household SSO didn't work. Try again."],
+  ])(
+    "explains a refused sign-in (%s) first, and clears it on the next try",
+    async (code, message) => {
+      stubApi({
+        "GET /api/me": signedOut,
+        "GET /api/auth/oidc/config": oidcOn,
+      });
+      const user = userEvent.setup();
+
+      visit(`/sign-in?oidc_error=${code}`);
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toBe(message);
+      await waitFor(() => expect(document.activeElement).toBe(alert));
+
+      await user.click(
+        screen.getByRole("button", { name: "Sign in with Household SSO" }),
+      );
+      expect(screen.queryByRole("alert")).toBeNull();
+    },
+  );
+});
+
+describe("Connected identities", () => {
+  // GET /me as it answers with OIDC on: the profile and how it signs in.
+  const me = (connected: boolean, hasPassword: boolean) => () =>
+    respondWith(200, {
+      ...sam,
+      hasPassword,
+      oidc: {
+        connected,
+        connectedAt: connected ? "2026-10-17T02:00:00.000Z" : null,
+      },
+    });
+
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(leaveFor).mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function section() {
+    return screen.getByRole("region", { name: "Connected identities" });
+  }
+
+  it("offers to connect when nothing is connected, as a form post to the api", async () => {
+    const fetchMock = stubApi({
+      "GET /api/me": me(false, true),
+      "GET /api/auth/oidc/config": oidcOn,
+    });
+    const user = userEvent.setup();
+    let submitted: SubmitEvent | undefined;
+    let preventedByApp: boolean | undefined;
+    const onSubmit = (event: SubmitEvent) => {
+      submitted = event;
+      preventedByApp = event.defaultPrevented;
+      // jsdom cannot load the next page.
+      event.preventDefault();
+    };
+    document.addEventListener("submit", onSubmit);
+
+    visit("/profile");
+    const connect = await screen.findByRole("button", {
+      name: "Connect Household SSO",
+    });
+    expect(section().textContent).toContain("No identity connected.");
+    expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+    expect(connect.getAttribute("aria-describedby")).toBe("identities-hint");
+
+    await user.click(connect);
+    document.removeEventListener("submit", onSubmit);
+
+    expect(preventedByApp).toBe(false);
+    const form = submitted?.target as HTMLFormElement | undefined;
+    expect(form?.method).toBe("post");
+    expect(form?.getAttribute("action")).toBe("/api/auth/oidc/connect");
+    expect(form?.contains(connect)).toBe(true);
+    expect(new FormData(form).entries().next().done).toBe(true);
+    expect(connect.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("Taking you to Household SSO…")).toBeDefined();
+    expect(
+      fetchMock.mock.calls.some(([input]) => input.includes("/oidc/connect")),
+    ).toBe(false);
+  });
+
+  it("shows the connected identity and disconnects it after a confirm", async () => {
+    const fetchMock = stubApi({
+      "GET /api/me": me(true, true),
+      "GET /api/auth/oidc/config": oidcOn,
+      "DELETE /api/auth/oidc/connection": () => respondWith(204),
+    });
+    const user = userEvent.setup();
+
+    visit("/profile");
+    const disconnect = await screen.findByRole("button", {
+      name: "Disconnect",
+    });
+    expect(section().querySelector("dt")?.textContent).toBe("Household SSO");
+    expect(section().querySelector("dd")?.textContent).toBe("sam@example.com");
+
+    await user.click(disconnect);
+    const confirm = screen.getByRole("group", {
+      name: "Disconnect Household SSO? You'll sign in with your password only.",
+    });
+    const confirmButton = screen.getByRole("button", { name: "Disconnect" });
+    expect(confirm.contains(confirmButton)).toBe(true);
+    expect(document.activeElement).toBe(confirmButton);
+
+    await user.click(confirmButton);
+
+    expect(
+      (await screen.findByText("Household SSO disconnected.")).getAttribute(
+        "role",
+      ),
+    ).toBe("status");
+    const connect = screen.getByRole("button", {
+      name: "Connect Household SSO",
+    });
+    expect(document.activeElement).toBe(connect);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/auth/oidc/connection",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it.each([
+    [
+      "Keep connected",
+      (user: ReturnType<typeof userEvent.setup>) =>
+        user.click(screen.getByRole("button", { name: "Keep connected" })),
+    ],
+    [
+      "Escape",
+      (user: ReturnType<typeof userEvent.setup>) => user.keyboard("{Escape}"),
+    ],
+  ])("backs out of the disconnect with %s", async (_, backOut) => {
+    const fetchMock = stubApi({
+      "GET /api/me": me(true, true),
+      "GET /api/auth/oidc/config": oidcOn,
+    });
+    const user = userEvent.setup();
+
+    visit("/profile");
+    await user.click(await screen.findByRole("button", { name: "Disconnect" }));
+    await backOut(user);
+
+    expect(screen.queryByRole("group")).toBeNull();
+    const disconnect = screen.getByRole("button", { name: "Disconnect" });
+    await waitFor(() => expect(document.activeElement).toBe(disconnect));
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "DELETE"),
+    ).toBe(false);
+  });
+
+  it("offers no disconnect to an account with no password", async () => {
+    stubApi({
+      "GET /api/me": me(true, false),
+      "GET /api/auth/oidc/config": oidcOn,
+    });
+
+    visit("/profile");
+
+    expect(
+      await screen.findByText(
+        "This account was created through Household SSO and has no password, so it can't be disconnected.",
+      ),
+    ).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
+  });
+
+  it("explains when the api refuses a disconnect for want of a password", async () => {
+    stubApi({
+      "GET /api/me": me(true, true),
+      "GET /api/auth/oidc/config": oidcOn,
+      "DELETE /api/auth/oidc/connection": () =>
+        respondWith(409, {
+          error: "no_local_password",
+          message:
+            "an account without a password cannot disconnect its sign-in provider",
+        }),
+    });
+    const user = userEvent.setup();
+
+    visit("/profile");
+    await user.click(await screen.findByRole("button", { name: "Disconnect" }));
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "This account has no password, so Household SSO can't be disconnected.",
+    );
+    expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+  });
+
+  it("says when a connect has just succeeded", async () => {
+    stubApi({
+      "GET /api/me": me(true, true),
+      "GET /api/auth/oidc/config": oidcOn,
+    });
+
+    visit("/profile?oidc=connected");
+
+    expect(
+      (
+        await screen.findByText(
+          "Household SSO connected. You can now sign in with it.",
+        )
+      ).getAttribute("role"),
+    ).toBe("status");
+  });
+
+  it.each([
+    [
+      "email_mismatch",
+      "The email Household SSO returned doesn't match this account's email. Nothing was connected.",
+    ],
+    [
+      "already_connected",
+      "That Household SSO identity is already connected to an account, so nothing was changed.",
+    ],
+    [
+      "provider_error",
+      "Household SSO didn't complete the connection. Try again.",
+    ],
+    ["email_unverified", "Connecting Household SSO didn't work. Try again."],
+    ["something_new", "Connecting Household SSO didn't work. Try again."],
+  ])(
+    "explains a refused connect (%s) and moves focus to it",
+    async (code, message) => {
+      stubApi({
+        "GET /api/me": me(false, true),
+        "GET /api/auth/oidc/config": oidcOn,
+      });
+
+      visit(`/profile?oidc_error=${code}`);
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toBe(message);
+      expect(section().contains(alert)).toBe(true);
+      await waitFor(() => expect(document.activeElement).toBe(alert));
+    },
+  );
+
+  it("explains when the connection cannot be loaded and recovers on retry", async () => {
+    // The session's load succeeds; the section's first one fails.
+    let calls = 0;
+    stubApi({
+      "GET /api/me": () =>
+        ++calls === 2
+          ? Promise.reject(new TypeError("Failed to fetch"))
+          : me(false, true)(),
+      "GET /api/auth/oidc/config": oidcOn,
+    });
+    const user = userEvent.setup();
+
+    visit("/profile");
+    expect(
+      (await screen.findByText("Loading connected identities…")).getAttribute(
+        "role",
+      ),
+    ).toBe("status");
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Couldn't load connected identities: the request failed before a response arrived. Try again.",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Connect Household SSO" }),
+    ).toBeDefined();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 

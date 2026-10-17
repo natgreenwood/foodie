@@ -1,9 +1,10 @@
 import { Writable } from "node:stream";
 import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
-import { describe, expect, onTestFinished } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { buildApp } from "../app.js";
 import { ensureAdmin } from "../auth/accounts.js";
+import { loadConfig } from "../config.js";
 import { user } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE } from "./auth.js";
@@ -16,7 +17,11 @@ const PASSWORD = "correct horse";
 const unused = () => Promise.reject(new Error("not used by these tests"));
 
 // The app on the test transaction, with its log lines collected.
-function start(tx: TestTransaction, secureCookies = true) {
+function start(
+  tx: TestTransaction,
+  secureCookies = true,
+  trustProxy: string[] | false = false,
+) {
   const logLines: Record<string, unknown>[] = [];
   const stream = new Writable({
     write(chunk: Buffer, _enc, cb) {
@@ -33,7 +38,7 @@ function start(tx: TestTransaction, secureCookies = true) {
       secureCookies,
       settingsKey: Buffer.alloc(32),
     },
-    { logger: { level: "info", stream } },
+    { logger: { level: "info", stream }, trustProxy },
   );
   onTestFinished(() => app.close());
 
@@ -319,6 +324,65 @@ describe("POST /auth/login with an over-length password", () => {
   );
 });
 
+// What server.ts passes to Fastify for a given TRUST_PROXY.
+function trustProxyFrom(raw: string | undefined) {
+  return loadConfig({
+    DATABASE_URL: "postgres://unused",
+    SETTINGS_ENCRYPTION_KEY: Buffer.alloc(32).toString("hex"),
+    TRUST_PROXY: raw,
+  }).trustProxy;
+}
+
+describe("the failed sign-in line behind a proxy", () => {
+  // The injected request's socket address.
+  const PEER = "127.0.0.1";
+
+  async function failedSignInIp(
+    tx: TestTransaction,
+    trustProxy: string | undefined,
+    forwardedFor: string,
+  ) {
+    const { app, logLines } = start(tx, true, trustProxyFrom(trustProxy));
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: { email: EMAIL, password: "wrong password" },
+      headers: { "x-forwarded-for": forwardedFor },
+    });
+    expect(res.statusCode).toBe(401);
+    const failures = logLines.filter((l) => l.msg === "auth: sign-in failed");
+    expect(failures).toHaveLength(1);
+    return failures[0]!.ip;
+  }
+
+  dbTest("logs the client address the trusted proxy sent", async ({ tx }) => {
+    expect(await failedSignInIp(tx, PEER, "203.0.113.9")).toBe("203.0.113.9");
+  });
+
+  dbTest(
+    "ignores what the client put in front of the proxy's entry",
+    async ({ tx }) => {
+      expect(await failedSignInIp(tx, PEER, "198.51.100.7, 203.0.113.9")).toBe(
+        "203.0.113.9",
+      );
+    },
+  );
+
+  dbTest(
+    "logs the socket address when the peer is not a listed proxy",
+    async ({ tx }) => {
+      expect(await failedSignInIp(tx, "10.0.0.0/8", "203.0.113.9")).toBe(PEER);
+    },
+  );
+
+  dbTest(
+    "logs the socket address when TRUST_PROXY is unset",
+    async ({ tx }) => {
+      expect(await failedSignInIp(tx, undefined, "203.0.113.9")).toBe(PEER);
+    },
+  );
+});
+
 describe("admin bootstrap of a self-registered account", () => {
   const ADMIN_PASSWORD = "the operator's one";
 
@@ -411,6 +475,72 @@ describe("signed-in routes", () => {
       (await app.inject({ method: "GET", url: "/health" })).statusCode,
     ).toBe(200);
     expect((await post("/auth/logout")).statusCode).toBe(204);
+  });
+});
+
+describe("auth routes when a request fails", () => {
+  dbTest(
+    "answer a body over the size limit with 413, logged below error",
+    async ({ tx }) => {
+      const { app, logLines } = start(tx);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/auth/login",
+        headers: { "content-type": "application/json" },
+        payload: JSON.stringify({
+          email: "a@b.c",
+          password: "x".repeat(2_000_000),
+        }),
+      });
+
+      expect(res.statusCode).toBe(413);
+      expect(res.json()).toEqual({
+        error: "invalid_request",
+        message: "body is too large",
+      });
+      expect(logLines.filter((l) => (l.level as number) >= 50)).toEqual([]);
+      expect(logLines).toContainEqual(
+        expect.objectContaining({
+          level: 40,
+          msg: "auth: request refused",
+          route: "POST /auth/login",
+          status: 413,
+          code: "FST_ERR_CTP_BODY_TOO_LARGE",
+        }),
+      );
+    },
+  );
+
+  it("still answer an unexpected failure with 500, logged at error", async () => {
+    // A database every query on which throws, as Drizzle does, with the
+    // query's parameters after the first line of the message.
+    const broken = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("Failed query: select\nparams: a@b.c");
+        },
+      },
+    ) as unknown as TestTransaction;
+    const { post, logLines } = start(broken);
+
+    const res = await post("/auth/login", { email: "a@b.c", password: "x" });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({
+      error: "internal_error",
+      message: "something went wrong",
+    });
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        level: 50,
+        msg: "auth: request failed",
+        route: "POST /auth/login",
+        error: "Failed query: select",
+      }),
+    );
+    expect(JSON.stringify(logLines)).not.toContain("params: a@b.c");
   });
 });
 

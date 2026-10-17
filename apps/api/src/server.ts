@@ -27,6 +27,7 @@ const app = buildApp(
       redact: logRedactPaths,
       serializers: logSerializers,
     },
+    trustProxy: config.trustProxy,
   },
 );
 
