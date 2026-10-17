@@ -23,6 +23,7 @@ describe("loadConfig", () => {
       settingsEncryptionKey: settingsKeyBytes,
       trustProxy: false,
       oidc: null,
+      google: null,
     });
   });
 
@@ -190,6 +191,7 @@ describe("loadConfig", () => {
       OIDC_DISPLAY_NAME: " Home SSO ",
     });
     expect(config.oidc).toEqual({
+      id: "generic",
       issuerUrl: new URL("https://id.example.com"),
       clientId: "foodie",
       clientSecret: "not-a-real-secret",
@@ -305,6 +307,132 @@ describe("loadConfig", () => {
       OIDC_REDIRECT_URL: "http://localhost:5173/api/auth/oidc/callback",
     });
     expect(config.oidc?.issuerUrl.href).toBe("http://localhost:1411/");
+  });
+
+  const googleEnv = {
+    GOOGLE_CLIENT_ID: "foodie.apps.googleusercontent.com",
+    GOOGLE_CLIENT_SECRET: "not-a-real-google-secret",
+    GOOGLE_REDIRECT_URL:
+      "https://foodie.example.com/api/auth/oidc/google/callback",
+  };
+
+  it("reads Google when all three variables are set, with the shared limits", () => {
+    const config = loadConfig({
+      DATABASE_URL: databaseUrl,
+      SETTINGS_ENCRYPTION_KEY: settingsKey,
+      ...googleEnv,
+      OIDC_MAX_PENDING_LOGINS: "250",
+      OIDC_STARTS_PER_MINUTE: "3",
+    });
+    expect(config.oidc).toBeNull();
+    expect(config.google).toEqual({
+      id: "google",
+      issuerUrl: new URL("https://accounts.google.com"),
+      clientId: "foodie.apps.googleusercontent.com",
+      clientSecret: "not-a-real-google-secret",
+      redirectUrl: new URL(
+        "https://foodie.example.com/api/auth/oidc/google/callback",
+      ),
+      displayName: "Google",
+      maxPendingLogins: 250,
+      startsPerMinute: 3,
+    });
+  });
+
+  it("reads the generic provider and Google together", () => {
+    const config = loadConfig({
+      DATABASE_URL: databaseUrl,
+      SETTINGS_ENCRYPTION_KEY: settingsKey,
+      ...oidcEnv,
+      ...googleEnv,
+    });
+    expect(config.oidc?.id).toBe("generic");
+    expect(config.google?.id).toBe("google");
+  });
+
+  it("leaves Google off when none of its variables are set, or all are empty", () => {
+    const base = {
+      DATABASE_URL: databaseUrl,
+      SETTINGS_ENCRYPTION_KEY: settingsKey,
+    };
+    expect(loadConfig(base).google).toBeNull();
+    expect(
+      loadConfig({
+        ...base,
+        GOOGLE_CLIENT_ID: "",
+        GOOGLE_CLIENT_SECRET: "",
+        GOOGLE_REDIRECT_URL: "",
+      }).google,
+    ).toBeNull();
+  });
+
+  it.each(Object.keys(googleEnv))(
+    "fails naming %s when only it is missing, without echoing the secret",
+    (missing) => {
+      const env: NodeJS.ProcessEnv = {
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        ...googleEnv,
+      };
+      delete env[missing];
+      expect(() => loadConfig(env)).toThrow(
+        expect.objectContaining({
+          name: "ConfigError",
+          message: expect.stringMatching(
+            new RegExp(`missing ${missing}$`),
+          ) as string,
+        }) as Error,
+      );
+      expect(() => loadConfig(env)).toThrow(
+        expect.objectContaining({
+          message: expect.not.stringContaining(
+            "not-a-real-google-secret",
+          ) as string,
+        }) as Error,
+      );
+    },
+  );
+
+  it.each([
+    ["not a url"],
+    ["http://foodie.example.com/api/auth/oidc/google/callback"],
+    // The generic provider's callback, so the cookie would never come back.
+    ["https://foodie.example.com/api/auth/oidc/callback"],
+  ])("rejects GOOGLE_REDIRECT_URL of %s", (value) => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        ...googleEnv,
+        GOOGLE_REDIRECT_URL: value,
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("accepts an http GOOGLE_REDIRECT_URL only in development", () => {
+    const config = loadConfig({
+      DATABASE_URL: databaseUrl,
+      SETTINGS_ENCRYPTION_KEY: settingsKey,
+      NODE_ENV: "development",
+      ...googleEnv,
+      GOOGLE_REDIRECT_URL:
+        "http://localhost:5173/api/auth/oidc/google/callback",
+    });
+    expect(config.google?.redirectUrl.protocol).toBe("http:");
+    // Google itself is always https.
+    expect(config.google?.issuerUrl.href).toBe("https://accounts.google.com/");
+  });
+
+  it("refuses Google as the generic provider's issuer alongside Google", () => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        ...oidcEnv,
+        OIDC_ISSUER_URL: "https://accounts.google.com",
+        ...googleEnv,
+      }),
+    ).toThrow(ConfigError);
   });
 
   it.each([

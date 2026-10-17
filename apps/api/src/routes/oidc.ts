@@ -12,18 +12,27 @@ import {
   signInWithOidc,
   startOidcLogin,
   takeOidcLogin,
+  tripProvider,
   type OidcConnectRefusal,
   type OidcSignInRefusal,
 } from "../auth/oidc.js";
 import type { OidcClaims, OidcProvider } from "../auth/oidc-provider.js";
+import type { OidcProviderId } from "../config.js";
 import { slidingWindow, type SlidingWindow } from "../auth/sliding-window.js";
 import { describeError } from "../db/errors.js";
 import { SESSION_COOKIE, startSession, type AuthDeps } from "./auth.js";
 import { apiErrorHandler, RateLimitedError, sendError } from "./errors.js";
 
 export interface OidcDeps extends AuthDeps {
-  // The configured provider; absent or null when OIDC sign-in is off.
+  // The generic provider (NATG-226); absent or null when it is off.
   oidc?: OidcProvider | null;
+  // Google (NATG-291); absent or null when it is off.
+  google?: OidcProvider | null;
+}
+
+// The configured providers, generic then google.
+export function configuredProviders(deps: OidcDeps): OidcProvider[] {
+  return [deps.oidc, deps.google].filter((p): p is OidcProvider => !!p);
 }
 
 // What the routes are registered with: the app's deps and the one window
@@ -35,10 +44,12 @@ export interface OidcRouteDeps extends OidcDeps {
 // Client keys the start window remembers at most.
 export const OIDC_START_KEYS = 10_000;
 
-// The per-client window for an app; per api process, like the app.
-export function oidcStartWindow(oidc: OidcProvider | null | undefined) {
+// The per-client window for an app; per api process, like the app. Every
+// provider reads the same OIDC_STARTS_PER_MINUTE, so the first one's is
+// everyone's.
+export function oidcStartWindow(providers: OidcProvider[]) {
   return slidingWindow({
-    limit: oidc?.startsPerMinute ?? 10,
+    limit: providers[0]?.startsPerMinute ?? 10,
     windowMs: 60_000,
     maxKeys: OIDC_START_KEYS,
   });
@@ -46,26 +57,41 @@ export function oidcStartWindow(oidc: OidcProvider | null | undefined) {
 
 const RATE_LIMITED_MESSAGE = "too many sign-in attempts; try again in a minute";
 
-// @fastify/rate-limit's limit on start, callback and connect: per client
-// key, a fixed minute per route. Before the handler, so a refused start
-// writes nothing. The start window above stays the sliding count that
-// sign-in and connect share; this one also covers the callback.
-function perClientLimit(oidc: OidcProvider | null | undefined) {
+// @fastify/rate-limit's limit on start, callback, connect and disconnect:
+// per client key, a fixed minute per route, so all providers' requests to
+// /auth/oidc/:provider/start share one count. Before the handler, so a
+// refused start writes nothing. The start window above stays the sliding
+// count that sign-in and connect share across every route; this one also
+// covers the callback.
+function perClientLimit(providers: OidcProvider[]) {
   return {
-    max: oidc?.startsPerMinute ?? 10,
+    max: providers[0]?.startsPerMinute ?? 10,
     timeWindow: 60_000,
     errorResponseBuilder: () => new RateLimitedError(RATE_LIMITED_MESSAGE),
   };
 }
 
 export interface OidcConfigResponse {
+  // Whether any provider is configured.
   enabled: boolean;
+  // One per configured provider, generic then google.
+  providers: { id: OidcProviderId; displayName: string | null }[];
+  // The generic provider's display name, as the web app read it before it
+  // read providers; until NATG-291's web change lands.
   displayName: string | null;
 }
 
+// The route parameter naming a provider.
+interface ProviderParams {
+  provider: string;
+}
+
 // The oidc_error the web app is redirected back with, on /sign-in for a
-// sign-in and on /profile for a connect. A code, never text: the web app
-// owns the wording, so a crafted link cannot put words on our pages.
+// sign-in and on /profile for a connect, alongside oidc_provider naming the
+// provider's id so the page can say which one refused. A successful connect
+// carries oidc_provider too, for the same reason. A code, never text:
+// the web app owns the wording, so a crafted link cannot put words on our
+// pages.
 // Besides the refusals, provider_error covers a provider that could not be
 // reached, answered with an error or a response that did not check out, and
 // a trip that is missing, timed out, or was started by a user no longer
@@ -83,12 +109,21 @@ function redirectWithError(
   reply: FastifyReply,
   page: string,
   error: OidcRedirectError,
+  provider: OidcProviderId,
 ) {
-  return reply.redirect(`${page}?oidc_error=${error}`);
+  return reply.redirect(
+    `${page}?oidc_error=${error}&oidc_provider=${provider}`,
+  );
 }
 
 function notConfigured(reply: FastifyReply) {
   return sendError(reply, 404, "not_found", "oidc sign-in is not configured");
+}
+
+// The configured provider a :provider parameter names, or null; "generic"
+// for the unprefixed alias routes.
+function providerFor(providers: OidcProvider[], id = "generic") {
+  return providers.find((provider) => provider.id === id) ?? null;
 }
 
 // The open OIDC routes: whether it is on, and the sign-in round trip.
@@ -99,35 +134,60 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   deps,
   done,
 ) => {
-  const { db, oidc } = deps;
-  const limited = { config: { rateLimit: perClientLimit(oidc) } };
+  const { db } = deps;
+  const providers = configuredProviders(deps);
+  const limited = { config: { rateLimit: perClientLimit(providers) } };
   app.setErrorHandler(apiErrorHandler("oidc"));
 
   app.get("/auth/oidc/config", (): OidcConfigResponse => {
-    return { enabled: !!oidc, displayName: oidc?.displayName ?? null };
+    return {
+      enabled: providers.length > 0,
+      providers: providers.map(({ id, displayName }) => ({ id, displayName })),
+      displayName: deps.oidc?.displayName ?? null,
+    };
   });
 
   // Sends the browser to the provider to sign in.
-  app.get("/auth/oidc/start", limited, async (request, reply) => {
+  async function signInStart(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    oidc: OidcProvider | null,
+  ) {
     if (!oidc) return notConfigured(reply);
     const trip = await beginTrip(request, reply, deps, oidc, null);
     if (trip === "rate_limited") return rateLimited(reply);
     if (trip === "provider_error") {
-      return redirectWithError(reply, SIGN_IN_PAGE, "provider_error");
+      return redirectWithError(reply, SIGN_IN_PAGE, "provider_error", oidc.id);
     }
     return reply.redirect(trip.href);
-  });
+  }
 
   // Where the provider sends the browser back, for a sign-in or a connect.
   // The trip is used up whatever happens, so a repeated callback answers
-  // provider_error and changes nothing.
-  app.get("/auth/oidc/callback", limited, async (request, reply) => {
+  // provider_error and changes nothing. Each provider's trip cookie is
+  // scoped to its own callback path, so a callback only sees its own.
+  async function callback(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    oidc: OidcProvider | null,
+  ) {
     if (!oidc) return notConfigured(reply);
     const token = request.cookies[OIDC_COOKIE];
     reply.clearCookie(OIDC_COOKIE, { path: oidc.callbackPath });
     const trip = token ? await takeOidcLogin(db, token) : null;
     const page = trip?.userId ? PROFILE_PAGE : SIGN_IN_PAGE;
-    if (!trip) return redirectWithError(reply, page, "provider_error");
+    if (!trip) return redirectWithError(reply, page, "provider_error", oidc.id);
+    // A trip finishes only at the callback of the provider it was started
+    // for, whatever cookie reached this one. Checked before the code is
+    // exchanged; the trip is used up either way.
+    const startedFor = tripProvider(trip.checks);
+    if (startedFor !== oidc.id) {
+      request.log.warn(
+        { ip: request.ip, provider: oidc.id, tripProvider: startedFor },
+        "auth: oidc callback for another provider's trip",
+      );
+      return redirectWithError(reply, page, "provider_error", oidc.id);
+    }
 
     let claims: OidcClaims;
     try {
@@ -137,39 +197,64 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
       claims = await oidc.claims(query, trip.checks);
     } catch (err) {
       request.log.warn(
-        { ip: request.ip, error: describeError(err) },
+        { ip: request.ip, provider: oidc.id, error: describeError(err) },
         "auth: oidc callback failed",
       );
-      return redirectWithError(reply, page, "provider_error");
+      return redirectWithError(reply, page, "provider_error", oidc.id);
     }
 
     if (trip.userId !== null) {
-      return finishConnect(request, reply, deps, trip.userId, claims);
+      return finishConnect(request, reply, deps, oidc, trip.userId, claims);
     }
 
     const result = await signInWithOidc(db, claims).catch((err: unknown) => {
       request.log.error(
-        { error: describeError(err) },
+        { provider: oidc.id, error: describeError(err) },
         "auth: oidc sign-in failed to resolve the account",
       );
       return null;
     });
-    if (!result) return redirectWithError(reply, page, "provider_error");
+    if (!result)
+      return redirectWithError(reply, page, "provider_error", oidc.id);
     if (result.refused) {
       // The same line a failed local sign-in writes.
       request.log.warn(
         { email: claims.email, ip: request.ip, reason: result.refused },
         "auth: sign-in failed",
       );
-      return redirectWithError(reply, page, result.refused);
+      return redirectWithError(reply, page, result.refused, oidc.id);
     }
     await startSession(deps, reply, result.user.id);
     request.log.info(
-      { userId: result.user.id, outcome: result.outcome },
+      { userId: result.user.id, provider: oidc.id, outcome: result.outcome },
       "auth: oidc sign-in",
     );
     return reply.redirect("/");
-  });
+  }
+
+  app.get<{ Params: ProviderParams }>(
+    "/auth/oidc/:provider/start",
+    limited,
+    (request, reply) =>
+      signInStart(
+        request,
+        reply,
+        providerFor(providers, request.params.provider),
+      ),
+  );
+  app.get<{ Params: ProviderParams }>(
+    "/auth/oidc/:provider/callback",
+    limited,
+    (request, reply) =>
+      callback(request, reply, providerFor(providers, request.params.provider)),
+  );
+  // The generic provider's routes before providers had ids (NATG-226).
+  app.get("/auth/oidc/start", limited, (request, reply) =>
+    signInStart(request, reply, providerFor(providers)),
+  );
+  app.get("/auth/oidc/callback", limited, (request, reply) =>
+    callback(request, reply, providerFor(providers)),
+  );
 
   done();
 };
@@ -181,8 +266,9 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   deps,
   done,
 ) => {
-  const { db, oidc } = deps;
-  const limited = { config: { rateLimit: perClientLimit(oidc) } };
+  const { db } = deps;
+  const providers = configuredProviders(deps);
+  const limited = { config: { rateLimit: perClientLimit(providers) } };
   app.setErrorHandler(apiErrorHandler("oidc"));
   // POST /auth/oidc/connect is submitted by a plain HTML form, which sends
   // an empty urlencoded body. Nothing is read from it; this scope only.
@@ -202,7 +288,11 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   // onRequest) answers 401 first and counts nothing; then the per-client
   // limit (this route's onRequest) counts the signed-in request; then this
   // guard. So a refused origin still counts against the limit.
-  app.post("/auth/oidc/connect", limited, async (request, reply) => {
+  async function connect(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    oidc: OidcProvider | null,
+  ) {
     if (!oidc) return notConfigured(reply);
     const origin = request.headers.origin;
     const problem = originProblem(origin, oidc.trustedOrigin);
@@ -221,29 +311,67 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
     const trip = await beginTrip(request, reply, deps, oidc, request.user!.id);
     if (trip === "rate_limited") return rateLimited(reply);
     if (trip === "provider_error") {
-      return redirectWithError(reply, PROFILE_PAGE, "provider_error");
+      return redirectWithError(reply, PROFILE_PAGE, "provider_error", oidc.id);
     }
     return reply.redirect(trip.href);
-  });
+  }
 
-  // Unlinks the account's identity: 204, also when there was none. 409
-  // no_local_password for an account with no local password. 404 like the
-  // other OIDC routes when OIDC is off, leaving any links as they are for
-  // when it is configured again.
-  app.delete("/auth/oidc/connection", async (request, reply) => {
+  // Unlinks the account's identity from the provider: 204, also when there
+  // was none. 409 no_other_sign_in when the account would be left with no
+  // way to sign in: no local password and no identity from another
+  // configured provider. 404 like the other OIDC routes when the provider is
+  // off, leaving any link as it is for when it is configured again.
+  async function disconnect(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    oidc: OidcProvider | null,
+  ) {
     if (!oidc) return notConfigured(reply);
-    const { refused } = await disconnectOidc(db, request.user!.id);
+    const others = providers.filter((provider) => provider !== oidc);
+    const { refused } = await disconnectOidc(
+      db,
+      request.user!.id,
+      oidc,
+      others,
+    );
     if (refused) {
       return sendError(
         reply,
         409,
-        "no_local_password",
-        "an account without a password cannot disconnect its sign-in provider",
+        "no_other_sign_in",
+        "an account cannot disconnect its only way to sign in",
       );
     }
-    request.log.info({ userId: request.user!.id }, "auth: oidc disconnected");
+    request.log.info(
+      { userId: request.user!.id, provider: oidc.id },
+      "auth: oidc disconnected",
+    );
     return reply.code(204).send();
-  });
+  }
+
+  app.post<{ Params: ProviderParams }>(
+    "/auth/oidc/:provider/connect",
+    limited,
+    (request, reply) =>
+      connect(request, reply, providerFor(providers, request.params.provider)),
+  );
+  app.delete<{ Params: ProviderParams }>(
+    "/auth/oidc/:provider/connection",
+    limited,
+    (request, reply) =>
+      disconnect(
+        request,
+        reply,
+        providerFor(providers, request.params.provider),
+      ),
+  );
+  // The generic provider's routes before providers had ids (NATG-226).
+  app.post("/auth/oidc/connect", limited, (request, reply) =>
+    connect(request, reply, providerFor(providers)),
+  );
+  app.delete("/auth/oidc/connection", limited, (request, reply) =>
+    disconnect(request, reply, providerFor(providers)),
+  );
 
   done();
 };
@@ -340,22 +468,31 @@ async function finishConnect(
   request: FastifyRequest,
   reply: FastifyReply,
   { db }: OidcRouteDeps,
+  oidc: OidcProvider,
   userId: number,
   claims: OidcClaims,
 ) {
   const token = request.cookies[SESSION_COOKIE];
   const current = token ? await sessionUser(db, token) : null;
   if (current?.id !== userId) {
-    return redirectWithError(reply, PROFILE_PAGE, "provider_error");
+    return redirectWithError(reply, PROFILE_PAGE, "provider_error", oidc.id);
   }
   const { refused } = await connectOidcIdentity(db, userId, claims);
   if (refused) {
     request.log.warn(
-      { userId, email: claims.email, ip: request.ip, reason: refused },
+      {
+        userId,
+        provider: oidc.id,
+        email: claims.email,
+        ip: request.ip,
+        reason: refused,
+      },
       "auth: oidc connect refused",
     );
-    return redirectWithError(reply, PROFILE_PAGE, refused);
+    return redirectWithError(reply, PROFILE_PAGE, refused, oidc.id);
   }
-  request.log.info({ userId }, "auth: oidc connected");
-  return reply.redirect(`${PROFILE_PAGE}?oidc=connected`);
+  request.log.info({ userId, provider: oidc.id }, "auth: oidc connected");
+  return reply.redirect(
+    `${PROFILE_PAGE}?oidc=connected&oidc_provider=${oidc.id}`,
+  );
 }

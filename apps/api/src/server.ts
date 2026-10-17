@@ -20,6 +20,7 @@ const app = buildApp(
     secureCookies: config.secureCookies,
     settingsKey: config.settingsEncryptionKey,
     oidc: config.oidc && oidcProvider(config.oidc),
+    google: config.google && oidcProvider(config.google),
   },
   {
     logger: {

@@ -109,7 +109,7 @@ describe("POST /auth/register", () => {
       expect((await me(tokenFrom(res))).json()).toEqual({
         ...res.json<object>(),
         hasPassword: true,
-        oidc: { connected: false, connectedAt: null },
+        oidc: { providers: [], connected: false, connectedAt: null },
       });
     },
   );
@@ -591,7 +591,7 @@ describe("PATCH /me", () => {
       locale: "en-AU",
       isAdmin: false,
       hasPassword: true,
-      oidc: { connected: false, connectedAt: null },
+      oidc: { providers: [], connected: false, connectedAt: null },
     });
     expect((await me(token)).json()).toEqual(res.json());
   });

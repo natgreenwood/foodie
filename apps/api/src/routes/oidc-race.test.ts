@@ -52,6 +52,7 @@ beforeAll(async () => {
     secureCookies: false,
     settingsKey: Buffer.alloc(32),
     oidc: oidcProvider({
+      id: "generic",
       issuerUrl: mock.issuer,
       clientId: mock.clientId,
       clientSecret: mock.clientSecret,

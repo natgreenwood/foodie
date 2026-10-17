@@ -24,22 +24,31 @@ export interface Config {
   // OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET and OIDC_REDIRECT_URL
   // is set.
   oidc: OidcConfig | null;
+  // Google as a second OIDC provider (NATG-291); null when none of
+  // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URL is set.
+  google: OidcConfig | null;
 }
 
+// The stable id a provider is addressed by in routes and responses.
+export type OidcProviderId = "generic" | "google";
+
 export interface OidcConfig {
+  id: OidcProviderId;
   issuerUrl: URL;
   clientId: string;
   clientSecret: string;
   // Where the provider sends the browser back: the api's
-  // /auth/oidc/callback as the browser reaches it, e.g. through /api/.
+  // /auth/oidc/callback (or /auth/oidc/<id>/callback) as the browser
+  // reaches it, e.g. through /api/.
   redirectUrl: URL;
   // The sign-in button's label; null for the web app's generic one.
   displayName: string | null;
   // Trips to the provider that may be in progress at once, across all
-  // browsers; a start beyond it is refused (OIDC_MAX_PENDING_LOGINS).
+  // browsers and providers; a start beyond it is refused
+  // (OIDC_MAX_PENDING_LOGINS, which every provider shares).
   maxPendingLogins: number;
   // Starts one client address may make in any minute, per api process
-  // (OIDC_STARTS_PER_MINUTE).
+  // (OIDC_STARTS_PER_MINUTE, which every provider shares).
   startsPerMinute: number;
 }
 
@@ -166,6 +175,29 @@ function parseLimit(
   return value;
 }
 
+// An https URL, or http too in development, where a local provider may have
+// no certificate.
+function parseOidcUrl(
+  env: NodeJS.ProcessEnv,
+  name: "OIDC_ISSUER_URL" | "OIDC_REDIRECT_URL" | "GOOGLE_REDIRECT_URL",
+  development: boolean,
+): URL {
+  const raw = env[name]!;
+  const parsed = URL.canParse(raw) ? new URL(raw) : null;
+  if (
+    !parsed ||
+    !(
+      parsed.protocol === "https:" ||
+      (development && parsed.protocol === "http:")
+    )
+  ) {
+    throw new ConfigError(
+      `${name} must be an https URL${development ? " (or http in development)" : ""}, got "${raw}"`,
+    );
+  }
+  return parsed;
+}
+
 // All four or none. Plain http is accepted only in development, where a
 // local provider may have no certificate. The secret is never echoed back.
 function parseOidc(
@@ -180,28 +212,60 @@ function parseOidc(
       `${OIDC_REQUIRED.join(", ")} must be set together, or none; missing ${missing.join(", ")}`,
     );
   }
-  const url = (name: "OIDC_ISSUER_URL" | "OIDC_REDIRECT_URL") => {
-    const raw = env[name]!;
-    const parsed = URL.canParse(raw) ? new URL(raw) : null;
-    if (
-      !parsed ||
-      !(
-        parsed.protocol === "https:" ||
-        (development && parsed.protocol === "http:")
-      )
-    ) {
-      throw new ConfigError(
-        `${name} must be an https URL${development ? " (or http in development)" : ""}, got "${raw}"`,
-      );
-    }
-    return parsed;
-  };
+  const url = (name: "OIDC_ISSUER_URL" | "OIDC_REDIRECT_URL") =>
+    parseOidcUrl(env, name, development);
   return {
+    id: "generic",
     issuerUrl: url("OIDC_ISSUER_URL"),
     clientId: env.OIDC_CLIENT_ID!,
     clientSecret: env.OIDC_CLIENT_SECRET!,
     redirectUrl: url("OIDC_REDIRECT_URL"),
     displayName: env.OIDC_DISPLAY_NAME?.trim() || null,
+    maxPendingLogins: parseLimit(env, "OIDC_MAX_PENDING_LOGINS", 1000),
+    startsPerMinute: parseLimit(env, "OIDC_STARTS_PER_MINUTE", 10),
+  };
+}
+
+// Google's issuer, fixed: only the client is configuration.
+export const GOOGLE_ISSUER_URL = new URL("https://accounts.google.com");
+
+const GOOGLE_REQUIRED = [
+  "GOOGLE_CLIENT_ID",
+  "GOOGLE_CLIENT_SECRET",
+  "GOOGLE_REDIRECT_URL",
+] as const;
+
+// The path Google's redirect URL must end in: the api's Google callback,
+// whatever prefix the browser reaches the api under.
+const GOOGLE_CALLBACK_PATH = "/auth/oidc/google/callback";
+
+// All three or none, with the start limits the generic provider reads. The
+// secret is never echoed back.
+function parseGoogle(
+  env: NodeJS.ProcessEnv,
+  development: boolean,
+): OidcConfig | null {
+  const set = GOOGLE_REQUIRED.filter((name) => env[name]);
+  if (set.length === 0) return null;
+  if (set.length < GOOGLE_REQUIRED.length) {
+    const missing = GOOGLE_REQUIRED.filter((name) => !env[name]);
+    throw new ConfigError(
+      `${GOOGLE_REQUIRED.join(", ")} must be set together, or none; missing ${missing.join(", ")}`,
+    );
+  }
+  const redirectUrl = parseOidcUrl(env, "GOOGLE_REDIRECT_URL", development);
+  if (!redirectUrl.pathname.endsWith(GOOGLE_CALLBACK_PATH)) {
+    throw new ConfigError(
+      `GOOGLE_REDIRECT_URL must end in ${GOOGLE_CALLBACK_PATH}, got "${redirectUrl.href}"`,
+    );
+  }
+  return {
+    id: "google",
+    issuerUrl: GOOGLE_ISSUER_URL,
+    clientId: env.GOOGLE_CLIENT_ID!,
+    clientSecret: env.GOOGLE_CLIENT_SECRET!,
+    redirectUrl,
+    displayName: "Google",
     maxPendingLogins: parseLimit(env, "OIDC_MAX_PENDING_LOGINS", 1000),
     startsPerMinute: parseLimit(env, "OIDC_STARTS_PER_MINUTE", 10),
   };
@@ -215,6 +279,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (!databaseUrl) {
     throw new ConfigError("DATABASE_URL is required");
   }
+  const development = env.NODE_ENV === "development";
+  const oidc = parseOidc(env, development);
+  const google = parseGoogle(env, development);
+  // An identity belongs to a provider by its issuer, so the two must differ.
+  if (oidc && google && oidc.issuerUrl.origin === GOOGLE_ISSUER_URL.origin) {
+    throw new ConfigError(
+      "OIDC_ISSUER_URL is Google's issuer; configure Google with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URL only",
+    );
+  }
   return {
     host: env.HOST || "0.0.0.0",
     port: parsePort(env.PORT),
@@ -223,7 +296,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     admin: parseAdmin(env),
     secureCookies: env.NODE_ENV !== "development",
     settingsEncryptionKey: parseSettingsKey(env.SETTINGS_ENCRYPTION_KEY),
-    oidc: parseOidc(env, env.NODE_ENV === "development"),
+    oidc,
+    google,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
   };
 }

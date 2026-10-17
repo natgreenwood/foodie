@@ -1,5 +1,5 @@
 import * as client from "openid-client";
-import type { OidcConfig } from "../config.js";
+import type { OidcConfig, OidcProviderId } from "../config.js";
 
 // What Foodie reads about the person the provider signed in. Nothing else:
 // not groups (admin is granted only in Foodie), not picture.
@@ -20,7 +20,12 @@ export interface OidcChecks {
 }
 
 export interface OidcProvider {
+  id: OidcProviderId;
   displayName: string | null;
+  // The issuer identifiers an identity from this provider is stored under:
+  // the configured issuer URL with and without a trailing slash, since
+  // discovery accepts either spelling of it.
+  issuers: string[];
   // The path of the redirect URL, as the browser requests it.
   callbackPath: string;
   // The origin of the redirect URL, the only one POST /auth/oidc/connect
@@ -31,6 +36,7 @@ export interface OidcProvider {
   maxPendingLogins: number;
   startsPerMinute: number;
   // Fresh random state, nonce and PKCE verifier for one trip to the provider.
+  // The state starts with the provider's id and a dot.
   newChecks(): OidcChecks;
   // Where to send the browser to sign in at the provider.
   authorizationUrl(checks: OidcChecks): Promise<URL>;
@@ -84,8 +90,11 @@ export function oidcProvider(
     return configuration;
   }
 
+  const href = settings.issuerUrl.href;
   return {
+    id: settings.id,
     displayName: settings.displayName,
+    issuers: [...new Set([href, href.replace(/\/$/, "")])],
     callbackPath: settings.redirectUrl.pathname,
     trustedOrigin: settings.redirectUrl.origin,
     maxPendingLogins: settings.maxPendingLogins,
@@ -93,7 +102,9 @@ export function oidcProvider(
 
     newChecks() {
       return {
-        state: client.randomState(),
+        // Prefixed with the provider's id, so the trip records which
+        // provider it was started for (see tripProvider).
+        state: `${settings.id}.${client.randomState()}`,
         nonce: client.randomNonce(),
         codeVerifier: client.randomPKCECodeVerifier(),
       };
