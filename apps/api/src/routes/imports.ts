@@ -329,11 +329,9 @@ const MAX_INT = 2_147_483_647;
 export const MAX_LINES = 200;
 export const MAX_STEPS = 100;
 export const MAX_TAGS = 50;
-// A tag is in recipe_tag's primary key and an index, whose entries Postgres
-// caps at about 2.7 kB (NATG-317). Characters are code points; the byte cap
-// bounds the key whatever they are.
+// In code points: at most 400 UTF-8 bytes, far under the ~2.7 kB btree entry
+// limit on recipe_tag's primary key (NATG-317).
 export const MAX_TAG_CHARS = 100;
-export const MAX_TAG_BYTES = 400;
 
 // Every check the recipe tables' constraints make is made here first, so bad
 // input is a 400 or 422 rather than a failed insert. sourceUrl is the
@@ -550,12 +548,7 @@ function isBlank(text: string): boolean {
 }
 
 function isTag(value: unknown): value is string {
-  return (
-    isText(value) &&
-    !isBlank(value) &&
-    [...value].length <= MAX_TAG_CHARS &&
-    Buffer.byteLength(value, "utf8") <= MAX_TAG_BYTES
-  );
+  return isText(value) && !isBlank(value) && [...value].length <= MAX_TAG_CHARS;
 }
 
 function sendError(
