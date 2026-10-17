@@ -13,6 +13,8 @@ services:
       # Empty means unset; see .env.example.
       ADMIN_USER: ${ADMIN_USER:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Required; the api will not start without it. See .env.example.
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
     ports:
       - "${API_PORT:-3000}:3000"
     volumes:
