@@ -31,15 +31,29 @@ export const logRedactPaths = [
   "*.baseUrl",
 ];
 
-// Fastify's request log line, except that the OIDC callback's query, which
-// carries the authorization code and state, is left out.
+// The route whose query, the authorization code and state, never reaches a
+// log line.
+const OIDC_CALLBACK_ROUTE = "/auth/oidc/callback";
+
+// The request's path, with its query only where it is safe to log. The check
+// is on the route the router matched, so every spelling that reaches the
+// callback (a percent-encoded letter, say) is covered. A request that matched
+// no route loses its query too: it might be a near miss of the callback.
+function loggedUrl(request: FastifyRequest) {
+  const route = request.routeOptions.url;
+  if (route !== undefined && route !== OIDC_CALLBACK_ROUTE) return request.url;
+  const query = request.url.indexOf("?");
+  return query === -1 ? request.url : request.url.slice(0, query);
+}
+
+// Fastify's request log line, except that the OIDC callback's query is left
+// out (see loggedUrl).
 export const logSerializers = {
   req(request: FastifyRequest) {
-    const [path] = request.url.split("?", 1);
     const port = request.socket.remotePort;
     return {
       method: request.method,
-      url: path === "/auth/oidc/callback" ? path : request.url,
+      url: loggedUrl(request),
       host: request.host,
       remoteAddress: request.ip,
       ...(port === undefined ? {} : { remotePort: port }),
@@ -62,6 +76,16 @@ export function buildApp(
   seams: AppSeams = {},
 ) {
   const app = Fastify(options);
+  // Fastify's own 404, whose log line would carry the query; the answer is
+  // unchanged.
+  app.setNotFoundHandler((request, reply) => {
+    request.log.info(`Route ${request.method}:${loggedUrl(request)} not found`);
+    return reply.code(404).send({
+      message: `Route ${request.method}:${request.url} not found`,
+      error: "Not Found",
+      statusCode: 404,
+    });
+  });
   registerSessionSupport(app);
   app.register(healthRoutes, deps);
   app.register(authRoutes, deps);

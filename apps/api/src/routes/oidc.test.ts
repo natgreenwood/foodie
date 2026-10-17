@@ -184,6 +184,13 @@ function cookieValue(res: Response, name: string): string {
   return cookie.value;
 }
 
+// The url of each "incoming request" log line.
+function requestUrls(logLines: Record<string, unknown>[]): string[] {
+  return logLines
+    .filter((l) => l.msg === "incoming request")
+    .map((l) => (l.req as { url: string }).url);
+}
+
 function hasCookie(res: Response, name: string): boolean {
   return res.cookies.some((c) => c.name === name && c.value !== "");
 }
@@ -685,6 +692,68 @@ describe("GET /auth/oidc/callback", () => {
     expect(logged).not.toContain(code);
     expect(logged).not.toContain(mock.clientSecret);
     expect(logged).not.toContain(cookieValue(res, SESSION_COOKIE));
+  });
+
+  dbTest(
+    "never logs the code when the callback path is percent-encoded",
+    async ({ tx }) => {
+      const { request, logLines } = start(tx);
+      const started = await request("GET", "/auth/oidc/start");
+      mock.signInAs(identity());
+      const fromProvider = await fetch(started.headers.location as string, {
+        redirect: "manual",
+      });
+      const back = new URL(fromProvider.headers.get("location")!);
+
+      // %63 is "c": the router resolves this to the callback.
+      const res = await request("GET", `/auth/oidc/%63allback${back.search}`, {
+        [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE),
+      });
+
+      expect(res.headers.location).toBe("/");
+      const code = back.searchParams.get("code")!;
+      expect(code).toBeTruthy();
+      expect(JSON.stringify(logLines)).not.toContain(code);
+      expect(requestUrls(logLines)).toEqual([
+        "/auth/oidc/start",
+        "/auth/oidc/%63allback",
+      ]);
+    },
+  );
+
+  dbTest(
+    "never logs the query of a path that matches no route",
+    async ({ tx }) => {
+      const { request, logLines } = start(tx);
+
+      const res = await request(
+        "GET",
+        "/auth/oidc/callback/?code=LEAK_SENTINEL&state=x",
+      );
+
+      // The answer is Fastify's own 404, unchanged.
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({
+        message:
+          "Route GET:/auth/oidc/callback/?code=LEAK_SENTINEL&state=x not found",
+        error: "Not Found",
+        statusCode: 404,
+      });
+      expect(JSON.stringify(logLines)).not.toContain("LEAK_SENTINEL");
+      expect(logLines).toContainEqual(
+        expect.objectContaining({
+          msg: "Route GET:/auth/oidc/callback/ not found",
+        }),
+      );
+    },
+  );
+
+  dbTest("still logs the query of other routes", async ({ tx }) => {
+    const { request, logLines } = start(tx);
+
+    await request("GET", "/auth/oidc/config?from=test");
+
+    expect(requestUrls(logLines)).toEqual(["/auth/oidc/config?from=test"]);
   });
 });
 
