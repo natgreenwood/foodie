@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AuthError, call, errorFrom, reportUnauthenticated } from "./auth";
+import { navigate } from "./router";
 
 // Mirrors the "Contract for NATG-288" in the api's OIDC routes
 // (apps/api/src/routes/oidc.ts and me.ts).
@@ -22,9 +23,15 @@ export const OIDC_START_URL = "/api/auth/oidc/start";
 // /profile?oidc_error=.
 export const OIDC_CONNECT_URL = "/api/auth/oidc/connect";
 
-// The provider is only ever named by its configured display name.
+// The provider is only ever named by its configured display name, or
+// generically without one. Either goes mid-sentence, so no line starts with it.
 export function oidcName(config: OidcConfig): string {
-  return config.displayName ?? "single sign-on";
+  return config.displayName ?? "your identity provider";
+}
+
+// The same name standing alone, as a label.
+export function oidcLabel(config: OidcConfig): string {
+  return config.displayName ?? "Identity provider";
 }
 
 async function json(res: Response): Promise<unknown> {
@@ -86,6 +93,18 @@ export function usePageRestored(restored: () => void) {
   }, [restored]);
 }
 
+// Once the page has shown what an OIDC redirect came back to say, the
+// address stops saying it, so a reload or a shared link does not say it
+// again. Only the named parameters go: ?next, anything else and the hash
+// stay. Through the router, so the pages see the new address; a no-op once
+// they have gone, as Strict Mode runs effects twice.
+export function clearOidcOutcome(names: readonly string[]) {
+  const url = new URL(window.location.href);
+  if (!names.some((name) => url.searchParams.has(name))) return;
+  for (const name of names) url.searchParams.delete(name);
+  navigate(url.pathname + url.search + url.hash, { replace: true });
+}
+
 // How the account signs in, from GET /me's hasPassword and oidc. Fetched
 // here rather than taken from the session, because sign-in and register
 // answer with a profile that does not carry them.
@@ -124,8 +143,8 @@ const signInRefusals: Record<string, (name: string) => string> = {
   account_disabled: () =>
     "This account has been disabled. Ask an administrator to re-enable it.",
   already_connected: (name) =>
-    `An account with that email already uses a different ${name} identity. Sign in with your password to manage it from your profile.`,
-  provider_error: (name) => `${name} didn't complete the sign-in. Try again.`,
+    `An account with that email is already connected to another identity at ${name}. Sign in with your password to manage it from your profile.`,
+  provider_error: (name) => `Sign-in with ${name} didn't complete. Try again.`,
 };
 
 // A connect can be refused with email_mismatch, already_connected or
@@ -134,9 +153,8 @@ const connectRefusals: Record<string, (name: string) => string> = {
   email_mismatch: (name) =>
     `The email ${name} returned doesn't match this account's email. Nothing was connected.`,
   already_connected: (name) =>
-    `That ${name} identity is already connected to an account, so nothing was changed.`,
-  provider_error: (name) =>
-    `${name} didn't complete the connection. Try again.`,
+    `That identity at ${name} is already connected to an account, so nothing was changed.`,
+  provider_error: (name) => `Connecting ${name} didn't complete. Try again.`,
 };
 
 export function signInRefusal(code: string, name: string): string {

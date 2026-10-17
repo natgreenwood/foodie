@@ -21,7 +21,7 @@ export interface Profile {
 // A session lasts this long from sign-in; it is not extended by use.
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-const profileColumns = {
+export const profileColumns = {
   id: user.id,
   email: user.email,
   displayName: user.displayName,
@@ -31,7 +31,7 @@ const profileColumns = {
 
 // Both sides lowercased by Postgres, as the unique index is: JavaScript's
 // toLowerCase() disagrees with it on some characters (İ, for one).
-function byEmail(email: string) {
+export function byEmail(email: string) {
   return eq(sql`lower(${user.email})`, sql`lower(${email})`);
 }
 

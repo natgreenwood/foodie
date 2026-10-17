@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { AuthError } from "./auth";
 import { AuthErrorMessage } from "./AuthErrorMessage";
 import {
+  clearOidcOutcome,
   connectRefusal,
   disconnectOidc,
   fetchOidcConnection,
   OIDC_CONNECT_URL,
+  oidcLabel,
   oidcName,
   useOidcConfig,
   usePageRestored,
@@ -30,17 +32,36 @@ type Action =
 export function ConnectedIdentities({ email }: { email: string }) {
   const config = useOidcConfig();
   if (!config?.enabled) return null;
-  return <Identities name={oidcName(config)} email={email} />;
+  return (
+    <Identities
+      name={oidcName(config)}
+      label={oidcLabel(config)}
+      email={email}
+    />
+  );
 }
 
 // The api returns no identity email, so the account's is shown: they are
 // the same at the time of linking.
-function Identities({ name, email }: { name: string; email: string }) {
+function Identities({
+  name,
+  label,
+  email,
+}: {
+  name: string;
+  label: string;
+  email: string;
+}) {
   const { search } = useLocation();
-  const params = new URLSearchParams(search);
   // Where a connect comes back to: ?oidc=connected or ?oidc_error=<code>.
-  const refusedCode = params.get("oidc_error");
-  const justConnected = params.get("oidc") === "connected";
+  // Kept from the first render, as the address loses it once it is shown.
+  const [{ refusedCode, justConnected }] = useState(() => {
+    const params = new URLSearchParams(search);
+    return {
+      refusedCode: params.get("oidc_error"),
+      justConnected: params.get("oidc") === "connected",
+    };
+  });
   // That outcome is news only until the user does something here.
   const [outcomeCurrent, setOutcomeCurrent] = useState(true);
 
@@ -79,9 +100,17 @@ function Identities({ name, email }: { name: string; email: string }) {
       ? connectRefusal(refusedCode, name)
       : null;
 
+  // Only once the api has said the connect took.
+  const connected =
+    loaded && load.connection.connected && justConnected && outcomeCurrent;
+
   useEffect(() => {
     if (refusal) refusalAlert.current?.focus();
   }, [refusal]);
+
+  useEffect(() => {
+    if (refusal || connected) clearOidcOutcome(["oidc", "oidc_error"]);
+  }, [refusal, connected]);
 
   useEffect(() => {
     if (action.kind === "confirming") confirmButton.current?.focus();
@@ -178,7 +207,7 @@ function Identities({ name, email }: { name: string; email: string }) {
       {loaded && load.connection.connected && (
         <>
           <dl className="facts">
-            <dt>{name}</dt>
+            <dt>{label}</dt>
             <dd>{email}</dd>
           </dl>
           {!load.connection.hasPassword && (
@@ -237,17 +266,14 @@ function Identities({ name, email }: { name: string; email: string }) {
       )}
       {action.kind === "disconnected" && (
         <p role="status" className="health" data-tone="good">
-          {name} disconnected.
+          Disconnected {name}.
         </p>
       )}
-      {loaded &&
-        load.connection.connected &&
-        justConnected &&
-        outcomeCurrent && (
-          <p role="status" className="health" data-tone="good">
-            {name} connected. You can now sign in with it.
-          </p>
-        )}
+      {connected && (
+        <p role="status" className="health" data-tone="good">
+          Connected {name}. You can now sign in with it.
+        </p>
+      )}
       {refusal && (
         <div
           ref={refusalAlert}

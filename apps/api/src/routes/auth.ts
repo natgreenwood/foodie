@@ -89,6 +89,23 @@ export function sendAdminRefusal(reply: FastifyReply, refusal: AdminRefusal) {
     : sendError(reply, 401, "unauthenticated", "sign in required");
 }
 
+// Starts a session for the user and sets its cookie on the reply: the one
+// way every sign-in, local or OIDC, ends.
+export async function startSession(
+  { db, secureCookies }: AuthDeps,
+  reply: FastifyReply,
+  userId: number,
+) {
+  const { token, expiresAt } = await createSession(db, userId);
+  reply.setCookie(SESSION_COOKIE, token, {
+    path: "/",
+    httpOnly: true,
+    sameSite: "lax",
+    secure: secureCookies,
+    expires: expiresAt,
+  });
+}
+
 // POST /auth/register, /auth/login and /auth/logout. Open to anyone.
 export const authRoutes: FastifyPluginCallback<AuthDeps> = (
   app,
@@ -97,17 +114,8 @@ export const authRoutes: FastifyPluginCallback<AuthDeps> = (
 ) => {
   const { db } = deps;
   app.setErrorHandler(apiErrorHandler("auth"));
-
-  async function signIn(reply: FastifyReply, userId: number) {
-    const { token, expiresAt } = await createSession(db, userId);
-    reply.setCookie(SESSION_COOKIE, token, {
-      path: "/",
-      httpOnly: true,
-      sameSite: "lax",
-      secure: deps.secureCookies,
-      expires: expiresAt,
-    });
-  }
+  const signIn = (reply: FastifyReply, userId: number) =>
+    startSession(deps, reply, userId);
 
   // { email, password, displayName? }: creates the account and signs it in.
   app.post<{ Body: unknown }>("/auth/register", async (request, reply) => {
