@@ -40,6 +40,12 @@ const TIMEOUT_SECONDS = 10;
 // A standards-only OIDC client: everything about the provider comes from its
 // discovery document, fetched on first use and kept. A failed discovery is
 // not kept, so the next sign-in tries again.
+//
+// The ID token's signature is checked against the discovered JWKS, on top of
+// the TLS the token endpoint already has: the issuer URL is set by whoever
+// deploys Foodie. On a kid it does not know, openid-client fetches the JWKS
+// again only once its copy is a minute old, so a provider that starts signing
+// with a key it published less than a minute earlier is refused until then.
 export function oidcProvider(
   settings: OidcConfig,
   // Plain http to the provider; only the tests' mock and a development
@@ -60,6 +66,10 @@ export function oidcProvider(
           ...(allowHttp ? { execute: [client.allowInsecureRequests] } : {}),
         },
       )
+      .then((config) => {
+        client.enableNonRepudiationChecks(config);
+        return config;
+      })
       .catch((err: unknown) => {
         configuration = null;
         throw err;

@@ -181,6 +181,11 @@ Both URLs must be `https`, except in development (`NODE_ENV=development`).
 With `bws run`, name the secrets `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`,
 as for [the settings key](#supplying-the-key-from-bitwarden-secrets-manager-bws).
 
+The ID token's signature is checked against the keys the provider publishes
+(its JWKS). When the provider rotates to a new key, Foodie fetches the keys
+again, but at most once a minute: a provider that signs with a key it
+published less than a minute earlier is refused until that minute is up.
+
 **PocketID:** turn on its `EMAILS_VERIFIED` setting. PocketID leaves it off,
 and then reports every email as unverified, so a first OIDC sign-in with the
 email of an existing Foodie account is refused instead of linked.
@@ -228,6 +233,16 @@ or the trip was missing, expired or no longer signed in).
 An account with no password cannot sign in with a password: the sign-in form
 answers it exactly as it answers a wrong password. Signing out of Foodie does
 not sign out of the provider.
+
+**Rolling back.** Migration `0010_oidc_identity` adds the `oidc_identity`
+and `oidc_login` tables and changes nothing else, and there is no down
+migration. Dropping those tables, or restoring a database from before
+`0010`, removes every link between a provider identity and an account.
+Accounts created through OIDC have no password, and an admin cannot set
+one, so those accounts are left with no way to sign in. Rolling back only
+the code and keeping the tables keeps the links. OIDC-only accounts still
+cannot sign in until the OIDC code is back, but then they sign in to the
+same accounts.
 
 ### Administration
 

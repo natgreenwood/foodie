@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
 import { eq, sql } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
-import { afterAll, beforeAll, describe, expect, onTestFinished } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  onTestFinished,
+  vi,
+} from "vitest";
 import { buildApp, logSerializers } from "../app.js";
 import { createUser } from "../auth/accounts.js";
 import { oidcProvider, type OidcProvider } from "../auth/oidc-provider.js";
@@ -764,6 +771,84 @@ describe("GET /auth/oidc/callback", () => {
       }),
     );
   });
+});
+
+// The ID token's signature is checked against the discovered JWKS.
+describe("ID token signature", () => {
+  dbTest.for(["same", "unknown"] as const)(
+    "refuses a token signed with a key not in the JWKS (%s kid)",
+    async (kid, { tx }) => {
+      const { oidcSignIn, logLines } = start(tx);
+      const who = identity();
+      mock.forgeNext(kid);
+
+      const res = await oidcSignIn(who);
+
+      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
+      expect(await accountsWithEmail(tx, who.email!)).toEqual([]);
+      expect(logLines).toContainEqual(
+        expect.objectContaining({ msg: "auth: oidc callback failed" }),
+      );
+    },
+  );
+
+  // Start, through the provider's authorization endpoint, then the key
+  // rotates before the callback exchanges the code for a token.
+  async function rotatingBetweenAuthorizeAndToken(
+    ctx: ReturnType<typeof start>,
+    who: MockIdentity,
+  ) {
+    const started = await ctx.request("GET", "/auth/oidc/start");
+    mock.signInAs(who);
+    const authorized = await fetch(started.headers.location as string, {
+      redirect: "manual",
+    });
+    const back = new URL(authorized.headers.get("location")!);
+    mock.rotateKey();
+    return ctx.request("GET", `/auth/oidc/callback${back.search}`, {
+      [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE),
+    });
+  }
+
+  const jwksFetches = () =>
+    mock.requests.filter((path) => path === "/mock/jwks").length;
+
+  dbTest(
+    "signs in after the JWKS rotates to a new kid between authorize and token",
+    async ({ tx }) => {
+      const ctx = start(tx);
+      // The JWKS is fetched and kept on the first sign-in.
+      expect((await ctx.oidcSignIn(identity())).headers.location).toBe("/");
+      const fetched = jwksFetches();
+      // openid-client fetches it again for an unknown kid once its copy is
+      // a minute old.
+      const realNow = Date.now.bind(Date);
+      vi.spyOn(Date, "now").mockImplementation(() => realNow() + 61_000);
+      onTestFinished(() => {
+        vi.restoreAllMocks();
+      });
+
+      const res = await rotatingBetweenAuthorizeAndToken(ctx, identity());
+
+      expect(res.headers.location).toBe("/");
+      expect(hasCookie(res, SESSION_COOKIE)).toBe(true);
+      expect(jwksFetches()).toBe(fetched + 1);
+    },
+  );
+
+  dbTest(
+    "refuses a new kid while its copy of the JWKS is under a minute old",
+    async ({ tx }) => {
+      const ctx = start(tx);
+      expect((await ctx.oidcSignIn(identity())).headers.location).toBe("/");
+
+      const res = await rotatingBetweenAuthorizeAndToken(ctx, identity());
+
+      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
+    },
+  );
 });
 
 // Criterion 4.

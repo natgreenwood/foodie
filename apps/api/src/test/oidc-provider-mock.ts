@@ -26,6 +26,11 @@ export interface MockProvider {
   signInAs(identity: MockIdentity): void;
   // Answers the next authorization request with error=access_denied.
   denyNext(): void;
+  // Signs the next ID token with a key that is not in the JWKS, under the
+  // JWKS's own kid or under one of its own.
+  forgeNext(kid: "same" | "unknown"): void;
+  // Replaces the signing key and the JWKS with a new key under a new kid.
+  rotateKey(): void;
   // Every path requested, in order.
   requests: string[];
   close(): Promise<void>;
@@ -37,15 +42,14 @@ export interface MockProvider {
 // only find them through discovery. The token endpoint checks the client
 // secret, redirect URI and PKCE verifier and takes each code once. The ID
 // token carries only iss, sub, aud, nonce and times, so profile claims can
-// only come from UserInfo.
+// only come from UserInfo. It is signed with RS256 under a kid the JWKS
+// lists.
 export async function startMockProvider(): Promise<MockProvider> {
   const clientId = "foodie-test";
   const clientSecret = randomBytes(16).toString("base64url");
-  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-  });
-  const kid = "test-key";
-  const jwk = { ...publicKey.export({ format: "jwk" }), kid, alg: "RS256" };
+  let generation = 0;
+  let key = signingKey(`test-key-${generation}`);
+  let forge: "same" | "unknown" | null = null;
 
   let next: MockIdentity | "deny" | null = null;
   const codes = new Map<
@@ -89,7 +93,7 @@ export async function startMockProvider(): Promise<MockProvider> {
         });
       }
 
-      if (url.pathname === "/mock/jwks") return json(200, { keys: [jwk] });
+      if (url.pathname === "/mock/jwks") return json(200, { keys: [key.jwk] });
 
       if (url.pathname === "/mock/authorize") {
         const q = url.searchParams;
@@ -144,6 +148,11 @@ export async function startMockProvider(): Promise<MockProvider> {
           return json(400, { error: "invalid_grant" });
         }
         const now = Math.floor(Date.now() / 1000);
+        const signer =
+          forge === null
+            ? key
+            : signingKey(forge === "same" ? key.kid : "not-in-the-jwks");
+        forge = null;
         const idToken = signJwt(
           {
             iss: issuerId,
@@ -153,8 +162,8 @@ export async function startMockProvider(): Promise<MockProvider> {
             exp: now + 300,
             ...(grant.nonce === null ? {} : { nonce: grant.nonce }),
           },
-          kid,
-          (data) => sign("sha256", data, privateKey),
+          signer.kid,
+          (data) => sign("sha256", data, signer.privateKey),
         );
         const accessToken = randomBytes(16).toString("base64url");
         accessTokens.set(accessToken, grant.identity);
@@ -193,12 +202,27 @@ export async function startMockProvider(): Promise<MockProvider> {
     denyNext: () => {
       next = "deny";
     },
+    forgeNext: (kid) => {
+      forge = kid;
+    },
+    rotateKey: () => {
+      generation += 1;
+      key = signingKey(`test-key-${generation}`);
+    },
     requests,
     close: () =>
       new Promise((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
       ),
   };
+}
+
+function signingKey(kid: string) {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  });
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid, alg: "RS256" };
+  return { kid, privateKey, jwk };
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
