@@ -159,6 +159,7 @@ th.section {
 
 .signed-in-as {
   color: #59636e;
+  overflow-wrap: anywhere;
 }
 
 main:focus {
