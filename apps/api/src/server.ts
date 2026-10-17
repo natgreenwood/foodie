@@ -1,4 +1,4 @@
-import { buildApp } from "./app.js";
+import { buildApp, logRedactPaths } from "./app.js";
 import { ensureAdmin } from "./auth/accounts.js";
 import { loadConfig } from "./config.js";
 import { createDatabase } from "./db/client.js";
@@ -17,8 +17,9 @@ const app = buildApp(
     ...importDeps(database.db),
     db: database.db,
     secureCookies: config.secureCookies,
+    settingsKey: config.settingsEncryptionKey,
   },
-  { logger: { level: config.logLevel } },
+  { logger: { level: config.logLevel, redact: logRedactPaths } },
 );
 
 app.addHook("onClose", async () => {

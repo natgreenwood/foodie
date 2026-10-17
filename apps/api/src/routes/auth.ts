@@ -58,6 +58,18 @@ export function requireUser({ db }: AuthDeps) {
   };
 }
 
+// onRequest hook, after requireUser, for every admin route: answers 403 to
+// a signed-in user who is not an admin. request.user is read from the
+// database on each request, so a revoked admin is refused at once.
+export async function requireAdmin(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  if (!request.user?.isAdmin) {
+    return sendError(reply, 403, "forbidden", "admin only");
+  }
+}
+
 // POST /auth/register, /auth/login and /auth/logout. Open to anyone.
 export const authRoutes: FastifyPluginCallback<AuthDeps> = (
   app,

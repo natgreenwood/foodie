@@ -31,6 +31,7 @@ function start(tx: TestTransaction, secureCookies = true) {
       loadUnits: unused,
       db: tx,
       secureCookies,
+      settingsKey: Buffer.alloc(32),
     },
     { logger: { level: "info", stream } },
   );
