@@ -73,7 +73,10 @@ describe("apiErrorHandler", () => {
     });
 
     expect(res.statusCode).toBe(415);
-    expect(res.json()).toMatchObject({ error: "invalid_request" });
+    expect(res.json()).toEqual({
+      error: "invalid_request",
+      message: "content type is not supported",
+    });
     expect(logLines.filter((l) => (l.level as number) >= 50)).toEqual([]);
     expect(logLines).toContainEqual(
       expect.objectContaining({
@@ -83,6 +86,42 @@ describe("apiErrorHandler", () => {
         status: 415,
       }),
     );
+  });
+
+  it("never sends or logs the message of a Fastify validation error", async () => {
+    const { app, logLines } = start();
+    // A validator whose error message carries request data, which Fastify
+    // wraps as FST_ERR_VALIDATION with status 400.
+    app.post(
+      "/recipes/validated",
+      {
+        schema: { body: {} },
+        validatorCompiler: () => () => ({
+          error: new Error("private-marker-7f3a"),
+        }),
+      },
+      () => ({ ok: true }),
+    );
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/recipes/validated",
+      payload: { title: "x" },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: "invalid_request",
+      message: "request was not accepted",
+    });
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        level: 40,
+        msg: "recipes: request refused",
+        code: "FST_ERR_VALIDATION",
+      }),
+    );
+    expect(JSON.stringify(logLines)).not.toContain("private-marker-7f3a");
   });
 
   it("answers a thrown 4xx that is not Fastify's with 500", async () => {

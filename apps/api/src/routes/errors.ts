@@ -22,6 +22,15 @@ export function sendError(
   return reply.code(status).send({ error, message });
 }
 
+// Our text for the Fastify 4xx errors a client can cause on these routes.
+// Fastify's own messages are not all fixed (a validation error carries the
+// validator's message), so none of them reaches a client.
+const FASTIFY_4XX_MESSAGES: Record<string, string> = {
+  FST_ERR_CTP_BODY_TOO_LARGE: "body is too large",
+  FST_ERR_CTP_INVALID_MEDIA_TYPE: "content type is not supported",
+  FST_ERR_CTP_INVALID_CONTENT_LENGTH: "body size does not match Content-Length",
+};
+
 // An error handler for one plugin: an unparseable body answers in the
 // contract's shape, and anything unexpected is logged as one line that names
 // the module and the route. Drizzle puts query parameters (a password hash or
@@ -38,8 +47,8 @@ export function apiErrorHandler(module: string) {
     }
     // Fastify's own 4xx errors (a body over the limit, an unsupported content
     // type) are the client's fault: keep the status, and log below error so
-    // anyone sending a bad request cannot raise an alert. Only Fastify's, so
-    // the message is one of its fixed texts and never a thrown error's detail.
+    // anyone sending a bad request cannot raise an alert. Only Fastify's, and
+    // the message is always ours, never the error's.
     if (
       err.code?.startsWith("FST_") &&
       err.statusCode !== undefined &&
@@ -50,7 +59,12 @@ export function apiErrorHandler(module: string) {
         { route, status: err.statusCode, code: err.code },
         `${module}: request refused`,
       );
-      return sendError(reply, err.statusCode, "invalid_request", err.message);
+      return sendError(
+        reply,
+        err.statusCode,
+        "invalid_request",
+        FASTIFY_4XX_MESSAGES[err.code] ?? "request was not accepted",
+      );
     }
     request.log.error(
       { route, error: describeError(err) },

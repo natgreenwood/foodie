@@ -429,7 +429,7 @@ describe("auth routes when a request fails", () => {
       expect(res.statusCode).toBe(413);
       expect(res.json()).toEqual({
         error: "invalid_request",
-        message: "Request body is too large",
+        message: "body is too large",
       });
       expect(logLines.filter((l) => (l.level as number) >= 50)).toEqual([]);
       expect(logLines).toContainEqual(
