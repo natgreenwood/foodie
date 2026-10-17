@@ -104,12 +104,46 @@ export interface AppSeams {
   ) => Promise<unknown>;
 }
 
+// Errors Fastify raises before routing, so neither the not-found handler nor
+// a route's apiErrorHandler sees them. Fastify's own answers put the full URL,
+// query and all, in the body.
+const frameworkErrors: NonNullable<FastifyServerOptions["frameworkErrors"]> = (
+  err,
+  request,
+  reply,
+) => {
+  const path = pathForLog(request.url);
+  if (err.code === "FST_ERR_BAD_URL") {
+    request.log.info({ method: request.method, path }, "bad url");
+    void sendError(reply, 400, "invalid_request", "url is not valid");
+    return;
+  }
+  // An over-long path parameter (414) or a failed async route constraint
+  // (500): keep the status, but never Fastify's message, which can name the
+  // path.
+  const status = err.statusCode ?? 500;
+  request.log.warn(
+    { method: request.method, path, status, code: err.code },
+    "request refused before routing",
+  );
+  if (status < 500) {
+    void sendError(
+      reply,
+      status,
+      "invalid_request",
+      "request was not accepted",
+    );
+  } else {
+    void sendError(reply, status, "internal_error", "something went wrong");
+  }
+};
+
 export function buildApp(
   deps: AppDeps,
   options: FastifyServerOptions = {},
   seams: AppSeams = {},
 ) {
-  const app = Fastify(options);
+  const app = Fastify({ frameworkErrors, ...options });
   // Fastify's own 404 puts the full URL, query and all, in its message and
   // its log line.
   app.setNotFoundHandler((request, reply) => {
