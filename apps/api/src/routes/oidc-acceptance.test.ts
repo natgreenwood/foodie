@@ -66,6 +66,7 @@ dbTest(
       });
       expect(await (await fetch(`${origin}/auth/oidc/config`)).json()).toEqual({
         enabled: false,
+        providers: [],
         displayName: null,
       });
       const created = await fetch(`${origin}/auth/register`, {

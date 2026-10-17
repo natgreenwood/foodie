@@ -45,6 +45,7 @@ function provider(
   limits: { maxPendingLogins?: number; startsPerMinute?: number } = {},
 ): OidcProvider {
   return oidcProvider({
+    id: "generic",
     issuerUrl,
     clientId: mock.clientId,
     clientSecret: mock.clientSecret,
@@ -240,7 +241,11 @@ describe("GET /auth/oidc/config", () => {
     const res = await request("GET", "/auth/oidc/config");
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ enabled: true, displayName: "Home SSO" });
+    expect(res.json()).toEqual({
+      enabled: true,
+      providers: [{ id: "generic", displayName: "Home SSO" }],
+      displayName: "Home SSO",
+    });
   });
 
   dbTest("answers a null display name when none is set", async ({ tx }) => {
@@ -248,7 +253,11 @@ describe("GET /auth/oidc/config", () => {
 
     const res = await request("GET", "/auth/oidc/config");
 
-    expect(res.json()).toEqual({ enabled: true, displayName: null });
+    expect(res.json()).toEqual({
+      enabled: true,
+      providers: [{ id: "generic", displayName: null }],
+      displayName: null,
+    });
   });
 
   dbTest(
@@ -259,6 +268,7 @@ describe("GET /auth/oidc/config", () => {
 
       expect((await request("GET", "/auth/oidc/config")).json()).toEqual({
         enabled: false,
+        providers: [],
         displayName: null,
       });
       // A link made while OIDC was on.
@@ -372,7 +382,13 @@ describe("signing in through the provider", () => {
         locale: "en-GB",
         isAdmin: false,
         hasPassword: false,
-        oidc: { connected: true, connectedAt: expect.any(String) as string },
+        oidc: {
+          providers: [
+            { id: "generic", displayName: "Home SSO", connected: true },
+          ],
+          connected: true,
+          connectedAt: expect.any(String) as string,
+        },
       });
       const [account] = await accountsWithEmail(tx, who.email!);
       expect(account!.passwordHash).toBeNull();
@@ -1526,7 +1542,7 @@ describe("DELETE /auth/oidc/connection", () => {
     },
   );
 
-  dbTest("refuses an account with no password", async ({ tx }) => {
+  dbTest("refuses an account with no other way to sign in", async ({ tx }) => {
     const { oidcSignIn, request } = start(tx);
     const who = identity();
     const token = cookieValue(await oidcSignIn(who), SESSION_COOKIE);
@@ -1537,9 +1553,8 @@ describe("DELETE /auth/oidc/connection", () => {
 
     expect(res.statusCode).toBe(409);
     expect(res.json()).toEqual({
-      error: "no_local_password",
-      message:
-        "an account without a password cannot disconnect its sign-in provider",
+      error: "no_other_sign_in",
+      message: "an account cannot disconnect its only way to sign in",
     });
     const [account] = await accountsWithEmail(tx, who.email!);
     expect(await identitiesOf(tx, account!.id)).toHaveLength(1);

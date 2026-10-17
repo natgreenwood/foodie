@@ -1,5 +1,5 @@
 import * as client from "openid-client";
-import type { OidcConfig } from "../config.js";
+import type { OidcConfig, OidcProviderId } from "../config.js";
 
 // What Foodie reads about the person the provider signed in. Nothing else:
 // not groups (admin is granted only in Foodie), not picture.
@@ -20,7 +20,12 @@ export interface OidcChecks {
 }
 
 export interface OidcProvider {
+  id: OidcProviderId;
   displayName: string | null;
+  // The issuer identifiers an identity from this provider is stored under:
+  // the configured issuer URL with and without a trailing slash, since
+  // discovery accepts either spelling of it.
+  issuers: string[];
   // The path of the redirect URL, as the browser requests it.
   callbackPath: string;
   // The admission limits on starting a trip, from the configuration.
@@ -80,8 +85,11 @@ export function oidcProvider(
     return configuration;
   }
 
+  const href = settings.issuerUrl.href;
   return {
+    id: settings.id,
     displayName: settings.displayName,
+    issuers: [...new Set([href, href.replace(/\/$/, "")])],
     callbackPath: settings.redirectUrl.pathname,
     maxPendingLogins: settings.maxPendingLogins,
     startsPerMinute: settings.startsPerMinute,

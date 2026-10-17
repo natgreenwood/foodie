@@ -2,8 +2,10 @@ import type { FastifyPluginCallback } from "fastify";
 import { updateProfile, type Db, type Profile } from "../auth/accounts.js";
 import { canonicalLocale, displayNameProblem } from "../auth/credentials.js";
 import { signInMethods, type SignInMethods } from "../auth/oidc.js";
-import { isRecord, type AuthDeps } from "./auth.js";
+import type { OidcProvider } from "../auth/oidc-provider.js";
+import { isRecord } from "./auth.js";
 import { apiErrorHandler, sendError } from "./errors.js";
+import { configuredProviders, type OidcDeps } from "./oidc.js";
 
 // GET /me and PATCH /me: the signed-in user's own profile. Registered behind
 // requireUser, so request.user is always set here.
@@ -11,15 +13,13 @@ import { apiErrorHandler, sendError } from "./errors.js";
 // Both answer the same shape, which also says how the account signs in
 // (hasPassword, oidc), so the profile knows whether to offer connect or
 // disconnect and can replace its state from either response.
-export const meRoutes: FastifyPluginCallback<AuthDeps> = (
-  app,
-  { db },
-  done,
-) => {
+export const meRoutes: FastifyPluginCallback<OidcDeps> = (app, deps, done) => {
+  const { db } = deps;
+  const providers = configuredProviders(deps);
   app.setErrorHandler(apiErrorHandler("me"));
 
   app.get("/me", async (request, reply) => {
-    const me = await withSignInMethods(db, request.user!);
+    const me = await withSignInMethods(db, providers, request.user!);
     // Deleted between the session check and here.
     if (!me) {
       return sendError(reply, 401, "unauthenticated", "sign in required");
@@ -74,7 +74,7 @@ export const meRoutes: FastifyPluginCallback<AuthDeps> = (
     }
 
     const updated = await updateProfile(db, request.user!.id, changes);
-    const me = updated && (await withSignInMethods(db, updated));
+    const me = updated && (await withSignInMethods(db, providers, updated));
     // Deleted between the session check and here.
     if (!me) {
       return sendError(reply, 401, "unauthenticated", "sign in required");
@@ -88,8 +88,9 @@ export const meRoutes: FastifyPluginCallback<AuthDeps> = (
 // The /me response for a profile, or null when the account no longer exists.
 async function withSignInMethods(
   db: Db,
+  providers: OidcProvider[],
   profile: Profile,
 ): Promise<(Profile & SignInMethods) | null> {
-  const methods = await signInMethods(db, profile.id);
+  const methods = await signInMethods(db, profile.id, providers);
   return methods && { ...profile, ...methods };
 }

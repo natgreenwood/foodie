@@ -12,7 +12,7 @@ export type ApiErrorCode =
   | "forbidden"
   | "cannot_change_own_account"
   | "password_not_allowed"
-  | "no_local_password"
+  | "no_other_sign_in"
   | "rate_limited"
   | "not_found"
   | "internal_error";

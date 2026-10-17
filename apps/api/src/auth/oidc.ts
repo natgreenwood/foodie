@@ -9,7 +9,8 @@ import {
   type Profile,
 } from "./accounts.js";
 import { displayNameProblem, normaliseEmail } from "./credentials.js";
-import type { OidcChecks, OidcClaims } from "./oidc-provider.js";
+import type { OidcProviderId } from "../config.js";
+import type { OidcChecks, OidcClaims, OidcProvider } from "./oidc-provider.js";
 
 // How long a browser has to come back from the provider.
 export const OIDC_LOGIN_TTL_MS = 10 * 60 * 1000;
@@ -232,52 +233,97 @@ export async function connectOidcIdentity(
   });
 }
 
+// A configured provider as the account sees it: whether an identity from it
+// is linked.
+export interface ProviderConnection {
+  id: OidcProviderId;
+  displayName: string | null;
+  connected: boolean;
+}
+
 export interface SignInMethods {
   // Whether the account has a local password, so could still sign in if
-  // its identity were disconnected.
+  // its identities were disconnected.
   hasPassword: boolean;
-  oidc: { connected: boolean; connectedAt: string | null };
+  oidc: {
+    // One per configured provider, in the order given.
+    providers: ProviderConnection[];
+    // The generic provider's link, as the web app read it before it read
+    // providers; until NATG-291's web change lands.
+    connected: boolean;
+    connectedAt: string | null;
+  };
 }
 
 // How the account can sign in, for GET /me. Null when it no longer exists.
 export async function signInMethods(
   db: Db,
   userId: number,
+  providers: OidcProvider[],
 ): Promise<SignInMethods | null> {
   const [row] = await db
-    .select({
-      hasPassword: sql<boolean>`${user.passwordHash} IS NOT NULL`,
-      connectedAt: oidcIdentity.createdAt,
-    })
+    .select({ hasPassword: sql<boolean>`${user.passwordHash} IS NOT NULL` })
     .from(user)
-    .leftJoin(oidcIdentity, eq(oidcIdentity.userId, user.id))
-    .where(eq(user.id, userId))
-    .limit(1);
+    .where(eq(user.id, userId));
   if (!row) return null;
+  const identities = await db
+    .select({ issuer: oidcIdentity.issuer, createdAt: oidcIdentity.createdAt })
+    .from(oidcIdentity)
+    .where(eq(oidcIdentity.userId, userId));
+  const linked = (provider: OidcProvider) =>
+    identities.find((identity) => provider.issuers.includes(identity.issuer));
+  const generic = providers.find((provider) => provider.id === "generic");
+  const genericLink = generic && linked(generic);
   return {
     hasPassword: row.hasPassword,
     oidc: {
-      connected: row.connectedAt !== null,
-      connectedAt: row.connectedAt?.toISOString() ?? null,
+      providers: providers.map((provider) => ({
+        id: provider.id,
+        displayName: provider.displayName,
+        connected: linked(provider) !== undefined,
+      })),
+      connected: genericLink !== undefined,
+      connectedAt: genericLink?.createdAt.toISOString() ?? null,
     },
   };
 }
 
-// Unlinks the account's identities, only when it has a local password: an
-// account made through the provider would otherwise have no way to sign in.
-// Disconnecting with nothing connected succeeds.
+// Unlinks the account's identity from one provider, only when the account
+// keeps another way to sign in: a local password, or an identity from
+// another of the configured providers. Disconnecting with nothing connected
+// succeeds. The account row is locked first, so two disconnects of its last
+// two identities cannot both see the other one still there.
 export async function disconnectOidc(
   db: Db,
   userId: number,
-): Promise<{ refused: "no_local_password" | null }> {
+  provider: OidcProvider,
+  others: OidcProvider[],
+): Promise<{ refused: "no_other_sign_in" | null }> {
   return db.transaction(async (t) => {
-    const [row] = await t
+    const [account] = await t
       .select({ passwordHash: user.passwordHash })
       .from(user)
       .where(eq(user.id, userId))
       .for("update");
-    if (!row?.passwordHash) return { refused: "no_local_password" };
-    await t.delete(oidcIdentity).where(eq(oidcIdentity.userId, userId));
+    if (!account) return { refused: "no_other_sign_in" };
+    const identities = await t
+      .select({ issuer: oidcIdentity.issuer })
+      .from(oidcIdentity)
+      .where(eq(oidcIdentity.userId, userId));
+    const has = (p: OidcProvider) =>
+      identities.some((identity) => p.issuers.includes(identity.issuer));
+    if (!has(provider)) return { refused: null };
+    if (!account.passwordHash && !others.some(has)) {
+      return { refused: "no_other_sign_in" };
+    }
+    await t
+      .delete(oidcIdentity)
+      .where(
+        and(
+          eq(oidcIdentity.userId, userId),
+          inArray(oidcIdentity.issuer, provider.issuers),
+        ),
+      );
     return { refused: null };
   });
 }

@@ -17,6 +17,7 @@ import { healthRoutes, type HealthDeps } from "./routes/health.js";
 import { importRoutes, type ImportDeps } from "./routes/imports.js";
 import { meRoutes } from "./routes/me.js";
 import {
+  configuredProviders,
   oidcAccountRoutes,
   oidcRoutes,
   oidcStartWindow,
@@ -87,8 +88,11 @@ export function buildApp(
   // apiErrorHandler answers as 429 rate_limited.
   app.register(rateLimit, { global: false, keyGenerator: clientKey });
   registerSessionSupport(app);
-  // Sign-in and connect starts share one count per client.
-  const oidcDeps = { ...deps, oidcStarts: oidcStartWindow(deps.oidc) };
+  // Sign-in and connect starts share one count per client, across providers.
+  const oidcDeps = {
+    ...deps,
+    oidcStarts: oidcStartWindow(configuredProviders(deps)),
+  };
   app.register(healthRoutes, deps);
   app.register(authRoutes, deps);
   app.register(oidcRoutes, oidcDeps);

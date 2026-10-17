@@ -23,6 +23,7 @@ describe("loadConfig", () => {
       settingsEncryptionKey: settingsKeyBytes,
       trustProxy: false,
       oidc: null,
+      google: null,
     });
   });
 
@@ -190,6 +191,7 @@ describe("loadConfig", () => {
       OIDC_DISPLAY_NAME: " Home SSO ",
     });
     expect(config.oidc).toEqual({
+      id: "generic",
       issuerUrl: new URL("https://id.example.com"),
       clientId: "foodie",
       clientSecret: "not-a-real-secret",
