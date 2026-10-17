@@ -351,6 +351,54 @@ export const session = pgTable(
   (t) => [index("session_user_id_idx").on(t.userId)],
 );
 
+// A provider identity that signs in to an account (NATG-226). Matched on
+// issuer and subject only, never on email, so an email changed at the
+// provider neither breaks nor moves the link. One identity per provider per
+// account. Deleting the account deletes the link, so the same identity then
+// gets a new account.
+export const oidcIdentity = pgTable(
+  "oidc_identity",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    issuer: text("issuer").notNull(),
+    subject: text("subject").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("oidc_identity_issuer_subject_key").on(t.issuer, t.subject),
+    // Also serves the cascade on user delete.
+    uniqueIndex("oidc_identity_user_issuer_key").on(t.userId, t.issuer),
+  ],
+);
+
+// A browser on its way through the provider: the state, nonce and PKCE
+// verifier its callback is checked against. The browser holds a random token
+// in its own cookie; `id` is its SHA-256, as for session. Used once: the
+// callback deletes the row it reads. `user_id` is set when a signed-in user
+// is connecting an identity rather than signing in.
+export const oidcLogin = pgTable(
+  "oidc_login",
+  {
+    id: text("id").primaryKey(),
+    state: text("state").notNull(),
+    nonce: text("nonce").notNull(),
+    codeVerifier: text("code_verifier").notNull(),
+    userId: bigint("user_id", { mode: "number" }).references(() => user.id, {
+      onDelete: "cascade",
+    }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  // Serves the cascade on user delete.
+  (t) => [index("oidc_login_user_id_idx").on(t.userId)],
+);
+
 // The AI providers the admin can configure (NATG-277). Both AI settings
 // tables check against this list, so adding a provider is a migration.
 const aiProviderCheck = (column: AnyPgColumn) =>
