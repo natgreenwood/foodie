@@ -5,12 +5,15 @@ import {
   connectRefusal,
   disconnectOidc,
   fetchOidcConnection,
-  OIDC_CONNECT_URL,
+  oidcConnectUrl,
   oidcLabel,
   oidcName,
+  returningProviderName,
   useOidcConfig,
   usePageRestored,
   type OidcConnection,
+  type OidcProvider,
+  type ProviderConnection,
 } from "./oidc";
 import { useLocation } from "./router";
 
@@ -27,47 +30,34 @@ type Action =
   | { kind: "disconnected" }
   | { kind: "disconnectFailed"; error: unknown };
 
-// The profile's OIDC section; nothing at all unless the api says it is on.
+// The profile's OIDC section; nothing at all unless the api lists a provider.
 export function ConnectedIdentities({ email }: { email: string }) {
   const config = useOidcConfig();
-  if (!config?.enabled) return null;
-  return (
-    <Identities
-      name={oidcName(config)}
-      label={oidcLabel(config)}
-      email={email}
-    />
-  );
+  if (!config || config.providers.length === 0) return null;
+  return <Identities providers={config.providers} email={email} />;
 }
 
-// The api returns no identity email, so the account's is shown: they are
-// the same at the time of linking.
 function Identities({
-  name,
-  label,
+  providers,
   email,
 }: {
-  name: string;
-  label: string;
+  providers: OidcProvider[];
   email: string;
 }) {
   const { search } = useLocation();
   const params = new URLSearchParams(search);
-  // Where a connect comes back to: ?oidc=connected or ?oidc_error=<code>.
+  // Where a connect comes back to: ?oidc=connected or ?oidc_error=<code>,
+  // with ?oidc_provider=<id> saying which provider it was.
   const refusedCode = params.get("oidc_error");
   const justConnected = params.get("oidc") === "connected";
+  const returnedFrom = params.get("oidc_provider");
+  const returnedName = returningProviderName(params, providers);
   // That outcome is news only until the user does something here.
   const [outcomeCurrent, setOutcomeCurrent] = useState(true);
 
   const [attempt, setAttempt] = useState(0);
   const [load, setLoad] = useState<Load>({ kind: "loading" });
-  const [action, setAction] = useState<Action>({ kind: "idle" });
-
-  const connectButton = useRef<HTMLButtonElement>(null);
-  const disconnectButton = useRef<HTMLButtonElement>(null);
-  const confirmButton = useRef<HTMLButtonElement>(null);
   const refusalAlert = useRef<HTMLDivElement>(null);
-  const cancelled = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -86,54 +76,33 @@ function Identities({
     return () => controller.abort();
   }, [attempt]);
 
-  usePageRestored(() => setAction({ kind: "idle" }));
+  // After the api refuses a disconnect, what it now says about the account,
+  // without leaving the rows (and the refusal shown in one) for a reload.
+  function refresh() {
+    fetchOidcConnection().then(
+      (connection) => setLoad({ kind: "loaded", connection }),
+      (err: unknown) =>
+        console.error("reloading the OIDC connection failed", err),
+    );
+  }
 
   const loaded = load.kind === "loaded";
   const refusal =
     loaded && refusedCode && outcomeCurrent
-      ? connectRefusal(refusedCode, name)
+      ? connectRefusal(refusedCode, returnedName)
       : null;
+  // A connect that names no provider, or one not listed, counts as done
+  // when anything is connected.
+  const connectedNow =
+    loaded &&
+    load.connection.providers.some(
+      (row) =>
+        row.connected && (returnedFrom === null || row.id === returnedFrom),
+    );
 
   useEffect(() => {
     if (refusal) refusalAlert.current?.focus();
   }, [refusal]);
-
-  useEffect(() => {
-    if (action.kind === "confirming") confirmButton.current?.focus();
-    if (action.kind === "disconnected") connectButton.current?.focus();
-    if (action.kind === "idle" && cancelled.current) {
-      cancelled.current = false;
-      disconnectButton.current?.focus();
-    }
-  }, [action.kind]);
-
-  function cancel() {
-    cancelled.current = true;
-    setAction({ kind: "idle" });
-  }
-
-  function disconnect() {
-    setAction({ kind: "disconnecting" });
-    disconnectOidc().then(
-      () => {
-        setLoad({
-          kind: "loaded",
-          connection: { connected: false, hasPassword: true },
-        });
-        setAction({ kind: "disconnected" });
-      },
-      (err: unknown) => {
-        console.error("disconnecting OIDC failed", err);
-        if (err instanceof AuthError && err.code === "no_local_password") {
-          setLoad({
-            kind: "loaded",
-            connection: { connected: true, hasPassword: false },
-          });
-        }
-        setAction({ kind: "disconnectFailed", error: err });
-      },
-    );
-  }
 
   return (
     <section className="identities" aria-labelledby="identities-heading">
@@ -161,27 +130,154 @@ function Identities({
         </>
       )}
 
-      {loaded && !load.connection.connected && (
+      {justConnected && connectedNow && outcomeCurrent && (
+        <p role="status" className="health" data-tone="good">
+          Connected {returnedName}. You can now sign in with it.
+        </p>
+      )}
+      {refusal && (
+        <div
+          ref={refusalAlert}
+          tabIndex={-1}
+          role="alert"
+          className="health"
+          data-tone="bad"
+        >
+          <p>{refusal}</p>
+        </div>
+      )}
+
+      {load.kind === "loaded" && (
+        <ul className="identity-list" aria-labelledby="identities-heading">
+          {load.connection.providers.map((row) => (
+            <Identity
+              key={row.id}
+              row={row}
+              connection={load.connection}
+              email={email}
+              onAction={() => setOutcomeCurrent(false)}
+              onDisconnected={() =>
+                setLoad({
+                  kind: "loaded",
+                  connection: {
+                    ...load.connection,
+                    providers: load.connection.providers.map((entry) =>
+                      entry.id === row.id
+                        ? { ...entry, connected: false }
+                        : entry,
+                    ),
+                  },
+                })
+              }
+              onRefused={refresh}
+            />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// What else signs in to the account if this provider goes: the password and
+// any other provider the api lists as connected.
+function remainingSignIns(row: ProviderConnection, connection: OidcConnection) {
+  const others = connection.providers
+    .filter((entry) => entry.id !== row.id && entry.connected)
+    .map(oidcName);
+  return connection.hasPassword ? ["your password", ...others] : others;
+}
+
+// One provider's row. The api returns no identity email, so the account's is
+// shown: they are the same at the time of linking.
+function Identity({
+  row,
+  connection,
+  email,
+  onAction,
+  onDisconnected,
+  onRefused,
+}: {
+  row: ProviderConnection;
+  connection: OidcConnection;
+  email: string;
+  onAction: () => void;
+  onDisconnected: () => void;
+  onRefused: () => void;
+}) {
+  const name = oidcName(row);
+  const remaining = remainingSignIns(row, connection);
+  const canDisconnect = remaining.length > 0;
+  const [action, setAction] = useState<Action>({ kind: "idle" });
+
+  const connectButton = useRef<HTMLButtonElement>(null);
+  const disconnectButton = useRef<HTMLButtonElement>(null);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+  const cancelled = useRef(false);
+
+  const nameId = `identity-${row.id}-name`;
+  const hintId = `identity-${row.id}-hint`;
+  const confirmId = `identity-${row.id}-confirm`;
+
+  usePageRestored(() => setAction({ kind: "idle" }));
+
+  useEffect(() => {
+    if (action.kind === "confirming") confirmButton.current?.focus();
+    if (action.kind === "disconnected") connectButton.current?.focus();
+    if (action.kind === "idle" && cancelled.current) {
+      cancelled.current = false;
+      disconnectButton.current?.focus();
+    }
+  }, [action.kind]);
+
+  function cancel() {
+    cancelled.current = true;
+    setAction({ kind: "idle" });
+  }
+
+  function disconnect() {
+    setAction({ kind: "disconnecting" });
+    disconnectOidc(row.id).then(
+      () => {
+        onDisconnected();
+        setAction({ kind: "disconnected" });
+      },
+      (err: unknown) => {
+        console.error(`disconnecting OIDC provider ${row.id} failed`, err);
+        if (err instanceof AuthError && err.code === "no_other_sign_in") {
+          onRefused();
+        }
+        setAction({ kind: "disconnectFailed", error: err });
+      },
+    );
+  }
+
+  return (
+    <li className="identity">
+      <p id={nameId} className="identity-name">
+        {oidcLabel(row)}
+      </p>
+
+      {!row.connected && (
         <>
-          <p>No identity connected.</p>
-          <p id="identities-hint" className="hint">
-            Connect {name} to sign in with it as well as your password. It must
-            return the same email as this account.
+          <p id={hintId} className="hint">
+            {connection.hasPassword
+              ? `Connect ${name} to sign in with it as well as your password. It must return the same email as this account.`
+              : `Connect ${name} to sign in with it too. It must return the same email as this account.`}
           </p>
           {/* The browser submits it with an empty urlencoded body and follows
               the api's redirect to the provider. */}
           <form
             method="post"
-            action={OIDC_CONNECT_URL}
+            action={oidcConnectUrl(row.id)}
             onSubmit={() => {
-              setOutcomeCurrent(false);
+              onAction();
               setAction({ kind: "connecting" });
             }}
           >
             <button
               ref={connectButton}
               type="submit"
-              aria-describedby="identities-hint"
+              aria-describedby={hintId}
               disabled={action.kind === "connecting"}
             >
               Connect {name}
@@ -190,42 +286,41 @@ function Identities({
         </>
       )}
 
-      {loaded && load.connection.connected && (
+      {row.connected && (
         <>
-          <dl className="facts">
-            <dt>{label}</dt>
-            <dd>{email}</dd>
-          </dl>
-          {!load.connection.hasPassword && (
+          <p className="identity-detail">{email}</p>
+          {!canDisconnect && (
             <p className="hint">
               This account was created through {name} and has no password, so it
               can't be disconnected.
             </p>
           )}
-          {load.connection.hasPassword && action.kind !== "confirming" && (
+          {canDisconnect && action.kind !== "confirming" && (
             <button
               ref={disconnectButton}
               type="button"
+              aria-describedby={nameId}
               disabled={action.kind === "disconnecting"}
               onClick={() => {
-                setOutcomeCurrent(false);
+                onAction();
                 setAction({ kind: "confirming" });
               }}
             >
               Disconnect
             </button>
           )}
-          {load.connection.hasPassword && action.kind === "confirming" && (
+          {canDisconnect && action.kind === "confirming" && (
             <div
               role="group"
-              aria-labelledby="disconnect-confirm"
+              aria-labelledby={confirmId}
               className="notice"
               onKeyDown={(event) => {
                 if (event.key === "Escape") cancel();
               }}
             >
-              <p id="disconnect-confirm">
-                Disconnect {name}? You'll sign in with your password only.
+              <p id={confirmId}>
+                Disconnect {name}? You'll still be able to sign in with{" "}
+                {remaining.join(" or ")}.
               </p>
               <div className="actions">
                 <button ref={confirmButton} type="button" onClick={disconnect}>
@@ -255,37 +350,24 @@ function Identities({
           Disconnected {name}.
         </p>
       )}
-      {loaded &&
-        load.connection.connected &&
-        justConnected &&
-        outcomeCurrent && (
-          <p role="status" className="health" data-tone="good">
-            Connected {name}. You can now sign in with it.
-          </p>
-        )}
-      {refusal && (
-        <div
-          ref={refusalAlert}
-          tabIndex={-1}
-          role="alert"
-          className="health"
-          data-tone="bad"
-        >
-          <p>{refusal}</p>
-        </div>
-      )}
       {action.kind === "disconnectFailed" && (
         <FailureMessage
           error={action.error}
           message={(code) =>
-            code === "no_local_password"
-              ? `This account has no password, so ${name} can't be disconnected.`
+            code === "no_other_sign_in"
+              ? `${capitalised(name)} is the only way to sign in to this account, so it can't be disconnected.`
               : undefined
           }
         />
       )}
-    </section>
+    </li>
   );
+}
+
+// The one line that starts with a provider's name, which may be the
+// lower-case generic one.
+function capitalised(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
 }
 
 // An api refusal in this section's own words where it has them, and the

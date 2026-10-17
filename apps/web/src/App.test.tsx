@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, returnPath } from "./App";
@@ -32,10 +38,18 @@ const unauthenticated = {
   message: "sign in required",
 };
 
-const oidcOff = () => respondWith(200, { enabled: false, displayName: null });
+const oidcOff = () => respondWith(200, { enabled: false, providers: [] });
 
-const oidcAs = (displayName: string | null) => () =>
-  respondWith(200, { enabled: true, displayName });
+const oidcWith =
+  (...providers: { id: string; displayName: string | null }[]) =>
+  () =>
+    respondWith(200, { enabled: providers.length > 0, providers });
+
+const google = { id: "google", displayName: "Google" };
+
+// The generic provider alone, under the given display name.
+const oidcAs = (displayName: string | null) =>
+  oidcWith({ id: "generic", displayName });
 
 const oidcOn = oidcAs("Household SSO");
 
@@ -476,7 +490,7 @@ describe("OIDC sign-in", () => {
     });
     await user.click(sso);
 
-    expect(leaveFor).toHaveBeenCalledWith("/api/auth/oidc/start");
+    expect(leaveFor).toHaveBeenCalledWith("/api/auth/oidc/generic/start");
     expect(screen.getByRole("status").textContent).toBe(
       "Taking you to Household SSO…",
     );
@@ -570,7 +584,7 @@ describe("OIDC sign-in", () => {
       });
       const user = userEvent.setup();
 
-      visit(`/sign-in?oidc_error=${code}`);
+      visit(`/sign-in?oidc_error=${code}&oidc_provider=generic`);
 
       const alert = await screen.findByRole("alert");
       expect(alert.textContent).toBe(message);
@@ -584,19 +598,104 @@ describe("OIDC sign-in", () => {
       expect(screen.queryByRole("alert")).toBeNull();
     },
   );
+  it("offers each configured provider in the api's order, Google with its own button", async () => {
+    stubApi({
+      "GET /api/me": signedOut,
+      "GET /api/auth/oidc/config": oidcWith(
+        { id: "generic", displayName: "Household SSO" },
+        google,
+      ),
+    });
+    const user = userEvent.setup();
+
+    visit("/sign-in");
+    const googleButton = await screen.findByRole("button", {
+      name: "Sign in with Google",
+    });
+    const options = within(screen.getByRole("list")).getAllByRole("button");
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Sign in with Household SSO",
+      "Sign in with Google",
+    ]);
+    expect(options[0]?.className).toBe("");
+    expect(googleButton.className).toBe("google-signin");
+    const logo = googleButton.querySelector("svg");
+    expect(logo?.getAttribute("aria-hidden")).toBe("true");
+    expect(logo?.querySelectorAll("path")).toHaveLength(4);
+
+    await user.click(googleButton);
+
+    expect(leaveFor).toHaveBeenCalledWith("/api/auth/oidc/google/start");
+    expect(screen.getByRole("status").textContent).toBe(
+      "Taking you to Google…",
+    );
+    for (const option of options) {
+      expect(option.hasAttribute("disabled")).toBe(true);
+    }
+  });
+
+  it("offers Google alone when it is the only provider", async () => {
+    stubApi({
+      "GET /api/me": signedOut,
+      "GET /api/auth/oidc/config": oidcWith(google),
+    });
+
+    visit("/sign-in");
+
+    await screen.findByRole("button", { name: "Sign in with Google" });
+    expect(
+      screen.getAllByRole("button", { name: /Sign in with/ }),
+    ).toHaveLength(1);
+    expect(screen.getByText("or")).toBeDefined();
+  });
+
+  it.each([
+    ["google", "Google"],
+    ["generic", "Household SSO"],
+    [null, "your identity provider"],
+    ["apple", "your identity provider"],
+  ])(
+    "names the provider a refused sign-in came back from (oidc_provider %s)",
+    async (id, name) => {
+      stubApi({
+        "GET /api/me": signedOut,
+        "GET /api/auth/oidc/config": oidcWith(
+          { id: "generic", displayName: "Household SSO" },
+          google,
+        ),
+      });
+
+      visit(
+        `/sign-in?oidc_error=provider_error${id ? `&oidc_provider=${id}` : ""}`,
+      );
+
+      expect((await screen.findByRole("alert")).textContent).toBe(
+        `Sign-in with ${name} didn't complete. Try again.`,
+      );
+    },
+  );
 });
 
 describe("Connected identities", () => {
   // GET /me as it answers with OIDC on: the profile and how it signs in.
-  const me = (connected: boolean, hasPassword: boolean) => () =>
-    respondWith(200, {
-      ...sam,
-      hasPassword,
-      oidc: {
-        connected,
-        connectedAt: connected ? "2026-10-17T02:00:00.000Z" : null,
-      },
-    });
+  const meWith =
+    (
+      hasPassword: boolean,
+      ...providers: {
+        id: string;
+        displayName: string | null;
+        connected: boolean;
+      }[]
+    ) =>
+    () =>
+      respondWith(200, { ...sam, hasPassword, oidc: { providers } });
+
+  // The generic provider alone, as "Household SSO" unless a test names it.
+  const me = (
+    connected: boolean,
+    hasPassword: boolean,
+    displayName: string | null = "Household SSO",
+  ) => meWith(hasPassword, { id: "generic", displayName, connected });
 
   beforeEach(() => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -623,7 +722,7 @@ describe("Connected identities", () => {
     "offers to connect when nothing is connected, as a form post to the api (named %s)",
     async (displayName, name) => {
       const fetchMock = stubApi({
-        "GET /api/me": me(false, true),
+        "GET /api/me": me(false, true, displayName),
         "GET /api/auth/oidc/config": oidcAs(displayName),
       });
       const user = userEvent.setup();
@@ -641,9 +740,14 @@ describe("Connected identities", () => {
       const connect = await screen.findByRole("button", {
         name: `Connect ${name}`,
       });
-      expect(section().textContent).toContain("No identity connected.");
+      expect(section().textContent).not.toContain("No identity connected.");
       expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
-      expect(connect.getAttribute("aria-describedby")).toBe("identities-hint");
+      expect(
+        document.getElementById(connect.getAttribute("aria-describedby")!)
+          ?.textContent,
+      ).toBe(
+        `Connect ${name} to sign in with it as well as your password. It must return the same email as this account.`,
+      );
 
       await user.click(connect);
       document.removeEventListener("submit", onSubmit);
@@ -651,7 +755,9 @@ describe("Connected identities", () => {
       expect(preventedByApp).toBe(false);
       const form = submitted?.target as HTMLFormElement | undefined;
       expect(form?.method).toBe("post");
-      expect(form?.getAttribute("action")).toBe("/api/auth/oidc/connect");
+      expect(form?.getAttribute("action")).toBe(
+        "/api/auth/oidc/generic/connect",
+      );
       expect(form?.contains(connect)).toBe(true);
       expect(new FormData(form).entries().next().done).toBe(true);
       expect(connect.hasAttribute("disabled")).toBe(true);
@@ -669,9 +775,9 @@ describe("Connected identities", () => {
     "shows the connected identity and disconnects it after a confirm (named %s)",
     async (displayName, label, name) => {
       const fetchMock = stubApi({
-        "GET /api/me": me(true, true),
+        "GET /api/me": me(true, true, displayName),
         "GET /api/auth/oidc/config": oidcAs(displayName),
-        "DELETE /api/auth/oidc/connection": () => respondWith(204),
+        "DELETE /api/auth/oidc/generic/connection": () => respondWith(204),
       });
       const user = userEvent.setup();
 
@@ -679,14 +785,16 @@ describe("Connected identities", () => {
       const disconnect = await screen.findByRole("button", {
         name: "Disconnect",
       });
-      expect(section().querySelector("dt")?.textContent).toBe(label);
-      expect(section().querySelector("dd")?.textContent).toBe(
-        "sam@example.com",
+      const row = within(section()).getByRole("listitem");
+      expect(row.textContent).toContain(label);
+      expect(row.textContent).toContain("sam@example.com");
+      expect(disconnect.getAttribute("aria-describedby")).toBe(
+        "identity-generic-name",
       );
 
       await user.click(disconnect);
       const confirm = screen.getByRole("group", {
-        name: `Disconnect ${name}? You'll sign in with your password only.`,
+        name: `Disconnect ${name}? You'll still be able to sign in with your password.`,
       });
       const confirmButton = screen.getByRole("button", { name: "Disconnect" });
       expect(confirm.contains(confirmButton)).toBe(true);
@@ -700,7 +808,7 @@ describe("Connected identities", () => {
       const connect = screen.getByRole("button", { name: `Connect ${name}` });
       expect(document.activeElement).toBe(connect);
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/auth/oidc/connection",
+        "/api/auth/oidc/generic/connection",
         expect.objectContaining({ method: "DELETE" }),
       );
     },
@@ -739,7 +847,7 @@ describe("Connected identities", () => {
     "offers no disconnect to an account with no password (named %s)",
     async (displayName, name) => {
       stubApi({
-        "GET /api/me": me(true, false),
+        "GET /api/me": me(true, false, displayName),
         "GET /api/auth/oidc/config": oidcAs(displayName),
       });
 
@@ -755,18 +863,24 @@ describe("Connected identities", () => {
     },
   );
 
-  it.each(providers)(
-    "explains when the api refuses a disconnect for want of a password (named %s)",
+  it.each([
+    ["Household SSO", "Household SSO"],
+    [null, "Your identity provider"],
+  ] as const)(
+    "explains when the api refuses a disconnect as the last way to sign in, and takes its word (named %s)",
     async (displayName, name) => {
+      // The account lost its password elsewhere since the page loaded.
+      let refused = false;
       stubApi({
-        "GET /api/me": me(true, true),
+        "GET /api/me": () => me(true, !refused, displayName)(),
         "GET /api/auth/oidc/config": oidcAs(displayName),
-        "DELETE /api/auth/oidc/connection": () =>
-          respondWith(409, {
-            error: "no_local_password",
-            message:
-              "an account without a password cannot disconnect its sign-in provider",
-          }),
+        "DELETE /api/auth/oidc/generic/connection": () => {
+          refused = true;
+          return respondWith(409, {
+            error: "no_other_sign_in",
+            message: "the account would have no way left to sign in",
+          });
+        },
       });
       const user = userEvent.setup();
 
@@ -777,9 +891,11 @@ describe("Connected identities", () => {
       await user.click(screen.getByRole("button", { name: "Disconnect" }));
 
       expect((await screen.findByRole("alert")).textContent).toBe(
-        `This account has no password, so ${name} can't be disconnected.`,
+        `${name} is the only way to sign in to this account, so it can't be disconnected.`,
       );
-      expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull(),
+      );
     },
   );
 
@@ -787,11 +903,11 @@ describe("Connected identities", () => {
     "says when a connect has just succeeded (named %s)",
     async (displayName, name) => {
       stubApi({
-        "GET /api/me": me(true, true),
+        "GET /api/me": me(true, true, displayName),
         "GET /api/auth/oidc/config": oidcAs(displayName),
       });
 
-      visit("/profile?oidc=connected");
+      visit("/profile?oidc=connected&oidc_provider=generic");
 
       expect(
         (
@@ -853,11 +969,11 @@ describe("Connected identities", () => {
     "explains a refused connect (%s, named %s) and moves focus to it",
     async (code, displayName, message) => {
       stubApi({
-        "GET /api/me": me(false, true),
+        "GET /api/me": me(false, true, displayName),
         "GET /api/auth/oidc/config": oidcAs(displayName),
       });
 
-      visit(`/profile?oidc_error=${code}`);
+      visit(`/profile?oidc_error=${code}&oidc_provider=generic`);
 
       const alert = await screen.findByRole("alert");
       expect(alert.textContent).toBe(message);
@@ -894,6 +1010,209 @@ describe("Connected identities", () => {
       await screen.findByRole("button", { name: "Connect Household SSO" }),
     ).toBeDefined();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+  describe("with two providers", () => {
+    const config = oidcWith(
+      { id: "generic", displayName: "Household SSO" },
+      google,
+    );
+    const rows = (
+      hasPassword: boolean,
+      genericConnected: boolean,
+      googleConnected: boolean,
+    ) =>
+      meWith(
+        hasPassword,
+        {
+          id: "generic",
+          displayName: "Household SSO",
+          connected: genericConnected,
+        },
+        { ...google, connected: googleConnected },
+      );
+
+    function rowFor(label: string) {
+      const row = within(section())
+        .getAllByRole("listitem")
+        .find((item) => item.firstElementChild?.textContent === label);
+      if (!row) throw new Error(`no row for ${label}`);
+      return within(row);
+    }
+
+    it("lists one row per provider, each with its own connect form", async () => {
+      stubApi({
+        "GET /api/me": rows(true, false, false),
+        "GET /api/auth/oidc/config": config,
+      });
+
+      visit("/profile");
+      await screen.findByRole("button", { name: "Connect Google" });
+
+      expect(
+        within(section())
+          .getAllByRole("listitem")
+          .map((item) => item.firstElementChild?.textContent),
+      ).toEqual(["Household SSO", "Google"]);
+      expect(
+        rowFor("Household SSO")
+          .getByRole("button", { name: "Connect Household SSO" })
+          .closest("form")
+          ?.getAttribute("action"),
+      ).toBe("/api/auth/oidc/generic/connect");
+      expect(
+        rowFor("Google")
+          .getByRole("button", { name: "Connect Google" })
+          .closest("form")
+          ?.getAttribute("action"),
+      ).toBe("/api/auth/oidc/google/connect");
+      expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+    });
+
+    it.each([
+      [true, true, false, ["Disconnect"], ["Connect Google"]],
+      [true, true, true, ["Disconnect"], ["Disconnect"]],
+      [false, true, false, [], ["Connect Google"]],
+      [false, true, true, ["Disconnect"], ["Disconnect"]],
+      [false, false, true, ["Connect Household SSO"], []],
+    ])(
+      "offers disconnect only where another sign-in remains (password %s, generic %s, google %s)",
+      async (
+        hasPassword,
+        genericOn,
+        googleOn,
+        genericButtons,
+        googleButtons,
+      ) => {
+        stubApi({
+          "GET /api/me": rows(hasPassword, genericOn, googleOn),
+          "GET /api/auth/oidc/config": config,
+        });
+
+        visit("/profile");
+        await within(
+          await screen.findByRole("region", { name: "Connected identities" }),
+        ).findAllByRole("listitem");
+
+        expect(
+          rowFor("Household SSO")
+            .queryAllByRole("button")
+            .map((button) => button.textContent),
+        ).toEqual(genericButtons);
+        expect(
+          rowFor("Google")
+            .queryAllByRole("button")
+            .map((button) => button.textContent),
+        ).toEqual(googleButtons);
+      },
+    );
+
+    it("explains why a lone identity without a password stays, and how to connect the other", async () => {
+      stubApi({
+        "GET /api/me": rows(false, true, false),
+        "GET /api/auth/oidc/config": config,
+      });
+
+      visit("/profile");
+      await screen.findByRole("button", { name: "Connect Google" });
+
+      expect(
+        rowFor("Household SSO").getByText(
+          "This account was created through Household SSO and has no password, so it can't be disconnected.",
+        ),
+      ).toBeDefined();
+      expect(
+        rowFor("Google").getByText(
+          "Connect Google to sign in with it too. It must return the same email as this account.",
+        ),
+      ).toBeDefined();
+    });
+
+    it.each([
+      [true, "your password or Household SSO"],
+      [false, "Household SSO"],
+    ])(
+      "says what still signs in before disconnecting Google (password %s)",
+      async (hasPassword, remaining) => {
+        const fetchMock = stubApi({
+          "GET /api/me": rows(hasPassword, true, true),
+          "GET /api/auth/oidc/config": config,
+          "DELETE /api/auth/oidc/google/connection": () => respondWith(204),
+        });
+        const user = userEvent.setup();
+
+        visit("/profile");
+        await screen.findAllByRole("button", { name: "Disconnect" });
+        const disconnect = rowFor("Google").getByRole("button", {
+          name: "Disconnect",
+        });
+        expect(
+          document.getElementById(disconnect.getAttribute("aria-describedby")!)
+            ?.textContent,
+        ).toBe("Google");
+
+        await user.click(disconnect);
+        rowFor("Google").getByRole("group", {
+          name: `Disconnect Google? You'll still be able to sign in with ${remaining}.`,
+        });
+        await user.click(
+          rowFor("Google").getByRole("button", { name: "Disconnect" }),
+        );
+
+        expect(
+          await rowFor("Google").findByText("Disconnected Google."),
+        ).toBeDefined();
+        const connect = rowFor("Google").getByRole("button", {
+          name: "Connect Google",
+        });
+        expect(document.activeElement).toBe(connect);
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/auth/oidc/google/connection",
+          expect.objectContaining({ method: "DELETE" }),
+        );
+        // With Google gone and no password, Household SSO is the last way in.
+        expect(rowFor("Household SSO").queryAllByRole("button").length).toBe(
+          hasPassword ? 1 : 0,
+        );
+      },
+    );
+
+    it.each([
+      ["google", "Google"],
+      ["generic", "Household SSO"],
+      [null, "your identity provider"],
+      ["apple", "your identity provider"],
+    ])(
+      "names the provider a refused connect came back from (oidc_provider %s)",
+      async (id, name) => {
+        stubApi({
+          "GET /api/me": rows(true, false, false),
+          "GET /api/auth/oidc/config": config,
+        });
+
+        visit(
+          `/profile?oidc_error=email_mismatch${id ? `&oidc_provider=${id}` : ""}`,
+        );
+
+        expect((await screen.findByRole("alert")).textContent).toBe(
+          `The email ${name} returned doesn't match this account's email. Nothing was connected.`,
+        );
+      },
+    );
+
+    it("names the provider a connect has just succeeded with", async () => {
+      stubApi({
+        "GET /api/me": rows(true, false, true),
+        "GET /api/auth/oidc/config": config,
+      });
+
+      visit("/profile?oidc=connected&oidc_provider=google");
+
+      expect(
+        await screen.findByText(
+          "Connected Google. You can now sign in with it.",
+        ),
+      ).toBeDefined();
+    });
   });
 });
 
