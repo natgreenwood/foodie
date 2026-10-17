@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { signIn } from "./auth";
 import { AuthErrorMessage } from "./AuthErrorMessage";
 import {
+  clearOidcOutcome,
   oidcName,
   oidcStartUrl,
   returningProviderName,
@@ -31,19 +32,22 @@ export function SignIn({ expired }: { expired: boolean }) {
   // Nothing about OIDC shows until the api lists a provider.
   const providers = useOidcConfig()?.providers ?? [];
   // A refused OIDC sign-in comes back as a page load with ?oidc_error= and
-  // ?oidc_provider=.
-  const params = new URLSearchParams(search);
-  const refusedCode = params.get("oidc_error");
+  // ?oidc_provider=. Kept from the first render, as the address loses them
+  // once they are shown.
+  const [returned] = useState(() => new URLSearchParams(search));
+  const refusedCode = returned.get("oidc_error");
   const [refusalDismissed, setRefusalDismissed] = useState(false);
   const refusal =
     providers.length > 0 && refusedCode && !refusalDismissed
-      ? signInRefusal(refusedCode, returningProviderName(params, providers))
+      ? signInRefusal(refusedCode, returningProviderName(returned, providers))
       : null;
   const refusalAlert = useRef<HTMLDivElement>(null);
 
   // Read before the form, as it is what the page load is about.
   useEffect(() => {
-    if (refusal) refusalAlert.current?.focus();
+    if (!refusal) return;
+    refusalAlert.current?.focus();
+    clearOidcOutcome(["oidc_error", "oidc_provider"]);
   }, [refusal]);
 
   usePageRestored(() => setState({ kind: "idle" }));

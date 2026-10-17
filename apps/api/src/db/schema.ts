@@ -17,10 +17,19 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-// Lowercase, trimmed, internal whitespace (spaces, tabs, newlines) collapsed
-// to one space. Used for the per-locale uniqueness of names; accents are kept.
+// Exactly the characters JavaScript's \s matches, so this agrees with
+// normaliseUnit in import/measurement-lookup.ts. Listed rather than written as
+// Postgres \s, which asks the libc and so differs by image: musl matches U+0085
+// and not NBSP, glibc matches U+1680 and not NBSP, and neither matches U+202F
+// or U+FEFF.
+const whitespace =
+  "[\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+";
+
+// Lowercase, trimmed, internal whitespace (including NBSP and the other
+// Unicode spaces above) collapsed to one space. Used for the per-locale
+// uniqueness of names and the not-blank checks; accents are kept.
 function normalised(column: AnyPgColumn): SQL {
-  return sql`lower(btrim(regexp_replace(${column}, '\\s+', ' ', 'g')))`;
+  return sql`lower(btrim(regexp_replace(${column}, '${sql.raw(whitespace)}', ' ', 'g')))`;
 }
 
 // Quantities only add up within a type: millilitres to grams needs the

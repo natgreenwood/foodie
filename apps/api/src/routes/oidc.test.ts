@@ -767,12 +767,41 @@ describe("GET /auth/oidc/callback", () => {
         expect.objectContaining({
           msg: "incoming request",
           req: expect.objectContaining({
-            url: "/auth/oidc/callback",
+            url: "/auth/oidc/%63allback",
           }) as unknown,
         }),
       );
     },
   );
+
+  // NATG-305: the path is logged as sent, so an encoded ?, # or / is neither
+  // cut as a query nor decoded into a different path.
+  dbTest.for([
+    {
+      url: "/auth/oidc/callback%3Fcode=X",
+      path: "/auth/oidc/callback%3Fcode=X",
+    },
+    {
+      url: "/auth/oidc/callback%23code=X?state=S",
+      path: "/auth/oidc/callback%23code=X",
+    },
+    { url: "/admin%2Fai", path: "/admin%2Fai" },
+  ])("logs $url as the raw path $path", async ({ url, path }, { tx }) => {
+    const { request, logLines } = start(tx);
+
+    const res = await request("GET", url);
+
+    expect(res.statusCode).toBe(404);
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        msg: "incoming request",
+        req: expect.objectContaining({ url: path }) as unknown,
+      }),
+    );
+    expect(logLines).toContainEqual(
+      expect.objectContaining({ msg: "route not found", path }),
+    );
+  });
 
   dbTest(
     "answers an unknown path with no query in its body or log",
@@ -797,6 +826,60 @@ describe("GET /auth/oidc/callback", () => {
           msg: "route not found",
           method: "GET",
           path: "/auth/oidc/callback/",
+        }),
+      );
+    },
+  );
+
+  // NATG-304: Fastify refuses a malformed escape before routing, so the 404
+  // handler never sees it.
+  dbTest.for([
+    "/auth/oidc/callback%?code=LEAK_SENTINEL&state=STATE_SENTINEL",
+    "/auth/oidc/%ZZcallback?code=LEAK_SENTINEL&state=STATE_SENTINEL",
+  ])(
+    "answers a malformed escape in %s with no query in its body or log",
+    async (url, { tx }) => {
+      const { request, logLines } = start(tx);
+
+      const res = await request("GET", url);
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({
+        error: "invalid_request",
+        message: "url is not valid",
+      });
+      for (const leaked of ["LEAK_SENTINEL", "STATE_SENTINEL", "code="]) {
+        expect(res.body).not.toContain(leaked);
+        expect(JSON.stringify(logLines)).not.toContain(leaked);
+      }
+      const path = url.replace(/\?.*$/, "");
+      expect(logLines).toContainEqual(
+        expect.objectContaining({ msg: "bad url", method: "GET", path }),
+      );
+    },
+  );
+
+  // Fastify's other pre-routing refusal a client can cause.
+  dbTest(
+    "answers an over-long path parameter with no path in its body or log",
+    async ({ tx }) => {
+      const { request, logLines } = start(tx);
+      const id = "x".repeat(101);
+
+      const res = await request("GET", `/recipes/${id}?apiKey=KEY_SENTINEL`);
+
+      expect(res.statusCode).toBe(414);
+      expect(res.json()).toEqual({
+        error: "invalid_request",
+        message: "request was not accepted",
+      });
+      expect(res.body).not.toContain(id);
+      expect(JSON.stringify(logLines)).not.toContain("KEY_SENTINEL");
+      expect(logLines).toContainEqual(
+        expect.objectContaining({
+          msg: "request refused before routing",
+          code: "FST_ERR_MAX_PARAM_LENGTH",
+          path: `/recipes/${id}`,
         }),
       );
     },

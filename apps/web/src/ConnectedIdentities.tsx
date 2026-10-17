@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AuthError } from "./auth";
 import { AuthErrorMessage } from "./AuthErrorMessage";
 import {
+  clearOidcOutcome,
   connectRefusal,
   disconnectOidc,
   fetchOidcConnection,
@@ -45,12 +46,13 @@ function Identities({
   email: string;
 }) {
   const { search } = useLocation();
-  const params = new URLSearchParams(search);
   // Where a connect comes back to: ?oidc=connected or ?oidc_error=<code>,
-  // with ?oidc_provider=<id> saying which provider it was.
-  const refusedCode = params.get("oidc_error");
-  const justConnected = params.get("oidc") === "connected";
-  const returnedName = returningProviderName(params, providers);
+  // with ?oidc_provider=<id> saying which provider it was. Kept from the
+  // first render, as the address loses them once they are shown.
+  const [returned] = useState(() => new URLSearchParams(search));
+  const refusedCode = returned.get("oidc_error");
+  const justConnected = returned.get("oidc") === "connected";
+  const returnedName = returningProviderName(returned, providers);
   // That outcome is news only until the user does something here.
   const [outcomeCurrent, setOutcomeCurrent] = useState(true);
 
@@ -95,11 +97,14 @@ function Identities({
   const returnedFrom =
     load.kind === "loaded"
       ? load.connection.providers.find(
-          (row) => row.id === params.get("oidc_provider"),
+          (row) => row.id === returned.get("oidc_provider"),
         )
       : undefined;
-  const connectedNow =
+  // Only once the api has said the connect took.
+  const connected =
     loaded &&
+    justConnected &&
+    outcomeCurrent &&
     (returnedFrom
       ? returnedFrom.connected
       : load.connection.providers.some((row) => row.connected));
@@ -107,6 +112,12 @@ function Identities({
   useEffect(() => {
     if (refusal) refusalAlert.current?.focus();
   }, [refusal]);
+
+  useEffect(() => {
+    if (refusal || connected) {
+      clearOidcOutcome(["oidc", "oidc_error", "oidc_provider"]);
+    }
+  }, [refusal, connected]);
 
   return (
     <section className="identities" aria-labelledby="identities-heading">
@@ -134,7 +145,7 @@ function Identities({
         </>
       )}
 
-      {justConnected && connectedNow && outcomeCurrent && (
+      {connected && (
         <p role="status" className="health" data-tone="good">
           Connected {returnedName}. You can now sign in with it.
         </p>
