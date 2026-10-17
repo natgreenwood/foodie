@@ -63,6 +63,9 @@ only on requests that come from a listed address.
   own `X-Forwarded-For`.
 - It takes addresses, not a hop count: `TRUST_PROXY=1` stops the api from
   starting, as does any entry that is not an IP address or CIDR range.
+- The api also refuses obvious trust-everyone values, such as `0.0.0.0/0`,
+  `::/0` or `::ffff:0.0.0.0/96`, but it does not detect a list of narrower
+  ranges that adds up to the same thing.
 
 Compose leaves it unset. There is no nginx in the compose setup, the Vite dev
 proxy does not send `X-Forwarded-For`, and the api's port is published to the

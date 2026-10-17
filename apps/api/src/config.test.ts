@@ -224,4 +224,56 @@ describe("loadConfig", () => {
       }),
     ).toThrow(ConfigError);
   });
+
+  // Each is refused before Fastify sees it, with a message naming the entry.
+  it.each([
+    ["IPv4 /0", "0.0.0.0/0", "would trust every peer"],
+    ["IPv6 /0", "::/0", "would trust every peer"],
+    ["another IPv4 /0", "10.0.0.5, 192.168.0.0/0", "would trust every peer"],
+    ["the IPv4-mapped /96", "::ffff:0.0.0.0/96", "would trust every IPv4 peer"],
+    ["::/1", "::/1", "would trust every IPv4 peer"],
+    ["::/80", "::/80", "would trust every IPv4 peer"],
+    [
+      "a mapped address with a /96",
+      "::ffff:10.0.0.5/96",
+      "would trust every IPv4 peer",
+    ],
+    ["a zoned address", "fe80::1%eth0", "zone identifier"],
+    ["a zoned range", "fe80::1%eth0/64", "zone identifier"],
+  ])("rejects TRUST_PROXY with %s", (_, raw, reason) => {
+    const entry = raw.split(",").at(-1)!.trim();
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        TRUST_PROXY: raw,
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        name: "ConfigError",
+        message: expect.stringContaining(`"${entry}" `) as string,
+      }) as Error,
+    );
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        TRUST_PROXY: raw,
+      }),
+    ).toThrow(reason);
+  });
+
+  // Narrower ranges near the refused ones are still accepted.
+  it.each(["::ffff:10.0.0.0/104", "8000::/1", "fd00::/8", "::1"])(
+    "accepts TRUST_PROXY %s",
+    (raw) => {
+      expect(
+        loadConfig({
+          DATABASE_URL: databaseUrl,
+          SETTINGS_ENCRYPTION_KEY: settingsKey,
+          TRUST_PROXY: raw,
+        }).trustProxy,
+      ).toEqual([raw]);
+    },
+  );
 });

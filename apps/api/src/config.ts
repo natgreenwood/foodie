@@ -1,4 +1,4 @@
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 import { normaliseEmail, passwordProblem } from "./auth/credentials.js";
 import { parseEncryptionKey } from "./settings/encryption.js";
 
@@ -77,15 +77,34 @@ function parseSettingsKey(raw: string | undefined): Buffer {
   return key;
 }
 
-// An IPv4 or IPv6 address, optionally with a /prefix in range for it.
-function isAddressOrRange(entry: string): boolean {
+// Why one TRUST_PROXY entry is refused, or null if it is an IPv4 or IPv6
+// address with an optional /prefix in range for it. Beyond malformed input
+// this catches only the obvious trust-everyone values: a list whose ranges
+// add up to everything still passes, so the README's proxy-only rule is
+// the real control.
+function trustProxyProblem(entry: string): string | null {
+  if (entry.includes("%")) {
+    return `"${entry}" has a zone identifier (%), which is not accepted`;
+  }
   const [address = "", prefix, ...rest] = entry.split("/");
   const family = isIP(address);
-  if (family === 0 || rest.length > 0) return false;
-  if (prefix === undefined) return true;
-  return (
-    /^\d{1,3}$/.test(prefix) && Number(prefix) <= (family === 4 ? 32 : 128)
-  );
+  const malformed = `"${entry}" is not an IP address or CIDR range, e.g. "127.0.0.1" or "10.0.0.0/8"`;
+  if (family === 0 || rest.length > 0) return malformed;
+  if (prefix === undefined) return null;
+  if (!/^\d{1,3}$/.test(prefix)) return malformed;
+  const length = Number(prefix);
+  if (length > (family === 4 ? 32 : 128)) return malformed;
+  if (length === 0) return `"${entry}" would trust every peer`;
+  // Fastify matches an IPv4 peer, including one arriving IPv4-mapped on a
+  // dual-stack socket, against ::ffff:0.0.0.0/96 too.
+  if (family === 6 && length <= 96) {
+    const range = new BlockList();
+    range.addSubnet(address, length, "ipv6");
+    if (range.check("::ffff:0.0.0.0", "ipv6")) {
+      return `"${entry}" contains ::ffff:0.0.0.0/96, so it would trust every IPv4 peer`;
+    }
+  }
+  return null;
 }
 
 // Comma-separated proxy addresses or CIDRs; unset or empty means trust none.
@@ -94,10 +113,9 @@ function parseTrustProxy(raw: string | undefined): string[] | false {
   if (raw === undefined || raw.trim() === "") return false;
   const entries = raw.split(",").map((entry) => entry.trim());
   for (const entry of entries) {
-    if (!isAddressOrRange(entry)) {
-      throw new ConfigError(
-        `TRUST_PROXY must be a comma-separated list of IP addresses or CIDR ranges, e.g. "127.0.0.1" or "10.0.0.0/8"; "${entry}" is not one`,
-      );
+    const problem = trustProxyProblem(entry);
+    if (problem !== null) {
+      throw new ConfigError(`TRUST_PROXY: ${problem}`);
     }
   }
   return entries;
