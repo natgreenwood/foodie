@@ -1,3 +1,4 @@
+import { BlockList, isIP } from "node:net";
 import { normaliseEmail, passwordProblem } from "./auth/credentials.js";
 import { parseEncryptionKey } from "./settings/encryption.js";
 
@@ -14,6 +15,11 @@ export interface Config {
   secureCookies: boolean;
   // AES-256 key for settings stored encrypted, such as AI provider API keys.
   settingsEncryptionKey: Buffer;
+  // Fastify's trustProxy: the addresses or CIDR ranges of the proxies whose
+  // X-Forwarded-For is believed, or false to believe none and use the socket
+  // address. Never true or a hop count, which would let a client that
+  // reaches the api directly choose its own request.ip.
+  trustProxy: string[] | false;
 }
 
 export class ConfigError extends Error {
@@ -71,6 +77,50 @@ function parseSettingsKey(raw: string | undefined): Buffer {
   return key;
 }
 
+// Why one TRUST_PROXY entry is refused, or null if it is an IPv4 or IPv6
+// address with an optional /prefix in range for it. Beyond malformed input
+// this catches only the obvious trust-everyone values: a list whose ranges
+// add up to everything still passes, so the README's proxy-only rule is
+// the real control.
+function trustProxyProblem(entry: string): string | null {
+  if (entry.includes("%")) {
+    return `"${entry}" has a zone identifier (%), which is not accepted`;
+  }
+  const [address = "", prefix, ...rest] = entry.split("/");
+  const family = isIP(address);
+  const malformed = `"${entry}" is not an IP address or CIDR range, e.g. "127.0.0.1" or "10.0.0.0/8"`;
+  if (family === 0 || rest.length > 0) return malformed;
+  if (prefix === undefined) return null;
+  if (!/^\d{1,3}$/.test(prefix)) return malformed;
+  const length = Number(prefix);
+  if (length > (family === 4 ? 32 : 128)) return malformed;
+  if (length === 0) return `"${entry}" would trust every peer`;
+  // Fastify matches an IPv4 peer, including one arriving IPv4-mapped on a
+  // dual-stack socket, against ::ffff:0.0.0.0/96 too.
+  if (family === 6 && length <= 96) {
+    const range = new BlockList();
+    range.addSubnet(address, length, "ipv6");
+    if (range.check("::ffff:0.0.0.0", "ipv6")) {
+      return `"${entry}" contains ::ffff:0.0.0.0/96, so it would trust every IPv4 peer`;
+    }
+  }
+  return null;
+}
+
+// Comma-separated proxy addresses or CIDRs; unset or empty means trust none.
+// A bare number such as "1" is refused rather than read as a hop count.
+function parseTrustProxy(raw: string | undefined): string[] | false {
+  if (raw === undefined || raw.trim() === "") return false;
+  const entries = raw.split(",").map((entry) => entry.trim());
+  for (const entry of entries) {
+    const problem = trustProxyProblem(entry);
+    if (problem !== null) {
+      throw new ConfigError(`TRUST_PROXY: ${problem}`);
+    }
+  }
+  return entries;
+}
+
 // Reads configuration from the environment and fails fast on anything
 // missing or malformed. Values are never echoed back for DATABASE_URL because
 // it carries the database password.
@@ -87,5 +137,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     admin: parseAdmin(env),
     secureCookies: env.NODE_ENV !== "development",
     settingsEncryptionKey: parseSettingsKey(env.SETTINGS_ENCRYPTION_KEY),
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
   };
 }

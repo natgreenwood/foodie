@@ -19,7 +19,10 @@ const app = buildApp(
     secureCookies: config.secureCookies,
     settingsKey: config.settingsEncryptionKey,
   },
-  { logger: { level: config.logLevel, redact: logRedactPaths } },
+  {
+    logger: { level: config.logLevel, redact: logRedactPaths },
+    trustProxy: config.trustProxy,
+  },
 );
 
 app.addHook("onClose", async () => {
