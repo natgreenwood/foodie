@@ -27,9 +27,14 @@ import { pathForLog, sendError } from "./routes/errors.js";
 
 export type AppDeps = HealthDeps & ImportDeps & AdminAiDeps & OidcDeps;
 
-// Log paths pino replaces with "[Redacted]". Nothing logs a request body or
-// an AI provider credential; this is the backstop should a later change
-// start to, so a key sent to /admin/ai never reaches a log line.
+// Log paths pino replaces with "[Redacted]". Nothing logs a request body,
+// an AI provider credential or an authentication secret; this is the
+// backstop should a later change start to, so a key sent to /admin/ai, a
+// password, the OIDC client secret, a trip's checks, the code the provider
+// sends back, a token or a cookie never reaches a log line. Only fields:
+// a secret inside a message or error string is not caught. Bare `code` is
+// left alone, since lines log a Fastify or driver error code under it; the
+// authorization code is caught under `query`, where it arrives.
 // err.rawPacket is the request bytes, query and cookies included, on the
 // parser error Fastify logs at trace level for a malformed request.
 export const logRedactPaths = [
@@ -40,6 +45,38 @@ export const logRedactPaths = [
   "*.apiKey",
   "*.baseUrl",
   "err.rawPacket",
+  "password",
+  "*.password",
+  "passwordHash",
+  "*.passwordHash",
+  "clientSecret",
+  "*.clientSecret",
+  "client_secret",
+  "*.client_secret",
+  "checks",
+  "*.checks",
+  "codeVerifier",
+  "*.codeVerifier",
+  "code_verifier",
+  "*.code_verifier",
+  "query.code",
+  "*.query.code",
+  "token",
+  "*.token",
+  "access_token",
+  "*.access_token",
+  "id_token",
+  "*.id_token",
+  "refresh_token",
+  "*.refresh_token",
+  "cookies",
+  "*.cookies",
+  "headers.cookie",
+  "*.headers.cookie",
+  'headers["set-cookie"]',
+  '*.headers["set-cookie"]',
+  "headers.authorization",
+  "*.headers.authorization",
 ];
 
 // Fastify's request log line, with the path only: no route logs its query
