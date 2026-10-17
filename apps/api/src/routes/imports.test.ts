@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { Writable } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildApp } from "../app.js";
+import { buildApp, type AppSeams } from "../app.js";
+import { createSession } from "../auth/accounts.js";
+import { user } from "../db/schema.js";
 import { measurements, UNIT } from "../import/extract/__fixtures__/units.js";
 import {
   FetchFailedError,
@@ -11,7 +13,8 @@ import {
   type FetchedPage,
   type FetchFailureReason,
 } from "../import/fetch.js";
-import type { AuthDeps } from "./auth.js";
+import { dbTest } from "../test/db.js";
+import { SESSION_COOKIE, type AuthDeps } from "./auth.js";
 import type { ImportDeps } from "./imports.js";
 
 const URL_ = "https://www.example.com.au/recipes/spaghetti";
@@ -39,10 +42,29 @@ function page(html: string, overrides: Partial<FetchedPage> = {}): FetchedPage {
 let app: FastifyInstance;
 let logLines: Record<string, unknown>[];
 
+// Every request is signed in as this user without a database: the session
+// check itself is covered in auth.test.ts and below.
+const signedInAsCook: AppSeams = {
+  requireUser: (request) => {
+    request.user = {
+      id: 1,
+      email: "cook@imports.test",
+      displayName: null,
+      locale: "en-GB",
+      isAdmin: false,
+    };
+    return Promise.resolve();
+  },
+};
+
 // The fetch is mocked: these tests cover the route and its error mapping.
 function start(
   fetchPage: ImportDeps["fetchPage"],
   loadUnits?: ImportDeps["loadUnits"],
+  {
+    db = {} as AuthDeps["db"],
+    seams = signedInAsCook,
+  }: { db?: AuthDeps["db"]; seams?: AppSeams } = {},
 ) {
   logLines = [];
   const stream = new Writable({
@@ -56,20 +78,21 @@ function start(
       pingDatabase: () => Promise.resolve(),
       fetchPage,
       loadUnits: loadUnits ?? (() => Promise.resolve({ measurements })),
-      // The auth routes are not exercised here.
-      db: {} as AuthDeps["db"],
+      db,
       secureCookies: false,
     },
     { logger: { level: "info", stream } },
+    seams,
   );
   return app;
 }
 
-function preview(payload: unknown) {
+function preview(payload: unknown, token?: string) {
   return app.inject({
     method: "POST",
     url: "/imports/preview",
     payload: payload as object,
+    cookies: token ? { [SESSION_COOKIE]: token } : {},
   });
 }
 
@@ -406,6 +429,61 @@ describe("POST /imports/preview", () => {
       error: "internal_error",
       message: "the page could not be read",
       url: URL_,
+    });
+  });
+});
+
+// The real session check, not the seam above.
+describe("POST /imports/preview session", () => {
+  it("returns 401 without a session, before fetching", async () => {
+    const fetchPage = vi.fn(() =>
+      Promise.resolve(page(fixture("json-ld-single.html"))),
+    );
+    start(fetchPage, undefined, { seams: {} });
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({
+      error: "unauthenticated",
+      message: "sign in required",
+    });
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  dbTest("returns 401 for a session that does not exist", async ({ tx }) => {
+    const fetchPage = vi.fn(() =>
+      Promise.resolve(page(fixture("json-ld-single.html"))),
+    );
+    start(fetchPage, undefined, { db: tx, seams: {} });
+
+    const res = await preview({ url: URL_ }, "no-such-session");
+
+    expect(res.statusCode).toBe(401);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  dbTest("returns the draft for a signed-in request", async ({ tx }) => {
+    const [cook] = await tx
+      .insert(user)
+      .values({ email: "cook@imports.test" })
+      .returning({ id: user.id });
+    const { token } = await createSession(tx, cook!.id);
+    start(
+      () => Promise.resolve(page(fixture("json-ld-single.html"))),
+      undefined,
+      {
+        db: tx,
+        seams: {},
+      },
+    );
+
+    const res = await preview({ url: URL_ }, token);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      sourceUrl: URL_,
+      recipe: { title: "Spaghetti with Tomato & Basil Sauce" },
     });
   });
 });
