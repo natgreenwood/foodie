@@ -102,7 +102,8 @@ export const adminUserRoutes: FastifyPluginCallback<AuthDeps> = (
     );
   }
 
-  // { password }: the account's new password, usable at once.
+  // { password }: the account's new password, usable at once. 409
+  // password_not_allowed for an account with no password (OIDC only).
   app.put<{ Params: { id: string }; Body: unknown }>(
     "/admin/users/:id/password",
     async (request, reply) => {
@@ -128,6 +129,14 @@ export const adminUserRoutes: FastifyPluginCallback<AuthDeps> = (
       if (result.refused) return sendAdminRefusal(reply, result.refused);
       const updated = result.value;
       if (!updated) return notFound(reply);
+      if (updated === "no_password") {
+        return sendError(
+          reply,
+          409,
+          "password_not_allowed",
+          "this account signs in through its OIDC provider and cannot have a password",
+        );
+      }
       request.log.info(
         { adminId: request.user!.id, userId: id, action: "set-password" },
         "admin users: changed",

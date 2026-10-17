@@ -10,6 +10,9 @@ export type ApiErrorCode =
   | "unauthenticated"
   | "forbidden"
   | "cannot_change_own_account"
+  | "password_not_allowed"
+  | "password_required"
+  | "provider_unavailable"
   | "not_found"
   | "internal_error";
 

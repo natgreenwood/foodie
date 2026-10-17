@@ -1,7 +1,8 @@
-import { buildApp, logRedactPaths } from "./app.js";
+import { buildApp, logRedactPaths, logSerializers } from "./app.js";
 import { ensureAdmin } from "./auth/accounts.js";
 import { loadConfig } from "./config.js";
 import { createDatabase } from "./db/client.js";
+import { oidcProvider } from "./auth/oidc-provider.js";
 import { describeError } from "./db/errors.js";
 import { importDeps } from "./routes/imports.js";
 
@@ -18,8 +19,15 @@ const app = buildApp(
     db: database.db,
     secureCookies: config.secureCookies,
     settingsKey: config.settingsEncryptionKey,
+    oidc: config.oidc && oidcProvider(config.oidc),
   },
-  { logger: { level: config.logLevel, redact: logRedactPaths } },
+  {
+    logger: {
+      level: config.logLevel,
+      redact: logRedactPaths,
+      serializers: logSerializers,
+    },
+  },
 );
 
 app.addHook("onClose", async () => {

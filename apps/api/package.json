@@ -19,6 +19,7 @@
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.7",
     "impit": "^0.14.6",
+    "openid-client": "^6.8.8",
     "parse-ingredient": "3.0.0",
     "pg": "^8.23.1",
     "tough-cookie": "^6.0.2"

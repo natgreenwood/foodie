@@ -1,4 +1,4 @@
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, gt, isNotNull, sql } from "drizzle-orm";
 import { session, user } from "../db/schema.js";
 import type { Db } from "./accounts.js";
 
@@ -139,18 +139,26 @@ export async function setAdmin(
 
 // Sets the account's password hash (from hashPassword, made before the
 // transaction so no lock is held while hashing); the password works for
-// sign-in straight away. Sessions are left alone.
+// sign-in straight away. Sessions are left alone. An account with no
+// password signs in only through OIDC, whose provider manages its
+// credentials (NATG-226), so it is not given one: "no_password". Null when
+// there is no such account.
 export async function setPasswordHash(
   db: Db,
   id: number,
   passwordHash: string,
-): Promise<AdminUser | null> {
+): Promise<AdminUser | "no_password" | null> {
   const [row] = await db
     .update(user)
     .set({ passwordHash, updatedAt: sql`now()` })
-    .where(eq(user.id, id))
+    .where(and(eq(user.id, id), isNotNull(user.passwordHash)))
     .returning(adminUserColumns);
-  return row ?? null;
+  if (row) return row;
+  const [exists] = await db
+    .select({ id: user.id })
+    .from(user)
+    .where(eq(user.id, id));
+  return exists ? "no_password" : null;
 }
 
 // Deletes the account; its sessions and recipes go with it (on delete
