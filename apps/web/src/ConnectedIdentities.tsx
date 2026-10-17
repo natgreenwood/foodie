@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AuthError } from "./auth";
 import { AuthErrorMessage } from "./AuthErrorMessage";
 import {
+  clearOidcOutcome,
   connectRefusal,
   disconnectOidc,
   fetchOidcConnection,
@@ -52,10 +53,15 @@ function Identities({
   email: string;
 }) {
   const { search } = useLocation();
-  const params = new URLSearchParams(search);
   // Where a connect comes back to: ?oidc=connected or ?oidc_error=<code>.
-  const refusedCode = params.get("oidc_error");
-  const justConnected = params.get("oidc") === "connected";
+  // Kept from the first render, as the address loses it once it is shown.
+  const [{ refusedCode, justConnected }] = useState(() => {
+    const params = new URLSearchParams(search);
+    return {
+      refusedCode: params.get("oidc_error"),
+      justConnected: params.get("oidc") === "connected",
+    };
+  });
   // That outcome is news only until the user does something here.
   const [outcomeCurrent, setOutcomeCurrent] = useState(true);
 
@@ -94,9 +100,17 @@ function Identities({
       ? connectRefusal(refusedCode, name)
       : null;
 
+  // Only once the api has said the connect took.
+  const connected =
+    loaded && load.connection.connected && justConnected && outcomeCurrent;
+
   useEffect(() => {
     if (refusal) refusalAlert.current?.focus();
   }, [refusal]);
+
+  useEffect(() => {
+    if (refusal || connected) clearOidcOutcome(["oidc", "oidc_error"]);
+  }, [refusal, connected]);
 
   useEffect(() => {
     if (action.kind === "confirming") confirmButton.current?.focus();
@@ -255,14 +269,11 @@ function Identities({
           Disconnected {name}.
         </p>
       )}
-      {loaded &&
-        load.connection.connected &&
-        justConnected &&
-        outcomeCurrent && (
-          <p role="status" className="health" data-tone="good">
-            Connected {name}. You can now sign in with it.
-          </p>
-        )}
+      {connected && (
+        <p role="status" className="health" data-tone="good">
+          Connected {name}. You can now sign in with it.
+        </p>
+      )}
       {refusal && (
         <div
           ref={refusalAlert}

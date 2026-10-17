@@ -1,5 +1,6 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, returnPath } from "./App";
 import { leaveFor } from "./router";
@@ -71,6 +72,30 @@ const health = () => respondWith(200, { status: "ok", db: "up" });
 function visit(path: string) {
   window.history.replaceState(null, "", path);
   render(<App />);
+}
+
+// As main.tsx renders it, effects running twice.
+function visitStrict(path: string) {
+  window.history.replaceState(null, "", path);
+  render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+}
+
+// The address as a reload or a shared link would carry it.
+function address() {
+  return (
+    window.location.pathname + window.location.search + window.location.hash
+  );
+}
+
+// A response held back until the test lets it go.
+function held(response: () => Promise<Response>) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  return { handler: () => gate.then(response), release };
 }
 
 async function signInAs(email: string, password: string) {
@@ -584,6 +609,45 @@ describe("OIDC sign-in", () => {
       expect(screen.queryByRole("alert")).toBeNull();
     },
   );
+
+  it("takes the refusal out of the address once it is shown, keeping the rest", async () => {
+    const config = held(oidcOn);
+    stubApi({
+      "GET /api/me": signedOut,
+      "GET /api/auth/oidc/config": config.handler,
+    });
+
+    visitStrict(
+      "/sign-in?next=%2Fprofile&oidc_error=account_disabled&ref=mail#form",
+    );
+    expect(await screen.findByLabelText("Email")).toBeDefined();
+    // Not before the config has said how to word it.
+    expect(address()).toBe(
+      "/sign-in?next=%2Fprofile&oidc_error=account_disabled&ref=mail#form",
+    );
+
+    config.release();
+    const alert = await screen.findByRole("alert");
+    await waitFor(() =>
+      expect(address()).toBe("/sign-in?next=%2Fprofile&ref=mail#form"),
+    );
+    expect(screen.getByRole("alert")).toBe(alert);
+    expect(alert.textContent).toBe(
+      "This account has been disabled. Ask an administrator to re-enable it.",
+    );
+    expect(document.activeElement).toBe(alert);
+    expect(
+      screen.getByRole("link", { name: "Register" }).getAttribute("href"),
+    ).toBe("/register?next=%2Fprofile&ref=mail");
+
+    // A reload of the cleaned address.
+    cleanup();
+    visit(address());
+    expect(
+      await screen.findByRole("button", { name: "Sign in with Household SSO" }),
+    ).toBeDefined();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
 });
 
 describe("Connected identities", () => {
@@ -894,6 +958,108 @@ describe("Connected identities", () => {
       await screen.findByRole("button", { name: "Connect Household SSO" }),
     ).toBeDefined();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each(providers)(
+    "takes a connect's success out of the address once it is shown, keeping the rest (named %s)",
+    async (displayName, name) => {
+      // The session's load answers at once; the section's waits.
+      const section = held(me(true, true));
+      let calls = 0;
+      stubApi({
+        "GET /api/me": () =>
+          ++calls === 1 ? me(true, true)() : section.handler(),
+        "GET /api/auth/oidc/config": oidcAs(displayName),
+      });
+
+      visitStrict("/profile?ref=mail&oidc=connected#identities");
+      expect(
+        await screen.findByText("Loading connected identities…"),
+      ).toBeDefined();
+      // Not before the api has said the connect took.
+      expect(address()).toBe("/profile?ref=mail&oidc=connected#identities");
+
+      section.release();
+      const message = await screen.findByText(
+        `Connected ${name}. You can now sign in with it.`,
+      );
+      await waitFor(() =>
+        expect(address()).toBe("/profile?ref=mail#identities"),
+      );
+      expect(
+        screen.getByText(`Connected ${name}. You can now sign in with it.`),
+      ).toBe(message);
+
+      // A reload of the cleaned address.
+      cleanup();
+      calls = 0;
+      section.release();
+      visit(address());
+      expect(
+        await screen.findByRole("button", { name: "Disconnect" }),
+      ).toBeDefined();
+      expect(screen.queryByText(/You can now sign in with it/)).toBeNull();
+    },
+  );
+
+  it("takes a connect's refusal out of the address once it is shown, keeping the rest", async () => {
+    const section = held(me(false, true));
+    let calls = 0;
+    stubApi({
+      "GET /api/me": () =>
+        ++calls === 1 ? me(false, true)() : section.handler(),
+      "GET /api/auth/oidc/config": oidcOn,
+    });
+
+    visitStrict("/profile?oidc_error=email_mismatch&ref=mail#identities");
+    expect(
+      await screen.findByText("Loading connected identities…"),
+    ).toBeDefined();
+    expect(address()).toBe(
+      "/profile?oidc_error=email_mismatch&ref=mail#identities",
+    );
+
+    section.release();
+    const alert = await screen.findByRole("alert");
+    await waitFor(() => expect(address()).toBe("/profile?ref=mail#identities"));
+    expect(screen.getByRole("alert")).toBe(alert);
+    expect(alert.textContent).toBe(
+      "The email Household SSO returned doesn't match this account's email. Nothing was connected.",
+    );
+    expect(document.activeElement).toBe(alert);
+
+    // A reload of the cleaned address.
+    cleanup();
+    visit(address());
+    expect(
+      await screen.findByRole("button", { name: "Connect Household SSO" }),
+    ).toBeDefined();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps a connect's refusal through a failed load until it can be shown", async () => {
+    let calls = 0;
+    stubApi({
+      "GET /api/me": () =>
+        ++calls === 2
+          ? Promise.reject(new TypeError("Failed to fetch"))
+          : me(false, true)(),
+      "GET /api/auth/oidc/config": oidcOn,
+    });
+    const user = userEvent.setup();
+
+    visit("/profile?oidc_error=provider_error");
+    await screen.findByText(/Couldn't load connected identities/);
+    expect(address()).toBe("/profile?oidc_error=provider_error");
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe(
+      "Connecting Household SSO didn't complete. Try again.",
+    );
+    await waitFor(() => expect(address()).toBe("/profile"));
+    expect(document.activeElement).toBe(alert);
   });
 });
 
