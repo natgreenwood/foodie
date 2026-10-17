@@ -30,8 +30,8 @@ export function navigate(to: string, { replace = false } = {}) {
   for (const listener of listeners) listener();
 }
 
-// A full page load, for addresses outside this app: the api's OIDC routes
-// and the provider they send the browser to.
+// A full page load, for addresses outside this app: the api's OIDC start
+// route, which redirects on to the provider.
 export function leaveFor(url: string) {
   window.location.assign(url);
 }

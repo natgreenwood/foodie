@@ -5,13 +5,13 @@ import {
   connectRefusal,
   disconnectOidc,
   fetchOidcConnection,
+  OIDC_CONNECT_URL,
   oidcName,
-  startOidcConnect,
   useOidcConfig,
   usePageRestored,
   type OidcConnection,
 } from "./oidc";
-import { leaveFor, useLocation } from "./router";
+import { useLocation } from "./router";
 
 type Load =
   | { kind: "loading" }
@@ -21,7 +21,6 @@ type Load =
 type Action =
   | { kind: "idle" }
   | { kind: "connecting" }
-  | { kind: "connectFailed"; error: unknown }
   | { kind: "confirming" }
   | { kind: "disconnecting" }
   | { kind: "disconnected" }
@@ -93,15 +92,6 @@ function Identities({ name, email }: { name: string; email: string }) {
     }
   }, [action.kind]);
 
-  function connect() {
-    setOutcomeCurrent(false);
-    setAction({ kind: "connecting" });
-    startOidcConnect().then(leaveFor, (err: unknown) => {
-      console.error("starting the OIDC connect failed", err);
-      setAction({ kind: "connectFailed", error: err });
-    });
-  }
-
   function cancel() {
     cancelled.current = true;
     setAction({ kind: "idle" });
@@ -119,7 +109,7 @@ function Identities({ name, email }: { name: string; email: string }) {
       },
       (err: unknown) => {
         console.error("disconnecting OIDC failed", err);
-        if (err instanceof AuthError && err.code === "password_required") {
+        if (err instanceof AuthError && err.code === "no_local_password") {
           setLoad({
             kind: "loaded",
             connection: { connected: true, hasPassword: false },
@@ -163,15 +153,25 @@ function Identities({ name, email }: { name: string; email: string }) {
             Connect {name} to sign in with it as well as your password. It must
             return the same email as this account.
           </p>
-          <button
-            ref={connectButton}
-            type="button"
-            aria-describedby="identities-hint"
-            disabled={action.kind === "connecting"}
-            onClick={connect}
+          {/* The browser submits it with an empty urlencoded body and follows
+              the api's redirect to the provider. */}
+          <form
+            method="post"
+            action={OIDC_CONNECT_URL}
+            onSubmit={() => {
+              setOutcomeCurrent(false);
+              setAction({ kind: "connecting" });
+            }}
           >
-            Connect {name}
-          </button>
+            <button
+              ref={connectButton}
+              type="submit"
+              aria-describedby="identities-hint"
+              disabled={action.kind === "connecting"}
+            >
+              Connect {name}
+            </button>
+          </form>
         </>
       )}
 
@@ -259,21 +259,11 @@ function Identities({ name, email }: { name: string; email: string }) {
           <p>{refusal}</p>
         </div>
       )}
-      {action.kind === "connectFailed" && (
-        <FailureMessage
-          error={action.error}
-          message={(code) =>
-            code === "provider_unavailable"
-              ? connectRefusal(code, name)
-              : undefined
-          }
-        />
-      )}
       {action.kind === "disconnectFailed" && (
         <FailureMessage
           error={action.error}
           message={(code) =>
-            code === "password_required"
+            code === "no_local_password"
               ? `This account has no password, so ${name} can't be disconnected.`
               : undefined
           }

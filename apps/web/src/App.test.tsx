@@ -455,11 +455,10 @@ describe("OIDC sign-in", () => {
     expect(
       screen.queryByRole("heading", { name: "Connected identities" }),
     ).toBeNull();
+    // Only the session's own load, before signing in.
     expect(
-      fetchMock.mock.calls.some(([input]) =>
-        input.startsWith("/api/auth/oidc/connection"),
-      ),
-    ).toBe(false);
+      fetchMock.mock.calls.filter(([input]) => input === "/api/me"),
+    ).toHaveLength(1);
   });
 
   it("offers single sign-on under the form, named by the api, and goes to the provider", async () => {
@@ -503,7 +502,7 @@ describe("OIDC sign-in", () => {
 
   it.each([
     [
-      "account_exists",
+      "email_unverified",
       "An account with that email already exists. Sign in with your password, then connect Household SSO from your profile.",
     ],
     [
@@ -511,15 +510,11 @@ describe("OIDC sign-in", () => {
       "This account has been disabled. Ask an administrator to re-enable it.",
     ],
     [
-      "email_missing",
-      "Household SSO didn't send an email address, so it can't be used to sign in.",
+      "already_connected",
+      "This account already has a Household SSO identity connected.",
     ],
-    ["expired", "Household SSO didn't complete the sign-in. Try again."],
-    [
-      "provider_unavailable",
-      "Household SSO didn't complete the sign-in. Try again.",
-    ],
-    ["failed", "Household SSO didn't complete the sign-in. Try again."],
+    ["provider_error", "Household SSO didn't complete the sign-in. Try again."],
+    ["email_mismatch", "Signing in with Household SSO didn't work. Try again."],
     ["toString", "Signing in with Household SSO didn't work. Try again."],
     ["something_new", "Signing in with Household SSO didn't work. Try again."],
   ])(
@@ -546,8 +541,16 @@ describe("OIDC sign-in", () => {
 });
 
 describe("Connected identities", () => {
-  const connection = (connected: boolean, hasPassword: boolean) => () =>
-    respondWith(200, { connected, hasPassword });
+  // GET /me as it answers with OIDC on: the profile and how it signs in.
+  const me = (connected: boolean, hasPassword: boolean) => () =>
+    respondWith(200, {
+      ...sam,
+      hasPassword,
+      oidc: {
+        connected,
+        connectedAt: connected ? "2026-10-17T02:00:00.000Z" : null,
+      },
+    });
 
   beforeEach(() => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -564,17 +567,21 @@ describe("Connected identities", () => {
     return screen.getByRole("region", { name: "Connected identities" });
   }
 
-  it("offers to connect when nothing is connected, and goes to the provider", async () => {
-    stubApi({
-      "GET /api/me": () => respondWith(200, sam),
+  it("offers to connect when nothing is connected, as a form post to the api", async () => {
+    const fetchMock = stubApi({
+      "GET /api/me": me(false, true),
       "GET /api/auth/oidc/config": oidcOn,
-      "GET /api/auth/oidc/connection": connection(false, true),
-      "POST /api/auth/oidc/connect": () =>
-        respondWith(200, {
-          authorizationUrl: "https://sso.example/authorize?state=abc",
-        }),
     });
     const user = userEvent.setup();
+    let submitted: SubmitEvent | undefined;
+    let preventedByApp: boolean | undefined;
+    const onSubmit = (event: SubmitEvent) => {
+      submitted = event;
+      preventedByApp = event.defaultPrevented;
+      // jsdom cannot load the next page.
+      event.preventDefault();
+    };
+    document.addEventListener("submit", onSubmit);
 
     visit("/profile");
     const connect = await screen.findByRole("button", {
@@ -585,50 +592,25 @@ describe("Connected identities", () => {
     expect(connect.getAttribute("aria-describedby")).toBe("identities-hint");
 
     await user.click(connect);
+    document.removeEventListener("submit", onSubmit);
 
-    await waitFor(() =>
-      expect(leaveFor).toHaveBeenCalledWith(
-        "https://sso.example/authorize?state=abc",
-      ),
-    );
+    expect(preventedByApp).toBe(false);
+    const form = submitted?.target as HTMLFormElement | undefined;
+    expect(form?.method).toBe("post");
+    expect(form?.getAttribute("action")).toBe("/api/auth/oidc/connect");
+    expect(form?.contains(connect)).toBe(true);
+    expect(new FormData(form).entries().next().done).toBe(true);
     expect(connect.hasAttribute("disabled")).toBe(true);
     expect(screen.getByText("Taking you to Household SSO…")).toBeDefined();
-  });
-
-  it("explains when the provider cannot be reached to connect", async () => {
-    stubApi({
-      "GET /api/me": () => respondWith(200, sam),
-      "GET /api/auth/oidc/config": oidcOn,
-      "GET /api/auth/oidc/connection": connection(false, true),
-      "POST /api/auth/oidc/connect": () =>
-        respondWith(502, {
-          error: "provider_unavailable",
-          message: "the sign-in provider could not be reached",
-        }),
-    });
-    const user = userEvent.setup();
-
-    visit("/profile");
-    await user.click(
-      await screen.findByRole("button", { name: "Connect Household SSO" }),
-    );
-
-    expect((await screen.findByRole("alert")).textContent).toBe(
-      "Household SSO didn't complete the connection. Try again.",
-    );
-    expect(leaveFor).not.toHaveBeenCalled();
     expect(
-      screen
-        .getByRole("button", { name: "Connect Household SSO" })
-        .hasAttribute("disabled"),
+      fetchMock.mock.calls.some(([input]) => input.includes("/oidc/connect")),
     ).toBe(false);
   });
 
   it("shows the connected identity and disconnects it after a confirm", async () => {
     const fetchMock = stubApi({
-      "GET /api/me": () => respondWith(200, sam),
+      "GET /api/me": me(true, true),
       "GET /api/auth/oidc/config": oidcOn,
-      "GET /api/auth/oidc/connection": connection(true, true),
       "DELETE /api/auth/oidc/connection": () => respondWith(204),
     });
     const user = userEvent.setup();
@@ -677,9 +659,8 @@ describe("Connected identities", () => {
     ],
   ])("backs out of the disconnect with %s", async (_, backOut) => {
     const fetchMock = stubApi({
-      "GET /api/me": () => respondWith(200, sam),
+      "GET /api/me": me(true, true),
       "GET /api/auth/oidc/config": oidcOn,
-      "GET /api/auth/oidc/connection": connection(true, true),
     });
     const user = userEvent.setup();
 
@@ -697,9 +678,8 @@ describe("Connected identities", () => {
 
   it("offers no disconnect to an account with no password", async () => {
     stubApi({
-      "GET /api/me": () => respondWith(200, sam),
+      "GET /api/me": me(true, false),
       "GET /api/auth/oidc/config": oidcOn,
-      "GET /api/auth/oidc/connection": connection(true, false),
     });
 
     visit("/profile");
@@ -715,12 +695,11 @@ describe("Connected identities", () => {
 
   it("explains when the api refuses a disconnect for want of a password", async () => {
     stubApi({
-      "GET /api/me": () => respondWith(200, sam),
+      "GET /api/me": me(true, true),
       "GET /api/auth/oidc/config": oidcOn,
-      "GET /api/auth/oidc/connection": connection(true, true),
       "DELETE /api/auth/oidc/connection": () =>
         respondWith(409, {
-          error: "password_required",
+          error: "no_local_password",
           message:
             "an account without a password cannot disconnect its sign-in provider",
         }),
@@ -739,9 +718,8 @@ describe("Connected identities", () => {
 
   it("says when a connect has just succeeded", async () => {
     stubApi({
-      "GET /api/me": () => respondWith(200, sam),
+      "GET /api/me": me(true, true),
       "GET /api/auth/oidc/config": oidcOn,
-      "GET /api/auth/oidc/connection": connection(true, true),
     });
 
     visit("/profile?oidc=connected");
@@ -761,27 +739,21 @@ describe("Connected identities", () => {
       "The email Household SSO returned doesn't match this account's email. Nothing was connected.",
     ],
     [
-      "identity_in_use",
-      "That Household SSO identity is already connected to another account.",
-    ],
-    [
       "already_connected",
       "This account already has a Household SSO identity connected.",
     ],
-    ["expired", "Household SSO didn't complete the connection. Try again."],
     [
-      "provider_unavailable",
+      "provider_error",
       "Household SSO didn't complete the connection. Try again.",
     ],
-    ["failed", "Household SSO didn't complete the connection. Try again."],
+    ["email_unverified", "Connecting Household SSO didn't work. Try again."],
     ["something_new", "Connecting Household SSO didn't work. Try again."],
   ])(
     "explains a refused connect (%s) and moves focus to it",
     async (code, message) => {
       stubApi({
-        "GET /api/me": () => respondWith(200, sam),
+        "GET /api/me": me(false, true),
         "GET /api/auth/oidc/config": oidcOn,
-        "GET /api/auth/oidc/connection": connection(false, true),
       });
 
       visit(`/profile?oidc_error=${code}`);
@@ -794,14 +766,14 @@ describe("Connected identities", () => {
   );
 
   it("explains when the connection cannot be loaded and recovers on retry", async () => {
-    let fail = true;
+    // The session's load succeeds; the section's first one fails.
+    let calls = 0;
     stubApi({
-      "GET /api/me": () => respondWith(200, sam),
-      "GET /api/auth/oidc/config": oidcOn,
-      "GET /api/auth/oidc/connection": () =>
-        fail
+      "GET /api/me": () =>
+        ++calls === 2
           ? Promise.reject(new TypeError("Failed to fetch"))
-          : connection(false, true)(),
+          : me(false, true)(),
+      "GET /api/auth/oidc/config": oidcOn,
     });
     const user = userEvent.setup();
 
@@ -815,7 +787,6 @@ describe("Connected identities", () => {
       "Couldn't load connected identities: the request failed before a response arrived. Try again.",
     );
 
-    fail = false;
     await user.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(

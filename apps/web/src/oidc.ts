@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AuthError, call, errorFrom, reportUnauthenticated } from "./auth";
 
 // Mirrors the "Contract for NATG-288" in the api's OIDC routes
-// (apps/api/src/routes/oidc.ts).
+// (apps/api/src/routes/oidc.ts and me.ts).
 export interface OidcConfig {
   enabled: boolean;
   displayName: string | null;
@@ -16,6 +16,11 @@ export interface OidcConnection {
 // A browser navigation, not a fetch: it answers with a redirect to the
 // provider, which comes back to / signed in or to /sign-in?oidc_error=.
 export const OIDC_START_URL = "/api/auth/oidc/start";
+
+// A plain form POST, not a fetch, for the same reason: it answers with a
+// redirect to the provider, which comes back to /profile?oidc=connected or
+// /profile?oidc_error=.
+export const OIDC_CONNECT_URL = "/api/auth/oidc/connect";
 
 // The provider is only ever named by its configured display name.
 export function oidcName(config: OidcConfig): string {
@@ -81,33 +86,27 @@ export function usePageRestored(restored: () => void) {
   }, [restored]);
 }
 
+// How the account signs in, from GET /me's hasPassword and oidc. Fetched
+// here rather than taken from the session, because sign-in and register
+// answer with a profile that does not carry them.
 export async function fetchOidcConnection(
   signal?: AbortSignal,
 ): Promise<OidcConnection> {
-  const body = await signedInJson(
-    await call("GET", "/auth/oidc/connection", undefined, signal),
-  );
+  const body = await signedInJson(await call("GET", "/me", undefined, signal));
   if (typeof body === "object" && body !== null) {
-    const { connected, hasPassword } = body as Record<string, unknown>;
+    const { hasPassword, oidc } = body as Record<string, unknown>;
+    const connected =
+      typeof oidc === "object" && oidc !== null
+        ? (oidc as Record<string, unknown>).connected
+        : undefined;
     if (typeof connected === "boolean" && typeof hasPassword === "boolean") {
       return { connected, hasPassword };
     }
   }
-  throw new AuthError(null, "its response was not an OIDC connection");
+  throw new AuthError(null, "its response did not say how you sign in");
 }
 
-// The provider URL to send the browser to; the trip comes back to
-// /profile?oidc=connected or /profile?oidc_error=.
-export async function startOidcConnect(): Promise<string> {
-  const body = await signedInJson(await call("POST", "/auth/oidc/connect"));
-  if (typeof body === "object" && body !== null) {
-    const { authorizationUrl } = body as Record<string, unknown>;
-    if (typeof authorizationUrl === "string") return authorizationUrl;
-  }
-  throw new AuthError(null, "its response had no authorization URL");
-}
-
-// 409 password_required when the account has no password to fall back on.
+// 409 no_local_password when the account has no password to fall back on.
 export async function disconnectOidc(): Promise<void> {
   const res = await call("DELETE", "/auth/oidc/connection");
   if (res.status !== 204) await signedInJson(res);
@@ -115,30 +114,28 @@ export async function disconnectOidc(): Promise<void> {
 
 // The words for an ?oidc_error= the api redirected back with. The api sends
 // only a code, so the copy lives here; an unknown code gets a general line.
+const alreadyConnected = (name: string) =>
+  `This account already has a ${name} identity connected.`;
+
+// A sign-in can be refused with email_unverified, account_disabled,
+// already_connected or provider_error.
 const signInRefusals: Record<string, (name: string) => string> = {
-  account_exists: (name) =>
+  email_unverified: (name) =>
     `An account with that email already exists. Sign in with your password, then connect ${name} from your profile.`,
   account_disabled: () =>
     "This account has been disabled. Ask an administrator to re-enable it.",
-  email_missing: (name) =>
-    `${name} didn't send an email address, so it can't be used to sign in.`,
-  expired: (name) => `${name} didn't complete the sign-in. Try again.`,
-  provider_unavailable: (name) =>
-    `${name} didn't complete the sign-in. Try again.`,
-  failed: (name) => `${name} didn't complete the sign-in. Try again.`,
+  already_connected: alreadyConnected,
+  provider_error: (name) => `${name} didn't complete the sign-in. Try again.`,
 };
 
+// A connect can be refused with email_mismatch, already_connected or
+// provider_error.
 const connectRefusals: Record<string, (name: string) => string> = {
   email_mismatch: (name) =>
     `The email ${name} returned doesn't match this account's email. Nothing was connected.`,
-  identity_in_use: (name) =>
-    `That ${name} identity is already connected to another account.`,
-  already_connected: (name) =>
-    `This account already has a ${name} identity connected.`,
-  expired: (name) => `${name} didn't complete the connection. Try again.`,
-  provider_unavailable: (name) =>
+  already_connected: alreadyConnected,
+  provider_error: (name) =>
     `${name} didn't complete the connection. Try again.`,
-  failed: (name) => `${name} didn't complete the connection. Try again.`,
 };
 
 export function signInRefusal(code: string, name: string): string {
