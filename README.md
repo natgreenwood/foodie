@@ -185,7 +185,8 @@ stops the api from starting.
 ### Signing in with OIDC
 
 Users can also sign in through one OpenID Connect provider, any that follows
-the standard. It is tested against a mock provider; checking it end to end
+the standard, and through [Google](#signing-in-with-google), each on its own
+or both at once. It is tested against a mock provider; checking it end to end
 against PocketID is still to do. The api finds everything about the
 provider from its discovery document, `<issuer>/.well-known/openid-configuration`,
 and signs in as a confidential client with the authorization code flow, PKCE
@@ -206,6 +207,9 @@ and the scopes `openid profile email`. Set all four of these, or none (in
 - `OIDC_STARTS_PER_MINUTE` (optional, default 10): how many sign-in and
   connect starts one client address may make in any minute, counted
   together.
+
+Both limits apply to Google too, counted together with the generic
+provider.
 
 With none set, OIDC is off. Setting only some stops the api from starting.
 Both URLs must be `https`, except in development (`NODE_ENV=development`).
@@ -235,22 +239,35 @@ How accounts are matched:
   empty account.
 - The admin role is never read from or changed by the provider.
 
-Routes. `start`, `callback` and `connect` are full-page browser navigations
-that answer with redirects; the callback lands on `/` signed in, or on
+Routes. Each provider is addressed by its id, `generic` or `google`; a
+provider that is not configured answers 404 `not_found` on all of them.
+`start`, `callback` and `connect` are full-page browser navigations that
+answer with redirects; the callback lands on `/` signed in, or on
 `/sign-in?oidc_error=<code>`:
 
-- `GET /auth/oidc/config`: `{ enabled, displayName }`, `displayName` null
-  when `OIDC_DISPLAY_NAME` is unset. Open.
-- `GET /auth/oidc/start`: redirects to the provider. Open.
-- `GET /auth/oidc/callback`: where the provider sends the browser back.
-  Open. Each trip to the provider can come back once, within 10 minutes.
-- `POST /auth/oidc/connect`: signed in, submitted as a form. Redirects to the
-  provider; the callback then lands on `/profile?oidc=connected` or
-  `/profile?oidc_error=<code>`. Accepted only when the provider's email is
-  the account's, ignoring case.
-- `DELETE /auth/oidc/connection`: signed in. Disconnects the identity, 204;
-  409 `no_local_password` for an account with no password, which would have
-  no way left to sign in.
+- `GET /auth/oidc/config`: `{ enabled, providers: [{ id, displayName }] }`,
+  one entry per configured provider, generic then google; `enabled` is
+  whether there are any. The generic provider's `displayName` is null when
+  `OIDC_DISPLAY_NAME` is unset; Google's is `Google`. Open.
+- `GET /auth/oidc/:provider/start`: redirects to the provider. Open.
+- `GET /auth/oidc/:provider/callback`: where the provider sends the browser
+  back. Open. Each trip to the provider can come back once, within 10
+  minutes.
+- `POST /auth/oidc/:provider/connect`: signed in, submitted as a form.
+  Redirects to the provider; the callback then lands on
+  `/profile?oidc=connected` or `/profile?oidc_error=<code>`. Accepted only
+  when the provider's email is the account's, ignoring case. An account
+  holds one identity per provider.
+- `DELETE /auth/oidc/:provider/connection`: signed in. Disconnects the
+  account's identity from that provider, 204, also when there was none.
+  409 `no_other_sign_in` when the account would have no way left to sign
+  in: no password and no identity from another configured provider.
+- `GET /auth/oidc/start`, `GET /auth/oidc/callback`,
+  `POST /auth/oidc/connect` and `DELETE /auth/oidc/connection` are the
+  `generic` provider's routes, kept from before providers had ids.
+  `/auth/oidc/config` also still answers the generic provider's
+  `displayName` at the top level, for the web app until it reads
+  `providers`.
 - A start (`start` or `connect`) over either limit answers 429
   `{ error: "rate_limited", message }`, records nothing, does not contact
   the provider and logs `auth: oidc start refused` with the reason and the
@@ -261,7 +278,10 @@ that answer with redirects; the callback lands on `/` signed in, or on
   to trust that proxy (`TRUST_PROXY`, NATG-281, not merged yet). The bound on trips in progress is kept in the
   database and holds across processes.
 - `GET /me` and `PATCH /me` both say how the account signs in:
-  `hasPassword`, and `oidc: { connected, connectedAt }`.
+  `hasPassword`, and `oidc: { providers: [{ id, displayName, connected }] }`
+  with one entry per configured provider, in the config order. `oidc` also
+  still carries the generic provider's `connected` and `connectedAt`, for the
+  web app until it reads `providers`.
 
 `oidc_error` is a code, never text; the web app owns the wording. It is one
 of `email_unverified`, `account_disabled` (sign-in), `email_mismatch`
@@ -283,6 +303,28 @@ one, so those accounts are left with no way to sign in. Rolling back only
 the code and keeping the tables keeps the links. OIDC-only accounts still
 cannot sign in until the OIDC code is back, but then they sign in to the
 same accounts.
+
+### Signing in with Google
+
+Google is a second OIDC provider, with the same flow, checks and account
+rules as the generic one above. Its issuer, `https://accounts.google.com`,
+is fixed; only Foodie's client is configuration. Set all three of these, or
+none (in `.env` for compose):
+
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: an OAuth client of type
+  "Web application" created for Foodie in the Google Cloud console
+  (APIs & Services, Credentials).
+- `GOOGLE_REDIRECT_URL`: Google's callback as the browser reaches it, and
+  the URL to add to that client's authorised redirect URIs:
+  `<web origin>/api/auth/oidc/google/callback`, e.g.
+  `http://localhost:5173/api/auth/oidc/google/callback` in development. It
+  must end in `/auth/oidc/google/callback`.
+
+With none set, nothing Google-related is reachable. Setting only some stops
+the api from starting, as does setting `OIDC_ISSUER_URL` to Google's issuer
+alongside them. `GOOGLE_REDIRECT_URL` must be `https`, except in
+development. Google is tested against the mock provider; checking it end to
+end against a real Google client is still to do.
 
 ### Administration
 
