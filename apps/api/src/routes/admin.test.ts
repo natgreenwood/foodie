@@ -3,7 +3,7 @@ import { Writable } from "node:stream";
 import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
 import { describe, expect, onTestFinished } from "vitest";
-import { buildApp, logRedactPaths } from "../app.js";
+import { buildApp, logRedactPaths, logSerializers } from "../app.js";
 import { providerCredential } from "../ai/settings.js";
 import { createUser } from "../auth/accounts.js";
 import { session, user } from "../db/schema.js";
@@ -17,7 +17,7 @@ const unused = () => Promise.reject(new Error("not used by these tests"));
 type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 // The app on the test transaction, logging everything at trace level with
-// the server's redaction, with its log lines collected.
+// the server's serializers and redaction, with its log lines collected.
 function start(tx: TestTransaction) {
   const logLines: string[] = [];
   const stream = new Writable({
@@ -35,7 +35,14 @@ function start(tx: TestTransaction) {
       secureCookies: true,
       settingsKey,
     },
-    { logger: { level: "trace", stream, redact: logRedactPaths } },
+    {
+      logger: {
+        level: "trace",
+        stream,
+        serializers: logSerializers,
+        redact: logRedactPaths,
+      },
+    },
   );
   onTestFinished(() => app.close());
 
@@ -619,6 +626,35 @@ describe("AI provider settings", () => {
     expect(logLines[0]).toContain("cook@example.com");
     expect(logLines[0]).not.toContain("[Redacted]");
   });
+
+  // Spellings of an admin path Fastify routes to an admin route, answers 404
+  // for, or routes elsewhere, each with a key in the query string. Neither the
+  // log nor the response may carry it. The logged url is not asserted: how a
+  // path is spelled in the log is NATG-305's call, not this test's.
+  dbTest.for([
+    ["/%61dmin/ai", 401],
+    ["/admin/missing", 404],
+    ["/admin", 404],
+    ["//admin/ai", 404],
+    ["/ADMIN/ai", 404],
+    ["/admin%2Fai", 404],
+    ["/administrators", 404],
+    ["/health", 200],
+  ] as const)(
+    "GET %s?apiKey=… answers %i with the key in neither the log nor the body",
+    async ([path, status], { tx }) => {
+      const { app, logLines } = start(tx);
+      const key = `sk-ant-${randomBytes(24).toString("hex")}`;
+
+      const res = await app.inject({ url: `${path}?apiKey=${key}&x=1` });
+
+      expect(res.statusCode).toBe(status);
+      expect(res.body).not.toContain(key);
+      // The request was logged, so the check below is not of an empty log.
+      expect(logLines.join("")).toContain('"msg":"incoming request"');
+      expect(logLines.join("")).not.toContain(key);
+    },
+  );
 });
 
 describe("PUT /admin/ai/models/:procedure", () => {
