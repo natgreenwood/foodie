@@ -12,6 +12,7 @@ import {
   signInWithOidc,
   startOidcLogin,
   takeOidcLogin,
+  tripProvider,
   type OidcConnectRefusal,
   type OidcSignInRefusal,
 } from "../auth/oidc.js";
@@ -176,6 +177,17 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
     const trip = token ? await takeOidcLogin(db, token) : null;
     const page = trip?.userId ? PROFILE_PAGE : SIGN_IN_PAGE;
     if (!trip) return redirectWithError(reply, page, "provider_error", oidc.id);
+    // A trip finishes only at the callback of the provider it was started
+    // for, whatever cookie reached this one. Checked before the code is
+    // exchanged; the trip is used up either way.
+    const startedFor = tripProvider(trip.checks);
+    if (startedFor !== oidc.id) {
+      request.log.warn(
+        { ip: request.ip, provider: oidc.id, tripProvider: startedFor },
+        "auth: oidc callback for another provider's trip",
+      );
+      return redirectWithError(reply, page, "provider_error", oidc.id);
+    }
 
     let claims: OidcClaims;
     try {

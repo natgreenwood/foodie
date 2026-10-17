@@ -328,7 +328,7 @@ describe("GET /auth/oidc/start", () => {
       expect(q.get("scope")).toBe("openid profile email");
       expect(q.get("code_challenge_method")).toBe("S256");
       expect(q.get("code_challenge")).toMatch(/^[\w-]{43}$/);
-      expect(q.get("state")).toMatch(/^[\w-]{20,}$/);
+      expect(q.get("state")).toMatch(/^generic\.[\w-]{20,}$/);
       expect(q.get("nonce")).toMatch(/^[\w-]{20,}$/);
       expect(res.cookies.find((c) => c.name === OIDC_COOKIE)).toMatchObject({
         httpOnly: true,

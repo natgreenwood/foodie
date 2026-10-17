@@ -79,6 +79,15 @@ export async function startOidcLogin(
   });
 }
 
+// The id of the provider a trip was started for, from the prefix its state
+// was given. A random state is base64url, so it holds no dot. A trip with no
+// prefix was recorded before providers had ids, when the generic provider was
+// the only one.
+export function tripProvider(checks: OidcChecks): string {
+  const dot = checks.state.indexOf(".");
+  return dot === -1 ? "generic" : checks.state.slice(0, dot);
+}
+
 // Deletes the trip a token started, when the browser is not sent on it after
 // all.
 export async function discardOidcLogin(db: Db, token: string): Promise<void> {

@@ -252,7 +252,9 @@ answer with redirects; the callback lands on `/` signed in, or on
 - `GET /auth/oidc/:provider/start`: redirects to the provider. Open.
 - `GET /auth/oidc/:provider/callback`: where the provider sends the browser
   back. Open. Each trip to the provider can come back once, within 10
-  minutes.
+  minutes, and only to the callback of the provider it was started for:
+  at another provider's callback it is used up and refused with
+  `provider_error` before any code is exchanged.
 - `POST /auth/oidc/:provider/connect`: signed in, submitted as a form.
   Redirects to the provider; the callback then lands on
   `/profile?oidc=connected` or `/profile?oidc_error=<code>`. Accepted only

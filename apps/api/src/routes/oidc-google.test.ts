@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { Writable } from "node:stream";
 import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
 import { afterAll, beforeAll, describe, expect, onTestFinished } from "vitest";
 import { buildApp } from "../app.js";
-import { createUser } from "../auth/accounts.js";
+import { createUser, sessionId } from "../auth/accounts.js";
 import { oidcProvider, type OidcProvider } from "../auth/oidc-provider.js";
 import type { OidcProviderId } from "../config.js";
-import { oidcIdentity, user } from "../db/schema.js";
+import { oidcIdentity, oidcLogin, user } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import {
   startMockProvider,
@@ -91,16 +92,26 @@ function start(
     google = provider("google"),
   }: { generic?: OidcProvider | null; google?: OidcProvider | null } = {},
 ) {
-  const app = buildApp({
-    pingDatabase: () => Promise.resolve(),
-    fetchPage: unused,
-    loadUnits: unused,
-    db: tx,
-    secureCookies: true,
-    settingsKey: Buffer.alloc(32),
-    oidc: generic,
-    google,
+  const logLines: Record<string, unknown>[] = [];
+  const stream = new Writable({
+    write(chunk: Buffer, _enc, cb) {
+      logLines.push(JSON.parse(chunk.toString()) as Record<string, unknown>);
+      cb();
+    },
   });
+  const app = buildApp(
+    {
+      pingDatabase: () => Promise.resolve(),
+      fetchPage: unused,
+      loadUnits: unused,
+      db: tx,
+      secureCookies: true,
+      settingsKey: Buffer.alloc(32),
+      oidc: generic,
+      google,
+    },
+    { logger: { level: "info", stream } },
+  );
   onTestFinished(() => app.close());
 
   const request = (
@@ -181,7 +192,15 @@ function start(
     }>();
   }
 
-  return { app, request, oidcSignIn, oidcConnect, localAccount, me };
+  return {
+    app,
+    logLines,
+    request,
+    oidcSignIn,
+    oidcConnect,
+    localAccount,
+    me,
+  };
 }
 
 async function accountWithEmail(tx: TestTransaction, address: string) {
@@ -314,26 +333,113 @@ describe("signing in with Google", () => {
     },
   );
 
-  dbTest(
-    "scopes the trip cookie to Google's callback, so the generic callback cannot finish it",
-    async ({ tx }) => {
-      const { request } = start(tx);
+  dbTest("scopes the trip cookie to Google's callback", async ({ tx }) => {
+    const { request } = start(tx);
 
-      const started = await request("GET", "/auth/oidc/google/start");
+    const started = await request("GET", "/auth/oidc/google/start");
 
-      expect(new URL(started.headers.location as string).origin).toBe(
-        mocks.google.issuer.origin,
+    expect(new URL(started.headers.location as string).origin).toBe(
+      mocks.google.issuer.origin,
+    );
+    expect(started.cookies.find((c) => c.name === OIDC_COOKIE)).toMatchObject({
+      path: "/api/auth/oidc/google/callback",
+    });
+  });
+
+  // NATG-318: a trip cookie handed to another provider's callback, with a
+  // valid code from that provider's issuer for the trip's own state, nonce
+  // and PKCE challenge. Browsers do not send the cookie there on their own.
+  dbTest.for([
+    ["google", "/auth/oidc/google/start", "generic", "/auth/oidc/callback"],
+    [
+      "google",
+      "/auth/oidc/google/start",
+      "generic",
+      "/auth/oidc/generic/callback",
+    ],
+    ["generic", "/auth/oidc/start", "google", "/auth/oidc/google/callback"],
+    [
+      "generic",
+      "/auth/oidc/generic/start",
+      "google",
+      "/auth/oidc/google/callback",
+    ],
+    ["google", "/auth/oidc/google/connect", "generic", "/auth/oidc/callback"],
+    [
+      "generic",
+      "/auth/oidc/generic/connect",
+      "google",
+      "/auth/oidc/google/callback",
+    ],
+  ] as const)(
+    "refuses a %s trip from %s at the %s callback %s, before the code is exchanged",
+    async ([tripFor, startPath, receiver, callbackPath], { tx }) => {
+      const { app, logLines, request, localAccount } = start(tx);
+      const connecting = startPath.endsWith("/connect");
+      const local = connecting ? await localAccount() : null;
+      const session: Cookies = local ? { [SESSION_COOKIE]: local.token } : {};
+      const started = connecting
+        ? await app.inject({
+            method: "POST",
+            url: startPath,
+            headers: {
+              "content-type": "application/x-www-form-urlencoded",
+              origin: REDIRECT_URLS[tripFor].origin,
+            },
+            payload: "",
+            cookies: session,
+          })
+        : await request("GET", startPath);
+      expect(started.statusCode).toBe(302);
+      const tripCookie = cookieValue(started, OIDC_COOKIE);
+
+      // The trip's authorization request, sent to the receiver's issuer
+      // with the receiver's registered redirect URI.
+      const authorization = new URL(started.headers.location as string);
+      expect(authorization.origin).toBe(mocks[tripFor].issuer.origin);
+      authorization.host = mocks[receiver].issuer.host;
+      authorization.searchParams.set(
+        "redirect_uri",
+        REDIRECT_URLS[receiver].href,
       );
-      expect(started.cookies.find((c) => c.name === OIDC_COOKIE)).toMatchObject(
-        { path: "/api/auth/oidc/google/callback" },
-      );
-      const crossed = await request("GET", "/auth/oidc/callback?code=x", {
-        [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE),
+      mocks[receiver].signInAs(identity(local ? { email: local.email } : {}));
+      const grant = await fetch(authorization, { redirect: "manual" });
+      expect(grant.status).toBe(302);
+      const back = new URL(grant.headers.get("location")!);
+      expect(back.searchParams.get("code")).toBeTruthy();
+      const before = mocks[receiver].requests.length;
+
+      const res = await request("GET", `${callbackPath}${back.search}`, {
+        ...session,
+        [OIDC_COOKIE]: tripCookie,
       });
-      // Named for the callback that answered, not the trip it was handed.
-      expect(crossed.headers.location).toBe(
-        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+
+      const page = connecting ? "/profile" : "/sign-in";
+      expect(res.headers.location).toBe(
+        `${page}?oidc_error=provider_error&oidc_provider=${receiver}`,
       );
+      expect(res.cookies.some((c) => c.name === SESSION_COOKIE)).toBe(false);
+      // No token exchange, nor anything else, at the receiver.
+      expect(mocks[receiver].requests.slice(before)).toEqual([]);
+      // The trip is used up.
+      expect(
+        await tx
+          .select({ id: oidcLogin.id })
+          .from(oidcLogin)
+          .where(eq(oidcLogin.id, sessionId(tripCookie))),
+      ).toEqual([]);
+      if (local) expect(await identitiesOf(tx, local.id)).toEqual([]);
+      expect(
+        logLines.filter(
+          (l) => l.msg === "auth: oidc callback for another provider's trip",
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          level: 40,
+          provider: receiver,
+          tripProvider: tripFor,
+        }),
+      ]);
     },
   );
 });

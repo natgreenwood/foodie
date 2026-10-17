@@ -36,6 +36,7 @@ export interface OidcProvider {
   maxPendingLogins: number;
   startsPerMinute: number;
   // Fresh random state, nonce and PKCE verifier for one trip to the provider.
+  // The state starts with the provider's id and a dot.
   newChecks(): OidcChecks;
   // Where to send the browser to sign in at the provider.
   authorizationUrl(checks: OidcChecks): Promise<URL>;
@@ -101,7 +102,9 @@ export function oidcProvider(
 
     newChecks() {
       return {
-        state: client.randomState(),
+        // Prefixed with the provider's id, so the trip records which
+        // provider it was started for (see tripProvider).
+        state: `${settings.id}.${client.randomState()}`,
         nonce: client.randomNonce(),
         codeVerifier: client.randomPKCECodeVerifier(),
       };
