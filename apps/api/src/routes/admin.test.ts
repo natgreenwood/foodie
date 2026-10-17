@@ -3,7 +3,7 @@ import { Writable } from "node:stream";
 import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
 import { describe, expect, onTestFinished } from "vitest";
-import { buildApp, logRedactPaths } from "../app.js";
+import { buildApp, logRedactPaths, logSerializers } from "../app.js";
 import { providerCredential } from "../ai/settings.js";
 import { createUser } from "../auth/accounts.js";
 import { session, user } from "../db/schema.js";
@@ -35,7 +35,14 @@ function start(tx: TestTransaction) {
       secureCookies: true,
       settingsKey,
     },
-    { logger: { level: "trace", stream, redact: logRedactPaths } },
+    {
+      logger: {
+        level: "trace",
+        stream,
+        redact: logRedactPaths,
+        serializers: logSerializers,
+      },
+    },
   );
   onTestFinished(() => app.close());
 
@@ -83,6 +90,14 @@ function start(tx: TestTransaction) {
   }
 
   return { app, logLines, request, signedIn, login };
+}
+
+// The req of each "incoming request" log line, in order.
+function incomingRequests(logLines: string[]) {
+  return logLines
+    .map((line) => JSON.parse(line) as { msg: string; req?: object })
+    .filter((line) => line.msg === "incoming request")
+    .map((line) => line.req);
 }
 
 // Every admin route, with a body each would accept from an admin.
@@ -545,6 +560,62 @@ describe("AI provider settings", () => {
       const log = logLines.join("");
       expect(log).toContain("admin ai: provider changed");
       expect(log).not.toContain(key);
+    },
+  );
+
+  dbTest(
+    "never logs a key sent in the query string of a request that saves it",
+    async ({ tx }) => {
+      const { request, signedIn, logLines } = start(tx);
+      const admin = await signedIn({ admin: true });
+      const key = `sk-proj-${randomBytes(24).toString("hex")}`;
+
+      const res = await request(
+        "PUT",
+        `/admin/ai/providers/openai?apiKey=${key}`,
+        admin.token,
+        { apiKey: key },
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(incomingRequests(logLines)).toEqual([
+        expect.objectContaining({ url: "/auth/login" }),
+        expect.objectContaining({ url: "/admin/ai/providers/openai" }),
+      ]);
+      expect(logLines.join("")).not.toContain(key);
+    },
+  );
+
+  dbTest.for(adminRoutes)(
+    "%s %s logs its path without the query string",
+    async ([method, url, payload], { tx }) => {
+      const { request, logLines } = start(tx);
+      const key = `sk-ant-${randomBytes(24).toString("hex")}`;
+
+      await request(method, `${url}?apiKey=${key}&x=1`, undefined, payload);
+
+      expect(incomingRequests(logLines)).toEqual([
+        expect.objectContaining({ method, url }),
+      ]);
+      expect(logLines.join("")).not.toContain(key);
+    },
+  );
+
+  dbTest.for(["/health?verbose=1", "/administrators?apiKey=sk-x"])(
+    "keeps the query string of %s, which is not under /admin",
+    async (url, { tx }) => {
+      const { app, logLines } = start(tx);
+
+      await app.inject({ url });
+
+      expect(incomingRequests(logLines)).toEqual([
+        {
+          method: "GET",
+          url,
+          host: "localhost:80",
+          remoteAddress: "127.0.0.1",
+        },
+      ]);
     },
   );
 

@@ -30,6 +30,28 @@ export const logRedactPaths = [
   "*.baseUrl",
 ];
 
+// Pino serializers for the server's logger. The req serializer gives the
+// same fields as Fastify's default (which Fastify does not export), except
+// that an /admin URL is logged without its query string: the admin routes
+// never read one, so a key a client puts there must not reach a log line.
+export const logSerializers = {
+  req(req: FastifyRequest) {
+    const isAdmin = /^\/admin(?:[/?#]|$)/.test(req.url);
+    const version = req.headers["accept-version"];
+    const remotePort = req.socket?.remotePort;
+    // Fastify's default sets these to undefined, which pino leaves out of
+    // the line; leaving them off here writes the same line.
+    return {
+      method: req.method,
+      url: isAdmin ? req.url.replace(/[?#].*$/, "") : req.url,
+      ...(typeof version === "string" ? { version } : {}),
+      host: req.host,
+      remoteAddress: req.ip,
+      ...(remotePort === undefined ? {} : { remotePort }),
+    };
+  },
+};
+
 export interface AppSeams {
   // Replaces the signed-in scope's session check, so a route test can sign a
   // request in without a database. The server never passes this.
