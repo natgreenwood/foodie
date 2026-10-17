@@ -276,8 +276,8 @@ answer with redirects; the callback lands on `/` signed in, or on
   client address. The per-client count is kept in memory by each api
   process, so it restarts with the api and two processes count separately.
   The client address is `request.ip`: behind a proxy that is the proxy's
-  address, and every client shares one count, until the api can be told
-  to trust that proxy (`TRUST_PROXY`, NATG-281, not merged yet). The bound on trips in progress is kept in the
+  address, and every client shares one count, unless `TRUST_PROXY` names
+  that proxy (see above). The bound on trips in progress is kept in the
   database and holds across processes.
 - `GET /me` and `PATCH /me` both say how the account signs in:
   `hasPassword`, and `oidc: { providers: [{ id, displayName, connected }] }`
