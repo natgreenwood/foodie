@@ -59,13 +59,17 @@ export async function takeOidcLogin(
 }
 
 // Why a sign-in through the provider was refused:
-// - account_exists: the email belongs to an account this identity is not
-//   linked to, and the provider does not say the email is verified (or the
-//   account already has another identity from this provider).
+// - email_unverified: the email belongs to an account this identity is not
+//   linked to, and the provider does not say the email is verified.
+// - already_connected: the account with that email already has another
+//   identity from this provider.
 // - account_disabled: the account is disabled.
-// - email_missing: a new identity with no usable email.
+// - provider_error: a new identity with no usable email.
 export type OidcSignInRefusal =
-  "account_exists" | "account_disabled" | "email_missing";
+  | "email_unverified"
+  | "already_connected"
+  | "account_disabled"
+  | "provider_error";
 
 export type OidcSignIn =
   | { refused: null; user: Profile; outcome: "existing" | "linked" | "created" }
@@ -98,7 +102,7 @@ export async function signInWithOidc(
     }
 
     const email = claims.email === null ? null : normaliseEmail(claims.email);
-    if (email === null) return { refused: "email_missing" };
+    if (email === null) return { refused: "provider_error" };
 
     const [existing] = await t
       .select({ ...profileColumns, disabledAt: user.disabledAt })
@@ -107,10 +111,10 @@ export async function signInWithOidc(
       .for("update");
     if (existing) {
       const { disabledAt, ...profile } = existing;
-      if (!claims.emailVerified) return { refused: "account_exists" };
+      if (!claims.emailVerified) return { refused: "email_unverified" };
       if (disabledAt) return { refused: "account_disabled" };
       const added = await addIdentity(t, profile.id, claims);
-      if (!added) return { refused: "account_exists" };
+      if (!added) return { refused: "already_connected" };
       return { refused: null, user: profile, outcome: "linked" };
     }
 
@@ -136,10 +140,9 @@ export async function signInWithOidc(
 // Why connecting an identity to the signed-in account was refused:
 // - email_mismatch: the provider's email is not the account's (ignoring
 //   case), or there is none.
-// - identity_in_use: the identity signs in to another account.
-// - already_connected: the account has another identity from this provider.
-export type OidcConnectRefusal =
-  "email_mismatch" | "identity_in_use" | "already_connected";
+// - already_connected: the identity signs in to another account, or the
+//   account has another identity from this provider.
+export type OidcConnectRefusal = "email_mismatch" | "already_connected";
 
 // Links the identity to the account. Connecting the identity that is already
 // linked to the account changes nothing and succeeds.
@@ -159,7 +162,7 @@ export async function connectOidcIdentity(
         ),
       );
     if (linked) {
-      return { refused: linked.userId === userId ? null : "identity_in_use" };
+      return { refused: linked.userId === userId ? null : "already_connected" };
     }
     const [account] =
       claims.email === null
@@ -181,22 +184,35 @@ export async function connectOidcIdentity(
   });
 }
 
-// Whether the account has an identity linked, and whether it has a local
-// password to sign in with if that identity were disconnected.
-export async function oidcConnection(
+export interface SignInMethods {
+  // Whether the account has a local password, so could still sign in if
+  // its identity were disconnected.
+  hasPassword: boolean;
+  oidc: { connected: boolean; connectedAt: string | null };
+}
+
+// How the account can sign in, for GET /me. Null when it no longer exists.
+export async function signInMethods(
   db: Db,
   userId: number,
-): Promise<{ connected: boolean; hasPassword: boolean }> {
+): Promise<SignInMethods | null> {
   const [row] = await db
     .select({
-      connected: sql<boolean>`${oidcIdentity.id} IS NOT NULL`,
       hasPassword: sql<boolean>`${user.passwordHash} IS NOT NULL`,
+      connectedAt: oidcIdentity.createdAt,
     })
     .from(user)
     .leftJoin(oidcIdentity, eq(oidcIdentity.userId, user.id))
     .where(eq(user.id, userId))
     .limit(1);
-  return row ?? { connected: false, hasPassword: false };
+  if (!row) return null;
+  return {
+    hasPassword: row.hasPassword,
+    oidc: {
+      connected: row.connectedAt !== null,
+      connectedAt: row.connectedAt?.toISOString() ?? null,
+    },
+  };
 }
 
 // Unlinks the account's identities, only when it has a local password: an
@@ -205,14 +221,14 @@ export async function oidcConnection(
 export async function disconnectOidc(
   db: Db,
   userId: number,
-): Promise<{ refused: "password_required" | null }> {
+): Promise<{ refused: "no_local_password" | null }> {
   return db.transaction(async (t) => {
     const [row] = await t
       .select({ passwordHash: user.passwordHash })
       .from(user)
       .where(eq(user.id, userId))
       .for("update");
-    if (!row?.passwordHash) return { refused: "password_required" };
+    if (!row?.passwordHash) return { refused: "no_local_password" };
     await t.delete(oidcIdentity).where(eq(oidcIdentity.userId, userId));
     return { refused: null };
   });

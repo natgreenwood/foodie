@@ -199,26 +199,31 @@ How accounts are matched:
   empty account.
 - The admin role is never read from or changed by the provider.
 
-Routes. `start` and `callback` are browser navigations that answer with
-redirects; the callback lands on `/` signed in, or on
+Routes. `start`, `callback` and `connect` are full-page browser navigations
+that answer with redirects; the callback lands on `/` signed in, or on
 `/sign-in?oidc_error=<code>`:
 
-- `GET /auth/oidc/config`: `{ enabled, displayName }`. Open.
+- `GET /auth/oidc/config`: `{ enabled, displayName }`, `displayName` null
+  when `OIDC_DISPLAY_NAME` is unset. Open.
 - `GET /auth/oidc/start`: redirects to the provider. Open.
 - `GET /auth/oidc/callback`: where the provider sends the browser back.
   Open. Each trip to the provider can come back once, within 10 minutes.
-- `POST /auth/oidc/connect`: signed in. Answers `{ authorizationUrl }` to
-  send the browser to; the callback then lands on `/profile?oidc=connected`
-  or `/profile?oidc_error=<code>`. Accepted only when the provider's email is
+- `POST /auth/oidc/connect`: signed in, submitted as a form. Redirects to the
+  provider; the callback then lands on `/profile?oidc=connected` or
+  `/profile?oidc_error=<code>`. Accepted only when the provider's email is
   the account's, ignoring case.
-- `GET /auth/oidc/connection`: signed in. `{ connected, hasPassword }`.
 - `DELETE /auth/oidc/connection`: signed in. Disconnects the identity, 204;
-  409 `password_required` for an account with no password, which would have
+  409 `no_local_password` for an account with no password, which would have
   no way left to sign in.
+- `GET /me` says how the account signs in: `hasPassword`, and
+  `oidc: { connected, connectedAt }`.
 
-`oidc_error` is one of `account_exists`, `account_disabled`, `email_missing`
-(sign-in); `email_mismatch`, `identity_in_use`, `already_connected`
-(connect); and `expired`, `provider_unavailable`, `failed` (either).
+`oidc_error` is a code, never text; the web app owns the wording. It is one
+of `email_unverified`, `account_disabled` (sign-in), `email_mismatch`
+(connect), `already_connected` (either: the identity or the account is
+already linked elsewhere) and `provider_error` (either: the provider could
+not be reached or refused, its answer did not check out, it sent no email,
+or the trip was missing, expired or no longer signed in).
 
 An account with no password cannot sign in with a password: the sign-in form
 answers it exactly as it answers a wrong password. Signing out of Foodie does

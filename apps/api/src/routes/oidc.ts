@@ -7,7 +7,6 @@ import { sessionUser } from "../auth/accounts.js";
 import {
   connectOidcIdentity,
   disconnectOidc,
-  oidcConnection,
   signInWithOidc,
   startOidcLogin,
   takeOidcLogin,
@@ -29,19 +28,15 @@ export interface OidcConfigResponse {
   displayName: string | null;
 }
 
-// The oidc_error a callback redirects to the web app with, on /sign-in for
-// a sign-in and on /profile for a connect:
-// - expired: no trip in progress for this browser, or it timed out, or the
-//   user who started a connect is no longer the one signed in.
-// - provider_unavailable: the provider could not be reached to start.
-// - failed: the provider answered with an error, or its response did not
-//   check out.
+// The oidc_error the web app is redirected back with, on /sign-in for a
+// sign-in and on /profile for a connect. A code, never text: the web app
+// owns the wording, so a crafted link cannot put words on our pages.
+// Besides the refusals, provider_error covers a provider that could not be
+// reached, answered with an error or a response that did not check out, and
+// a trip that is missing, timed out, or was started by a user no longer
+// signed in.
 export type OidcRedirectError =
-  | OidcSignInRefusal
-  | OidcConnectRefusal
-  | "expired"
-  | "provider_unavailable"
-  | "failed";
+  OidcSignInRefusal | OidcConnectRefusal | "provider_error";
 
 // Holds the token for one trip to the provider and back.
 export const OIDC_COOKIE = "foodie_oidc";
@@ -81,21 +76,21 @@ export const oidcRoutes: FastifyPluginCallback<OidcDeps> = (
     if (!oidc) return notConfigured(reply);
     const url = await beginTrip(request, reply, deps, oidc, null);
     if (!url) {
-      return redirectWithError(reply, SIGN_IN_PAGE, "provider_unavailable");
+      return redirectWithError(reply, SIGN_IN_PAGE, "provider_error");
     }
     return reply.redirect(url.href);
   });
 
   // Where the provider sends the browser back, for a sign-in or a connect.
   // The trip is used up whatever happens, so a repeated callback answers
-  // expired and changes nothing.
+  // provider_error and changes nothing.
   app.get("/auth/oidc/callback", async (request, reply) => {
     if (!oidc) return notConfigured(reply);
     const token = request.cookies[OIDC_COOKIE];
     reply.clearCookie(OIDC_COOKIE, { path: oidc.callbackPath });
     const trip = token ? await takeOidcLogin(db, token) : null;
     const page = trip?.userId ? PROFILE_PAGE : SIGN_IN_PAGE;
-    if (!trip) return redirectWithError(reply, page, "expired");
+    if (!trip) return redirectWithError(reply, page, "provider_error");
 
     let claims: OidcClaims;
     try {
@@ -108,7 +103,7 @@ export const oidcRoutes: FastifyPluginCallback<OidcDeps> = (
         { ip: request.ip, error: describeError(err) },
         "auth: oidc callback failed",
       );
-      return redirectWithError(reply, page, "failed");
+      return redirectWithError(reply, page, "provider_error");
     }
 
     if (trip.userId !== null) {
@@ -122,7 +117,7 @@ export const oidcRoutes: FastifyPluginCallback<OidcDeps> = (
       );
       return null;
     });
-    if (!result) return redirectWithError(reply, page, "failed");
+    if (!result) return redirectWithError(reply, page, "provider_error");
     if (result.refused) {
       // The same line a failed local sign-in writes.
       request.log.warn(
@@ -142,8 +137,8 @@ export const oidcRoutes: FastifyPluginCallback<OidcDeps> = (
   done();
 };
 
-// The signed-in OIDC routes: connect an identity to the account, and see
-// or remove it. Registered behind requireUser.
+// The signed-in OIDC routes: connect an identity to the account, or remove
+// it; GET /me says whether one is connected. Registered behind requireUser.
 export const oidcAccountRoutes: FastifyPluginCallback<OidcDeps> = (
   app,
   deps,
@@ -151,39 +146,34 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcDeps> = (
 ) => {
   const { db, oidc } = deps;
   app.setErrorHandler(apiErrorHandler("oidc"));
+  // POST /auth/oidc/connect is submitted by a plain HTML form, which sends
+  // an empty urlencoded body. Nothing is read from it; this scope only.
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    (_request, _payload, parse) => parse(null, undefined),
+  );
 
-  // Answers { authorizationUrl } for the web app to send the browser to; the
-  // callback then lands on /profile. A POST, so another site cannot start
-  // it.
+  // A full-page navigation from the profile: sends the browser to the
+  // provider, and the callback lands back on /profile. A POST, so another
+  // site cannot start it.
   app.post("/auth/oidc/connect", async (request, reply) => {
     if (!oidc) return notConfigured(reply);
     const url = await beginTrip(request, reply, deps, oidc, request.user!.id);
     if (!url) {
-      return sendError(
-        reply,
-        502,
-        "provider_unavailable",
-        "the sign-in provider could not be reached",
-      );
+      return redirectWithError(reply, PROFILE_PAGE, "provider_error");
     }
-    return { authorizationUrl: url.href };
+    return reply.redirect(url.href);
   });
 
-  // { connected, hasPassword }: whether an identity is linked, and whether
-  // the account could still sign in without it.
-  app.get("/auth/oidc/connection", (request) =>
-    oidcConnection(db, request.user!.id),
-  );
-
   // Unlinks the account's identity: 204, also when there was none. 409
-  // password_required for an account with no local password.
+  // no_local_password for an account with no local password.
   app.delete("/auth/oidc/connection", async (request, reply) => {
     const { refused } = await disconnectOidc(db, request.user!.id);
     if (refused) {
       return sendError(
         reply,
         409,
-        "password_required",
+        "no_local_password",
         "an account without a password cannot disconnect its sign-in provider",
       );
     }
@@ -239,7 +229,7 @@ async function finishConnect(
   const token = request.cookies[SESSION_COOKIE];
   const current = token ? await sessionUser(db, token) : null;
   if (current?.id !== userId) {
-    return redirectWithError(reply, PROFILE_PAGE, "expired");
+    return redirectWithError(reply, PROFILE_PAGE, "provider_error");
   }
   const { refused } = await connectOidcIdentity(db, userId, claims);
   if (refused) {

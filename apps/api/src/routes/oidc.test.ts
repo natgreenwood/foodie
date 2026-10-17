@@ -27,13 +27,16 @@ beforeAll(async () => {
 });
 afterAll(() => mock.close());
 
-function provider(issuerUrl = mock.issuer): OidcProvider {
+function provider(
+  issuerUrl = mock.issuer,
+  displayName: string | null = "Home SSO",
+): OidcProvider {
   return oidcProvider({
     issuerUrl,
     clientId: mock.clientId,
     clientSecret: mock.clientSecret,
     redirectUrl: REDIRECT_URL,
-    displayName: "Home SSO",
+    displayName,
   });
 }
 
@@ -91,6 +94,16 @@ function start(tx: TestTransaction, oidc: OidcProvider | null = provider()) {
       ...(payload === undefined ? {} : { payload }),
     });
 
+  // POST /auth/oidc/connect as the profile's HTML form submits it.
+  const startConnect = (token?: string): Promise<Response> =>
+    app.inject({
+      method: "POST",
+      url: "/auth/oidc/connect",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      payload: "",
+      cookies: token ? { [SESSION_COOKIE]: token } : {},
+    });
+
   // The callback path and query the provider last sent the browser to.
   let lastCallback = "";
 
@@ -124,13 +137,10 @@ function start(tx: TestTransaction, oidc: OidcProvider | null = provider()) {
 
   // POST /auth/oidc/connect as the session, then through the provider.
   async function oidcConnect(token: string, who: MockIdentity) {
-    const started = await request("POST", "/auth/oidc/connect", {
-      [SESSION_COOKIE]: token,
-    });
-    expect(started.statusCode).toBe(200);
-    const { authorizationUrl } = started.json<{ authorizationUrl: string }>();
+    const started = await startConnect(token);
+    expect(started.statusCode).toBe(302);
     return throughProvider(
-      authorizationUrl,
+      started.headers.location as string,
       {
         [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE),
         [SESSION_COOKIE]: token,
@@ -158,6 +168,7 @@ function start(tx: TestTransaction, oidc: OidcProvider | null = provider()) {
     app,
     logLines,
     request,
+    startConnect,
     oidcSignIn,
     oidcConnect,
     throughProvider,
@@ -203,6 +214,14 @@ describe("GET /auth/oidc/config", () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ enabled: true, displayName: "Home SSO" });
+  });
+
+  dbTest("answers a null display name when none is set", async ({ tx }) => {
+    const { request } = start(tx, provider(mock.issuer, null));
+
+    const res = await request("GET", "/auth/oidc/config");
+
+    expect(res.json()).toEqual({ enabled: true, displayName: null });
   });
 
   dbTest(
@@ -280,9 +299,7 @@ describe("GET /auth/oidc/start", () => {
       const res = await request("GET", "/auth/oidc/start");
 
       expect(res.statusCode).toBe(302);
-      expect(res.headers.location).toBe(
-        "/sign-in?oidc_error=provider_unavailable",
-      );
+      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
       expect(hasCookie(res, OIDC_COOKIE)).toBe(false);
       expect(await tx.select().from(oidcLogin)).toEqual([]);
       expect(logLines).toContainEqual(
@@ -319,6 +336,8 @@ describe("signing in through the provider", () => {
         displayName: "Sam Cook",
         locale: "en-GB",
         isAdmin: false,
+        hasPassword: false,
+        oidc: { connected: true, connectedAt: expect.any(String) as string },
       });
       const [account] = await accountsWithEmail(tx, who.email!);
       expect(account!.passwordHash).toBeNull();
@@ -366,7 +385,7 @@ describe("signing in through the provider", () => {
       const res = await oidcSignIn(who);
 
       expect(res.statusCode).toBe(302);
-      expect(res.headers.location).toBe("/sign-in?oidc_error=account_exists");
+      expect(res.headers.location).toBe("/sign-in?oidc_error=email_unverified");
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(await accountsWithEmail(tx, local.email)).toHaveLength(1);
       expect(await identitiesOf(tx, local.id)).toEqual([]);
@@ -376,6 +395,26 @@ describe("signing in through the provider", () => {
           email: local.email,
           ip: "127.0.0.1",
         }),
+      ]);
+    },
+  );
+
+  dbTest(
+    "refuses a verified email whose account has another identity from the provider",
+    async ({ tx }) => {
+      const { oidcConnect, oidcSignIn, localAccount } = start(tx);
+      const local = await localAccount();
+      const first = identity({ email: local.email });
+      await oidcConnect(local.token, first);
+
+      const res = await oidcSignIn(identity({ email: local.email }));
+
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=already_connected",
+      );
+      expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
+      expect(await identitiesOf(tx, local.id)).toEqual([
+        { issuer: mock.issuer.origin, subject: first.sub },
       ]);
     },
   );
@@ -532,14 +571,14 @@ describe("signing in through the provider", () => {
 
     const res = await oidcSignIn(who);
 
-    expect(res.headers.location).toBe("/sign-in?oidc_error=email_missing");
+    expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
     expect(await tx.select().from(oidcIdentity)).toEqual([]);
   });
 });
 
 describe("GET /auth/oidc/callback", () => {
   dbTest(
-    "uses a trip once: the same callback again answers expired",
+    "uses a trip once: the same callback again answers provider_error",
     async ({ tx }) => {
       const { request, throughProvider, lastCallback } = start(tx);
       const started = await request("GET", "/auth/oidc/start");
@@ -553,13 +592,15 @@ describe("GET /auth/oidc/callback", () => {
 
       const replay = await request("GET", lastCallback(), cookies);
 
-      expect(replay.headers.location).toBe("/sign-in?oidc_error=expired");
+      expect(replay.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error",
+      );
       expect(hasCookie(replay, SESSION_COOKIE)).toBe(false);
     },
   );
 
   dbTest(
-    "answers expired without the trip cookie, and clears it after use",
+    "answers provider_error without the trip cookie, and clears it after use",
     async ({ tx }) => {
       const { request, throughProvider } = start(tx);
       const started = await request("GET", "/auth/oidc/start");
@@ -570,7 +611,7 @@ describe("GET /auth/oidc/callback", () => {
         identity(),
       );
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=expired");
+      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(res.cookies.find((c) => c.name === OIDC_COOKIE)).toMatchObject({
         value: "",
@@ -579,19 +620,24 @@ describe("GET /auth/oidc/callback", () => {
     },
   );
 
-  dbTest("answers expired once the trip has timed out", async ({ tx }) => {
-    const { request, throughProvider } = start(tx);
-    const started = await request("GET", "/auth/oidc/start");
-    await tx.update(oidcLogin).set({ expiresAt: new Date(Date.now() - 1000) });
+  dbTest(
+    "answers provider_error once the trip has timed out",
+    async ({ tx }) => {
+      const { request, throughProvider } = start(tx);
+      const started = await request("GET", "/auth/oidc/start");
+      await tx
+        .update(oidcLogin)
+        .set({ expiresAt: new Date(Date.now() - 1000) });
 
-    const res = await throughProvider(
-      started.headers.location as string,
-      { [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE) },
-      identity(),
-    );
+      const res = await throughProvider(
+        started.headers.location as string,
+        { [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE) },
+        identity(),
+      );
 
-    expect(res.headers.location).toBe("/sign-in?oidc_error=expired");
-  });
+      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+    },
+  );
 
   dbTest(
     "refuses a callback started in another browser (state mismatch)",
@@ -607,7 +653,7 @@ describe("GET /auth/oidc/callback", () => {
         identity(),
       );
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=failed");
+      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(await tx.select().from(oidcIdentity)).toEqual([]);
       expect(logLines).toContainEqual(
@@ -617,13 +663,13 @@ describe("GET /auth/oidc/callback", () => {
   );
 
   dbTest(
-    "answers failed when the user turns the provider down",
+    "answers provider_error when the user turns the provider down",
     async ({ tx }) => {
       const { oidcSignIn } = start(tx);
 
       const res = await oidcSignIn("deny");
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=failed");
+      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
     },
   );
@@ -717,13 +763,18 @@ describe("connecting an identity from the profile", () => {
       expect(await identitiesOf(tx, local.id)).toEqual([
         { issuer: mock.issuer.origin, subject: who.sub },
       ]);
-      expect(
-        (
-          await request("GET", "/auth/oidc/connection", {
-            [SESSION_COOKIE]: local.token,
-          })
-        ).json(),
-      ).toEqual({ connected: true, hasPassword: true });
+      const me = (
+        await request("GET", "/me", { [SESSION_COOKIE]: local.token })
+      ).json<{ hasPassword: boolean; oidc: { connectedAt: string } }>();
+      expect(me).toMatchObject({
+        hasPassword: true,
+        oidc: { connected: true },
+      });
+      const [row] = await tx
+        .select({ createdAt: oidcIdentity.createdAt })
+        .from(oidcIdentity)
+        .where(eq(oidcIdentity.userId, local.id));
+      expect(me.oidc.connectedAt).toBe(row!.createdAt.toISOString());
 
       const signedIn = await oidcSignIn(who);
       expect(
@@ -784,7 +835,9 @@ describe("connecting an identity from the profile", () => {
         email: local.email,
       });
 
-      expect(res.headers.location).toBe("/profile?oidc_error=identity_in_use");
+      expect(res.headers.location).toBe(
+        "/profile?oidc_error=already_connected",
+      );
       expect(await identitiesOf(tx, local.id)).toEqual([]);
     },
   );
@@ -809,15 +862,14 @@ describe("connecting an identity from the profile", () => {
   dbTest(
     "refuses to finish when the browser is no longer signed in as the user",
     async ({ tx }) => {
-      const { request, throughProvider, localAccount } = start(tx);
+      const { request, startConnect, throughProvider, localAccount } =
+        start(tx);
       const local = await localAccount();
-      const started = await request("POST", "/auth/oidc/connect", {
-        [SESSION_COOKIE]: local.token,
-      });
+      const started = await startConnect(local.token);
       await request("POST", "/auth/logout", { [SESSION_COOKIE]: local.token });
 
       const res = await throughProvider(
-        started.json<{ authorizationUrl: string }>().authorizationUrl,
+        started.headers.location as string,
         {
           [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE),
           [SESSION_COOKIE]: local.token,
@@ -825,34 +877,30 @@ describe("connecting an identity from the profile", () => {
         identity({ email: local.email }),
       );
 
-      expect(res.headers.location).toBe("/profile?oidc_error=expired");
+      expect(res.headers.location).toBe("/profile?oidc_error=provider_error");
       expect(await identitiesOf(tx, local.id)).toEqual([]);
     },
   );
 
   dbTest("POST /auth/oidc/connect answers 401 signed out", async ({ tx }) => {
-    const { request } = start(tx);
+    const { startConnect } = start(tx);
 
-    expect((await request("POST", "/auth/oidc/connect")).statusCode).toBe(401);
+    expect((await startConnect()).statusCode).toBe(401);
   });
 
   dbTest(
-    "POST /auth/oidc/connect answers 502 when the provider is down",
+    "POST /auth/oidc/connect sends the browser back to the profile when the provider is down",
     async ({ tx }) => {
       const down = await startMockProvider();
       await down.close();
-      const { request, localAccount } = start(tx, provider(down.issuer));
+      const { startConnect, localAccount } = start(tx, provider(down.issuer));
       const local = await localAccount();
 
-      const res = await request("POST", "/auth/oidc/connect", {
-        [SESSION_COOKIE]: local.token,
-      });
+      const res = await startConnect(local.token);
 
-      expect(res.statusCode).toBe(502);
-      expect(res.json()).toEqual({
-        error: "provider_unavailable",
-        message: "the sign-in provider could not be reached",
-      });
+      expect(res.statusCode).toBe(302);
+      expect(res.headers.location).toBe("/profile?oidc_error=provider_error");
+      expect(hasCookie(res, OIDC_COOKIE)).toBe(false);
     },
   );
 });
@@ -875,15 +923,16 @@ describe("DELETE /auth/oidc/connection", () => {
 
       expect(await identitiesOf(tx, local.id)).toEqual([]);
       expect(
-        (
-          await request("GET", "/auth/oidc/connection", {
-            [SESSION_COOKIE]: local.token,
-          })
-        ).json(),
-      ).toEqual({ connected: false, hasPassword: true });
+        (await request("GET", "/me", { [SESSION_COOKIE]: local.token })).json(),
+      ).toMatchObject({
+        hasPassword: true,
+        oidc: { connected: false, connectedAt: null },
+      });
       // Unverified, so the provider can no longer reach the account.
       const again = await oidcSignIn({ ...who, email_verified: false });
-      expect(again.headers.location).toBe("/sign-in?oidc_error=account_exists");
+      expect(again.headers.location).toBe(
+        "/sign-in?oidc_error=email_unverified",
+      );
     },
   );
 
@@ -898,7 +947,7 @@ describe("DELETE /auth/oidc/connection", () => {
 
     expect(res.statusCode).toBe(409);
     expect(res.json()).toEqual({
-      error: "password_required",
+      error: "no_local_password",
       message:
         "an account without a password cannot disconnect its sign-in provider",
     });

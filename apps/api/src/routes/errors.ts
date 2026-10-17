@@ -11,8 +11,7 @@ export type ApiErrorCode =
   | "forbidden"
   | "cannot_change_own_account"
   | "password_not_allowed"
-  | "password_required"
-  | "provider_unavailable"
+  | "no_local_password"
   | "not_found"
   | "internal_error";
 

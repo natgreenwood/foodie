@@ -101,7 +101,11 @@ describe("POST /auth/register", () => {
         secure: true,
         path: "/",
       });
-      expect((await me(tokenFrom(res))).json()).toEqual(res.json());
+      expect((await me(tokenFrom(res))).json()).toEqual({
+        ...res.json<object>(),
+        hasPassword: true,
+        oidc: { connected: false, connectedAt: null },
+      });
     },
   );
 

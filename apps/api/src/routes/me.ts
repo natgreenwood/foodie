@@ -1,11 +1,15 @@
 import type { FastifyPluginCallback } from "fastify";
 import { updateProfile, type Profile } from "../auth/accounts.js";
 import { canonicalLocale, displayNameProblem } from "../auth/credentials.js";
+import { signInMethods, type SignInMethods } from "../auth/oidc.js";
 import { isRecord, type AuthDeps } from "./auth.js";
 import { apiErrorHandler, sendError } from "./errors.js";
 
 // GET /me and PATCH /me: the signed-in user's own profile. Registered behind
 // requireUser, so request.user is always set here.
+//
+// GET also says how the account signs in (hasPassword, oidc), so the
+// profile knows whether to offer connect or disconnect.
 export const meRoutes: FastifyPluginCallback<AuthDeps> = (
   app,
   { db },
@@ -13,9 +17,15 @@ export const meRoutes: FastifyPluginCallback<AuthDeps> = (
 ) => {
   app.setErrorHandler(apiErrorHandler("me"));
 
-  app.get("/me", (request, reply) => {
+  app.get("/me", async (request, reply) => {
     const profile: Profile = request.user!;
-    return reply.send(profile);
+    const methods = await signInMethods(db, profile.id);
+    // Deleted between the session check and here.
+    if (!methods) {
+      return sendError(reply, 401, "unauthenticated", "sign in required");
+    }
+    const me: Profile & SignInMethods = { ...profile, ...methods };
+    return reply.send(me);
   });
 
   // { displayName?, locale? }: at least one. displayName null clears it;
