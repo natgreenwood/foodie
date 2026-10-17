@@ -767,12 +767,41 @@ describe("GET /auth/oidc/callback", () => {
         expect.objectContaining({
           msg: "incoming request",
           req: expect.objectContaining({
-            url: "/auth/oidc/callback",
+            url: "/auth/oidc/%63allback",
           }) as unknown,
         }),
       );
     },
   );
+
+  // NATG-305: the path is logged as sent, so an encoded ?, # or / is neither
+  // cut as a query nor decoded into a different path.
+  dbTest.for([
+    {
+      url: "/auth/oidc/callback%3Fcode=X",
+      path: "/auth/oidc/callback%3Fcode=X",
+    },
+    {
+      url: "/auth/oidc/callback%23code=X?state=S",
+      path: "/auth/oidc/callback%23code=X",
+    },
+    { url: "/admin%2Fai", path: "/admin%2Fai" },
+  ])("logs $url as the raw path $path", async ({ url, path }, { tx }) => {
+    const { request, logLines } = start(tx);
+
+    const res = await request("GET", url);
+
+    expect(res.statusCode).toBe(404);
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        msg: "incoming request",
+        req: expect.objectContaining({ url: path }) as unknown,
+      }),
+    );
+    expect(logLines).toContainEqual(
+      expect.objectContaining({ msg: "route not found", path }),
+    );
+  });
 
   dbTest(
     "answers an unknown path with no query in its body or log",
