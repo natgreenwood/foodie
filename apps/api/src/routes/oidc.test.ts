@@ -120,12 +120,19 @@ function start(
       ...(payload === undefined ? {} : { payload }),
     });
 
-  // POST /auth/oidc/connect as the profile's HTML form submits it.
-  const startConnect = (token?: string): Promise<Response> =>
+  // POST /auth/oidc/connect as the profile's HTML form submits it, from the
+  // web app's origin unless another, or null for none, is given.
+  const startConnect = (
+    token?: string,
+    origin: string | null = REDIRECT_URL.origin,
+  ): Promise<Response> =>
     app.inject({
       method: "POST",
       url: "/auth/oidc/connect",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        ...(origin === null ? {} : { origin }),
+      },
       payload: "",
       cookies: token ? { [SESSION_COOKIE]: token } : {},
     });
@@ -1140,7 +1147,10 @@ describe("admission limits on starting a trip", () => {
       const connect = await app.inject({
         method: "POST",
         url: "/auth/oidc/connect",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          origin: REDIRECT_URL.origin,
+        },
         payload: "",
         cookies: { [SESSION_COOKIE]: cook.token },
         remoteAddress: "2001:db8:1:2::2",
@@ -1467,6 +1477,90 @@ describe("connecting an identity from the profile", () => {
       expect(res.statusCode).toBe(302);
       expect(res.headers.location).toBe("/profile?oidc_error=provider_error");
       expect(hasCookie(res, OIDC_COOKIE)).toBe(false);
+    },
+  );
+});
+
+describe("the trusted origin for POST /auth/oidc/connect", () => {
+  const untrustedOrigin = {
+    error: "untrusted_origin",
+    message: "connect must be started from the app",
+  };
+  const tripCount = async (tx: TestTransaction) =>
+    (await tx.select({ id: oidcLogin.id }).from(oidcLogin)).length;
+
+  dbTest.for([
+    ["missing", null],
+    ["missing", ""],
+    ["null", "null"],
+    ["malformed", "not an origin"],
+    ["malformed", "localhost:5173"],
+    ["malformed", `${REDIRECT_URL.origin}/`],
+    ["malformed", `${REDIRECT_URL.origin}/profile`],
+    ["untrusted", "https://localhost:5173"],
+    ["untrusted", "http://localhost:5174"],
+    ["untrusted", "http://localhost"],
+    ["untrusted", "http://evil.localhost:5173"],
+    ["untrusted", "http://localhost.evil.test:5173"],
+  ] as const)(
+    "answers 403 to a %s Origin (%j) before recording a trip or contacting the provider",
+    async ([problem, origin], { tx }) => {
+      const before = mock.requests.length;
+      const { startConnect, localAccount, logLines } = start(
+        tx,
+        // A fresh provider, so a start would have to fetch discovery, and
+        // one start a minute, so the refusal's count against it shows.
+        provider(mock.issuer, "Home SSO", { startsPerMinute: 1 }),
+      );
+      const cook = await localAccount();
+      const trips = await tripCount(tx);
+
+      const res = await startConnect(cook.token, origin);
+
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(untrustedOrigin);
+      expect(hasCookie(res, OIDC_COOKIE)).toBe(false);
+      expect(await tripCount(tx)).toBe(trips);
+      expect(mock.requests.slice(before)).toEqual([]);
+      expect(
+        logLines.filter((l) => l.msg === "auth: oidc start refused"),
+      ).toEqual([
+        expect.objectContaining({
+          level: 40,
+          reason: "untrusted_origin",
+          problem,
+          origin: origin ?? null,
+        }),
+      ]);
+      // The per-client limit counts the refused request like any other, so
+      // the client's one start this minute is used up.
+      const next = await startConnect(cook.token);
+      expect(next.statusCode).toBe(429);
+      expect(next.json()).toMatchObject({ error: "rate_limited" });
+      expect(await tripCount(tx)).toBe(trips);
+    },
+  );
+
+  dbTest(
+    "admits the redirect URL's origin, and the start route needs none",
+    async ({ tx }) => {
+      const { request, startConnect, localAccount } = start(tx);
+      const cook = await localAccount();
+
+      expect((await startConnect(cook.token)).statusCode).toBe(302);
+      expect((await request("GET", "/auth/oidc/start")).statusCode).toBe(302);
+    },
+  );
+
+  dbTest(
+    "answers 401 signed out and 404 with OIDC off, whatever the Origin",
+    async ({ tx }) => {
+      expect((await start(tx).startConnect(undefined, null)).statusCode).toBe(
+        401,
+      );
+      const off = start(tx, null);
+      const cook = await off.localAccount();
+      expect((await off.startConnect(cook.token, null)).statusCode).toBe(404);
     },
   );
 });

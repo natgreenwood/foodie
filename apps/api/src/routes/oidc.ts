@@ -195,9 +195,28 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   // provider, and the callback lands back on /profile. Another site cannot
   // start it for a signed-in user because the session cookie is
   // SameSite=Lax, so a cross-site form POST arrives signed out; being a POST
-  // alone would not stop it.
+  // alone would not stop it. SameSite does not tell a sibling origin on the
+  // same site from the web app, so the request must also come from the
+  // trusted origin: 403 untrusted_origin otherwise, before a trip is
+  // recorded or the provider contacted. A refused request still counts
+  // against the per-client limit, which counts every request to the route
+  // before the session check and this guard run.
   app.post("/auth/oidc/connect", limited, async (request, reply) => {
     if (!oidc) return notConfigured(reply);
+    const origin = request.headers.origin;
+    const problem = originProblem(origin, oidc.trustedOrigin);
+    if (problem) {
+      request.log.warn(
+        { reason: "untrusted_origin", problem, origin: origin ?? null },
+        "auth: oidc start refused",
+      );
+      return sendError(
+        reply,
+        403,
+        "untrusted_origin",
+        "connect must be started from the app",
+      );
+    }
     const trip = await beginTrip(request, reply, deps, oidc, request.user!.id);
     if (trip === "rate_limited") return rateLimited(reply);
     if (trip === "provider_error") {
@@ -227,6 +246,26 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
 
   done();
 };
+
+// Why a request's Origin header is not the trusted origin, or null when it
+// is: the same scheme, host and port, compared exactly. The trusted origin
+// is the redirect URL's, which assumes the browser reaches the api through
+// the web app's /api/ proxy (vite's API_PROXY_TARGET, nginx in the image),
+// so the callback registered at the provider is on the public UI origin.
+// No Referer fallback (NATG-300): current browsers send Origin on a form
+// POST, and a request without one is refused.
+function originProblem(
+  origin: string | undefined,
+  trusted: string,
+): "missing" | "null" | "malformed" | "untrusted" | null {
+  if (origin === undefined || origin === "") return "missing";
+  if (origin === "null") return "null";
+  if (origin === trusted) return null;
+  // A browser sends the serialized origin; anything else is not one.
+  const parsed = URL.parse(origin);
+  if (parsed?.origin !== origin) return "malformed";
+  return "untrusted";
+}
 
 // 429 for a start over either admission limit. A JSON body, as for any
 // other refusal: the page that sent the browser here shows it as is.

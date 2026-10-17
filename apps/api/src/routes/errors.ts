@@ -10,6 +10,7 @@ export type ApiErrorCode =
   | "email_taken"
   | "unauthenticated"
   | "forbidden"
+  | "untrusted_origin"
   | "cannot_change_own_account"
   | "password_not_allowed"
   | "no_local_password"
