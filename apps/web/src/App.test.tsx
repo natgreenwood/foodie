@@ -843,7 +843,10 @@ describe("Connected identities", () => {
     ).toBe(false);
   });
 
-  it.each(providers)(
+  it.each([
+    ["Household SSO", "Household SSO"],
+    [null, "Your identity provider"],
+  ] as const)(
     "offers no disconnect to an account with no password (named %s)",
     async (displayName, name) => {
       stubApi({
@@ -855,7 +858,7 @@ describe("Connected identities", () => {
 
       expect(
         await screen.findByText(
-          `This account was created through ${name} and has no password, so it can't be disconnected.`,
+          `${name} is the only way to sign in to this account, so it can't be disconnected.`,
         ),
       ).toBeDefined();
       expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
@@ -1117,7 +1120,7 @@ describe("Connected identities", () => {
 
       expect(
         rowFor("Household SSO").getByText(
-          "This account was created through Household SSO and has no password, so it can't be disconnected.",
+          "Household SSO is the only way to sign in to this account, so it can't be disconnected.",
         ),
       ).toBeDefined();
       expect(
@@ -1199,19 +1202,40 @@ describe("Connected identities", () => {
       },
     );
 
-    it("names the provider a connect has just succeeded with", async () => {
+    it.each([
+      ["google", "Google"],
+      [null, "your identity provider"],
+      ["apple", "your identity provider"],
+    ])(
+      "names the provider a connect has just succeeded with (oidc_provider %s)",
+      async (id, name) => {
+        stubApi({
+          "GET /api/me": rows(true, false, true),
+          "GET /api/auth/oidc/config": config,
+        });
+
+        visit(`/profile?oidc=connected${id ? `&oidc_provider=${id}` : ""}`);
+
+        expect(
+          (
+            await screen.findByText(
+              `Connected ${name}. You can now sign in with it.`,
+            )
+          ).getAttribute("role"),
+        ).toBe("status");
+      },
+    );
+
+    it("says nothing of a connect to a listed provider that is not connected", async () => {
       stubApi({
         "GET /api/me": rows(true, false, true),
         "GET /api/auth/oidc/config": config,
       });
 
-      visit("/profile?oidc=connected&oidc_provider=google");
+      visit("/profile?oidc=connected&oidc_provider=generic");
 
-      expect(
-        await screen.findByText(
-          "Connected Google. You can now sign in with it.",
-        ),
-      ).toBeDefined();
+      await screen.findByRole("button", { name: "Connect Household SSO" });
+      expect(screen.queryByText(/You can now sign in with it/)).toBeNull();
     });
   });
 });

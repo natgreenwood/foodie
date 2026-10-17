@@ -50,7 +50,6 @@ function Identities({
   // with ?oidc_provider=<id> saying which provider it was.
   const refusedCode = params.get("oidc_error");
   const justConnected = params.get("oidc") === "connected";
-  const returnedFrom = params.get("oidc_provider");
   const returnedName = returningProviderName(params, providers);
   // That outcome is news only until the user does something here.
   const [outcomeCurrent, setOutcomeCurrent] = useState(true);
@@ -91,14 +90,19 @@ function Identities({
     loaded && refusedCode && outcomeCurrent
       ? connectRefusal(refusedCode, returnedName)
       : null;
-  // A connect that names no provider, or one not listed, counts as done
-  // when anything is connected.
+  // A connect that names a listed provider is done when that one is
+  // connected; one that names none, or one not listed, when anything is.
+  const returnedFrom =
+    load.kind === "loaded"
+      ? load.connection.providers.find(
+          (row) => row.id === params.get("oidc_provider"),
+        )
+      : undefined;
   const connectedNow =
     loaded &&
-    load.connection.providers.some(
-      (row) =>
-        row.connected && (returnedFrom === null || row.id === returnedFrom),
-    );
+    (returnedFrom
+      ? returnedFrom.connected
+      : load.connection.providers.some((row) => row.connected));
 
   useEffect(() => {
     if (refusal) refusalAlert.current?.focus();
@@ -291,8 +295,8 @@ function Identity({
           <p className="identity-detail">{email}</p>
           {!canDisconnect && (
             <p className="hint">
-              This account was created through {name} and has no password, so it
-              can't be disconnected.
+              {capitalised(name)} is the only way to sign in to this account, so
+              it can't be disconnected.
             </p>
           )}
           {canDisconnect && action.kind !== "confirming" && (
@@ -364,7 +368,7 @@ function Identity({
   );
 }
 
-// The one line that starts with a provider's name, which may be the
+// For the lines that start with a provider's name, which may be the
 // lower-case generic one.
 function capitalised(name: string): string {
   return name.charAt(0).toUpperCase() + name.slice(1);
