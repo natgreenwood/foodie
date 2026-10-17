@@ -2,36 +2,64 @@ import { useEffect, useState } from "react";
 import { AuthError, call, errorFrom, reportUnauthenticated } from "./auth";
 import { navigate } from "./router";
 
-// Mirrors the "Contract for NATG-288" in the api's OIDC routes
-// (apps/api/src/routes/oidc.ts and me.ts).
-export interface OidcConfig {
-  enabled: boolean;
+// Mirrors the NATG-308 contract in the api's OIDC routes
+// (apps/api/src/routes/oidc.ts and me.ts): one entry per configured
+// provider, generic then google.
+export interface OidcProvider {
+  id: string;
   displayName: string | null;
 }
 
-export interface OidcConnection {
+export interface OidcConfig {
+  providers: OidcProvider[];
+}
+
+export interface ProviderConnection extends OidcProvider {
   connected: boolean;
+}
+
+export interface OidcConnection {
+  providers: ProviderConnection[];
   hasPassword: boolean;
 }
 
 // A browser navigation, not a fetch: it answers with a redirect to the
 // provider, which comes back to / signed in or to /sign-in?oidc_error=.
-export const OIDC_START_URL = "/api/auth/oidc/start";
+export function oidcStartUrl(id: string): string {
+  return `/api/auth/oidc/${encodeURIComponent(id)}/start`;
+}
 
 // A plain form POST, not a fetch, for the same reason: it answers with a
 // redirect to the provider, which comes back to /profile?oidc=connected or
 // /profile?oidc_error=.
-export const OIDC_CONNECT_URL = "/api/auth/oidc/connect";
+export function oidcConnectUrl(id: string): string {
+  return `/api/auth/oidc/${encodeURIComponent(id)}/connect`;
+}
 
-// The provider is only ever named by its configured display name, or
-// generically without one. Either goes mid-sentence, so no line starts with it.
-export function oidcName(config: OidcConfig): string {
-  return config.displayName ?? "your identity provider";
+const FALLBACK_NAME = "your identity provider";
+
+// A provider is only ever named by its configured display name, or
+// generically without one. Either goes mid-sentence; the one line that
+// starts with it capitalises it there.
+export function oidcName(provider: OidcProvider): string {
+  return provider.displayName ?? FALLBACK_NAME;
 }
 
 // The same name standing alone, as a label.
-export function oidcLabel(config: OidcConfig): string {
-  return config.displayName ?? "Identity provider";
+export function oidcLabel(provider: OidcProvider): string {
+  return provider.displayName ?? "Identity provider";
+}
+
+// The provider an ?oidc_error= came back from, which the api names with
+// ?oidc_provider=<id>. Without it, or with an id not configured, the
+// generic name stands in.
+export function returningProviderName(
+  params: URLSearchParams,
+  providers: OidcProvider[],
+): string {
+  const id = params.get("oidc_provider");
+  const provider = providers.find((entry) => entry.id === id);
+  return provider ? oidcName(provider) : FALLBACK_NAME;
 }
 
 async function json(res: Response): Promise<unknown> {
@@ -46,12 +74,25 @@ async function signedInJson(res: Response): Promise<unknown> {
   return json(res);
 }
 
+function isProvider(entry: unknown): entry is OidcProvider {
+  if (typeof entry !== "object" || entry === null) return false;
+  const { id, displayName } = entry as Record<string, unknown>;
+  return (
+    typeof id === "string" &&
+    (displayName === null || typeof displayName === "string")
+  );
+}
+
 function isConfig(body: unknown): body is OidcConfig {
   if (typeof body !== "object" || body === null) return false;
-  const { enabled, displayName } = body as Record<string, unknown>;
+  const { providers } = body as Record<string, unknown>;
+  return Array.isArray(providers) && providers.every(isProvider);
+}
+
+function isConnection(entry: unknown): entry is ProviderConnection {
   return (
-    typeof enabled === "boolean" &&
-    (displayName === null || typeof displayName === "string")
+    isProvider(entry) &&
+    typeof (entry as { connected?: unknown }).connected === "boolean"
   );
 }
 
@@ -61,12 +102,12 @@ export async function fetchOidcConfig(
   const body = await json(
     await call("GET", "/auth/oidc/config", undefined, signal),
   );
-  if (isConfig(body)) return body;
+  if (isConfig(body)) return { providers: body.providers };
   throw new AuthError(null, "its response was not an OIDC config");
 }
 
-// Whether OIDC is on, and what to call it; null until the api has answered.
-// A failed answer counts as off, so the pages stay as they are without it.
+// The configured providers, none when OIDC is off; null until the api has
+// answered. A failed answer counts as none, so the pages stay as they are.
 export function useOidcConfig(): OidcConfig | null {
   const [config, setConfig] = useState<OidcConfig | null>(null);
   useEffect(() => {
@@ -74,7 +115,7 @@ export function useOidcConfig(): OidcConfig | null {
     fetchOidcConfig(controller.signal).then(setConfig, (err: unknown) => {
       if (controller.signal.aborted) return;
       console.error("loading the OIDC config failed", err);
-      setConfig({ enabled: false, displayName: null });
+      setConfig({ providers: [] });
     });
     return () => controller.abort();
   }, []);
@@ -114,25 +155,33 @@ export async function fetchOidcConnection(
   const body = await signedInJson(await call("GET", "/me", undefined, signal));
   if (typeof body === "object" && body !== null) {
     const { hasPassword, oidc } = body as Record<string, unknown>;
-    const connected =
+    const providers =
       typeof oidc === "object" && oidc !== null
-        ? (oidc as Record<string, unknown>).connected
+        ? (oidc as Record<string, unknown>).providers
         : undefined;
-    if (typeof connected === "boolean" && typeof hasPassword === "boolean") {
-      return { connected, hasPassword };
+    if (
+      Array.isArray(providers) &&
+      providers.every(isConnection) &&
+      typeof hasPassword === "boolean"
+    ) {
+      return { providers, hasPassword };
     }
   }
   throw new AuthError(null, "its response did not say how you sign in");
 }
 
-// 409 no_local_password when the account has no password to fall back on.
-export async function disconnectOidc(): Promise<void> {
-  const res = await call("DELETE", "/auth/oidc/connection");
+// 409 no_other_sign_in when the account would be left with no way to sign in.
+export async function disconnectOidc(id: string): Promise<void> {
+  const res = await call(
+    "DELETE",
+    `/auth/oidc/${encodeURIComponent(id)}/connection`,
+  );
   if (res.status !== 204) await signedInJson(res);
 }
 
 // The words for an ?oidc_error= the api redirected back with. The api sends
-// only a code, so the copy lives here; an unknown code gets a general line.
+// only a code and the provider's id, so the copy lives here; an unknown code
+// gets a general line.
 // Each line has to be true for every case the api folds into its code.
 
 // A sign-in can be refused with email_unverified, account_disabled,

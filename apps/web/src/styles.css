@@ -1,3 +1,18 @@
+/* Only for the Google sign-in button, which its branding guidelines set in
+   Roboto Medium. Served from here, so the sign-in page asks Google for
+   nothing. Latin subset; OFL licence beside the file. */
+@font-face {
+  font-family: Roboto;
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/roboto-latin-500-normal.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   font-family: system-ui, sans-serif;
   line-height: 1.5;
@@ -207,6 +222,67 @@ main:focus {
   text-align: left;
 }
 
+.sso-providers {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sso-providers li {
+  display: grid;
+}
+
+/* Google's sign-in button: light theme, rectangular, standard. The colours
+   are Google's brand values, not the app's. */
+.google-signin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid #747775;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #1f1f1f;
+  font:
+    500 14px/20px Roboto,
+    Arial,
+    sans-serif;
+  letter-spacing: 0.25px;
+  cursor: pointer;
+}
+
+.google-signin svg {
+  flex: none;
+}
+
+.google-signin:hover {
+  background-image: linear-gradient(rgb(48 48 48 / 8%), rgb(48 48 48 / 8%));
+}
+
+.google-signin:active {
+  background-image: linear-gradient(rgb(48 48 48 / 12%), rgb(48 48 48 / 12%));
+}
+
+.google-signin:focus-visible {
+  outline: 2px solid #005fcc;
+  outline-offset: 2px;
+}
+
+.google-signin:disabled {
+  border-color: rgb(31 31 31 / 12%);
+  background-image: none;
+  color: rgb(31 31 31 / 38%);
+  cursor: default;
+}
+
+.google-signin:disabled svg {
+  opacity: 0.38;
+}
+
 .sso-divider {
   display: flex;
   align-items: center;
@@ -235,6 +311,47 @@ main:focus {
 
 .identities .hint {
   margin-bottom: 0.75rem;
+}
+
+/* Each row stacks name, detail and action at every width, so a long
+   provider name wraps rather than squeezing the email. */
+.identity-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.identity {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem 0;
+}
+
+.identity + .identity {
+  border-top: 1px solid #d0d7de;
+}
+
+.identity p,
+.identity form,
+.identity div.health {
+  margin: 0;
+}
+
+.identity .hint {
+  margin-bottom: 0;
+}
+
+.identity-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.identity-detail {
+  overflow-wrap: anywhere;
+}
+
+.identity > button {
+  justify-self: start;
 }
 
 /* Alerts that take focus when a page loads with them, as main does. */
