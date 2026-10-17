@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AuthError, updateProfile, type Profile } from "./auth";
 import { AuthErrorMessage } from "./AuthErrorMessage";
+import { ConnectedIdentities } from "./ConnectedIdentities";
 import { DISPLAY_NAME_MAX_LENGTH } from "./Register";
 import { useSession } from "./session";
 
@@ -106,6 +107,8 @@ export function ProfilePage({ user }: { user: Profile }) {
         </p>
       )}
       {state.kind === "error" && <AuthErrorMessage error={state.error} />}
+
+      <ConnectedIdentities email={user.email} />
     </section>
   );
 }
