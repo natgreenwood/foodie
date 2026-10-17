@@ -937,12 +937,11 @@ describe("admission limits on starting a trip", () => {
       expect(refused.json()).toEqual(rateLimited);
       expect(hasCookie(refused, OIDC_COOKIE)).toBe(false);
       expect(await tripCount(tx)).toBe(trips);
-      expect(
-        logLines.filter((l) => l.msg === "auth: oidc start refused"),
-      ).toEqual([
+      // @fastify/rate-limit's per-route limit refuses it, before the handler.
+      expect(logLines.filter((l) => l.msg === "oidc: rate limited")).toEqual([
         expect.objectContaining({
           level: 40,
-          reason: "client_starts",
+          route: "GET /auth/oidc/start",
           key: "127.0.0.1",
         }),
       ]);
@@ -959,7 +958,7 @@ describe("admission limits on starting a trip", () => {
   dbTest(
     "counts sign-in and connect starts together, and refuses connect the same way",
     async ({ tx }) => {
-      const { request, startConnect, localAccount } = start(
+      const { request, startConnect, localAccount, logLines } = start(
         tx,
         provider(mock.issuer, "Home SSO", { startsPerMinute: 3 }),
       );
@@ -975,8 +974,35 @@ describe("admission limits on starting a trip", () => {
       expect(refused.json()).toEqual(rateLimited);
       expect(hasCookie(refused, OIDC_COOKIE)).toBe(false);
       expect(await tripCount(tx)).toBe(trips);
+      // Each route is under its own limit; the shared start window refuses.
+      expect(
+        logLines.filter((l) => l.msg === "auth: oidc start refused"),
+      ).toEqual([
+        expect.objectContaining({ reason: "client_starts", key: "127.0.0.1" }),
+      ]);
     },
   );
+
+  dbTest("refuses the callback past the per-client limit", async ({ tx }) => {
+    const { request, logLines } = start(
+      tx,
+      provider(mock.issuer, "Home SSO", { startsPerMinute: 3 }),
+    );
+    for (let i = 0; i < 3; i++) {
+      expect(
+        (await request("GET", "/auth/oidc/callback?code=c&state=s")).headers
+          .location,
+      ).toBe("/sign-in?oidc_error=provider_error");
+    }
+
+    const refused = await request("GET", "/auth/oidc/callback?code=c&state=s");
+
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toEqual(rateLimited);
+    expect(logLines.filter((l) => l.msg === "oidc: rate limited")).toEqual([
+      expect.objectContaining({ route: "GET /auth/oidc/callback" }),
+    ]);
+  });
 
   dbTest(
     "refuses a start once the trips in progress reach the bound, before contacting the provider",

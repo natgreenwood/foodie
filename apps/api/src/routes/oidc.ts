@@ -18,7 +18,7 @@ import type { OidcClaims, OidcProvider } from "../auth/oidc-provider.js";
 import { slidingWindow, type SlidingWindow } from "../auth/sliding-window.js";
 import { describeError } from "../db/errors.js";
 import { SESSION_COOKIE, startSession, type AuthDeps } from "./auth.js";
-import { apiErrorHandler, sendError } from "./errors.js";
+import { apiErrorHandler, RateLimitedError, sendError } from "./errors.js";
 
 export interface OidcDeps extends AuthDeps {
   // The configured provider; absent or null when OIDC sign-in is off.
@@ -41,6 +41,20 @@ export function oidcStartWindow(oidc: OidcProvider | null | undefined) {
     windowMs: 60_000,
     maxKeys: OIDC_START_KEYS,
   });
+}
+
+const RATE_LIMITED_MESSAGE = "too many sign-in attempts; try again in a minute";
+
+// @fastify/rate-limit's limit on start, callback and connect: per client
+// address, a fixed minute per route. Before the handler, so a refused start
+// writes nothing. The start window above stays the sliding count that
+// sign-in and connect share; this one also covers the callback.
+function perClientLimit(oidc: OidcProvider | null | undefined) {
+  return {
+    max: oidc?.startsPerMinute ?? 10,
+    timeWindow: 60_000,
+    errorResponseBuilder: () => new RateLimitedError(RATE_LIMITED_MESSAGE),
+  };
 }
 
 export interface OidcConfigResponse {
@@ -85,6 +99,7 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   done,
 ) => {
   const { db, oidc } = deps;
+  const limited = { config: { rateLimit: perClientLimit(oidc) } };
   app.setErrorHandler(apiErrorHandler("oidc"));
 
   app.get("/auth/oidc/config", (): OidcConfigResponse => {
@@ -92,7 +107,7 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   });
 
   // Sends the browser to the provider to sign in.
-  app.get("/auth/oidc/start", async (request, reply) => {
+  app.get("/auth/oidc/start", limited, async (request, reply) => {
     if (!oidc) return notConfigured(reply);
     const trip = await beginTrip(request, reply, deps, oidc, null);
     if (trip === "rate_limited") return rateLimited(reply);
@@ -105,7 +120,7 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   // Where the provider sends the browser back, for a sign-in or a connect.
   // The trip is used up whatever happens, so a repeated callback answers
   // provider_error and changes nothing.
-  app.get("/auth/oidc/callback", async (request, reply) => {
+  app.get("/auth/oidc/callback", limited, async (request, reply) => {
     if (!oidc) return notConfigured(reply);
     const token = request.cookies[OIDC_COOKIE];
     reply.clearCookie(OIDC_COOKIE, { path: oidc.callbackPath });
@@ -166,6 +181,7 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   done,
 ) => {
   const { db, oidc } = deps;
+  const limited = { config: { rateLimit: perClientLimit(oidc) } };
   app.setErrorHandler(apiErrorHandler("oidc"));
   // POST /auth/oidc/connect is submitted by a plain HTML form, which sends
   // an empty urlencoded body. Nothing is read from it; this scope only.
@@ -179,7 +195,7 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   // start it for a signed-in user because the session cookie is
   // SameSite=Lax, so a cross-site form POST arrives signed out; being a POST
   // alone would not stop it.
-  app.post("/auth/oidc/connect", async (request, reply) => {
+  app.post("/auth/oidc/connect", limited, async (request, reply) => {
     if (!oidc) return notConfigured(reply);
     const trip = await beginTrip(request, reply, deps, oidc, request.user!.id);
     if (trip === "rate_limited") return rateLimited(reply);
@@ -214,12 +230,7 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
 // 429 for a start over either admission limit. A JSON body, as for any
 // other refusal: the page that sent the browser here shows it as is.
 function rateLimited(reply: FastifyReply) {
-  return sendError(
-    reply,
-    429,
-    "rate_limited",
-    "too many sign-in attempts; try again in a minute",
-  );
+  return sendError(reply, 429, "rate_limited", RATE_LIMITED_MESSAGE);
 }
 
 // Records a trip to the provider and sets its cookie; the URL to send the

@@ -1,3 +1,4 @@
+import rateLimit from "@fastify/rate-limit";
 import Fastify, {
   type FastifyReply,
   type FastifyRequest,
@@ -76,6 +77,13 @@ export function buildApp(
       "route not found",
     );
     return sendError(reply, 404, "not_found", "route not found");
+  });
+  // Limits only the routes that set config.rateLimit, per client address:
+  // request.ip, which follows TRUST_PROXY. A refusal is a RateLimitedError,
+  // which the routes' apiErrorHandler answers as 429 rate_limited.
+  app.register(rateLimit, {
+    global: false,
+    keyGenerator: (request) => request.ip,
   });
   registerSessionSupport(app);
   // Sign-in and connect starts share one count per client.

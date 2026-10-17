@@ -30,6 +30,13 @@ export function pathForLog(url: string): string {
   }
 }
 
+// Thrown by @fastify/rate-limit's errorResponseBuilder for a client over a
+// route's limit; apiErrorHandler answers it as 429 rate_limited with this
+// message, which is always ours.
+export class RateLimitedError extends Error {
+  readonly statusCode = 429;
+}
+
 export function sendError(
   reply: FastifyReply,
   status: number,
@@ -61,6 +68,10 @@ export function apiErrorHandler(module: string) {
       err.code === "FST_ERR_CTP_EMPTY_JSON_BODY"
     ) {
       return sendError(reply, 400, "invalid_request", "body must be JSON");
+    }
+    if (err instanceof RateLimitedError) {
+      request.log.warn({ route, key: request.ip }, `${module}: rate limited`);
+      return sendError(reply, 429, "rate_limited", err.message);
     }
     // Fastify's own 4xx errors (a body over the limit, an unsupported content
     // type) are the client's fault: keep the status, and log below error so
