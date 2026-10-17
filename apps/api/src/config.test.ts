@@ -194,7 +194,46 @@ describe("loadConfig", () => {
       clientSecret: "not-a-real-secret",
       redirectUrl: new URL("https://foodie.example.com/api/auth/oidc/callback"),
       displayName: "Home SSO",
+      maxPendingLogins: 1000,
+      startsPerMinute: 10,
     });
+  });
+
+  it("reads the OIDC start limits when set", () => {
+    const config = loadConfig({
+      DATABASE_URL: databaseUrl,
+      SETTINGS_ENCRYPTION_KEY: settingsKey,
+      ...oidcEnv,
+      OIDC_MAX_PENDING_LOGINS: "250",
+      OIDC_STARTS_PER_MINUTE: " 3 ",
+    });
+    expect(config.oidc).toMatchObject({
+      maxPendingLogins: 250,
+      startsPerMinute: 3,
+    });
+  });
+
+  it.each([
+    ["OIDC_MAX_PENDING_LOGINS", "0"],
+    ["OIDC_MAX_PENDING_LOGINS", "-5"],
+    ["OIDC_MAX_PENDING_LOGINS", "1.5"],
+    ["OIDC_STARTS_PER_MINUTE", "ten"],
+    ["OIDC_STARTS_PER_MINUTE", "1e3"],
+    ["OIDC_STARTS_PER_MINUTE", "99999999999999999999"],
+  ])("refuses %s=%s", (name, value) => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: databaseUrl,
+        SETTINGS_ENCRYPTION_KEY: settingsKey,
+        ...oidcEnv,
+        [name]: value,
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        name: "ConfigError",
+        message: `${name} must be a whole number of at least 1, got "${value}"`,
+      }) as Error,
+    );
   });
 
   it("leaves OIDC off when none of its variables are set, or all are empty", () => {

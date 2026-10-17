@@ -14,7 +14,12 @@ import {
 import { healthRoutes, type HealthDeps } from "./routes/health.js";
 import { importRoutes, type ImportDeps } from "./routes/imports.js";
 import { meRoutes } from "./routes/me.js";
-import { oidcAccountRoutes, oidcRoutes, type OidcDeps } from "./routes/oidc.js";
+import {
+  oidcAccountRoutes,
+  oidcRoutes,
+  oidcStartWindow,
+  type OidcDeps,
+} from "./routes/oidc.js";
 import { recipeRoutes } from "./routes/recipes.js";
 import { pathForLog, sendError } from "./routes/errors.js";
 
@@ -73,15 +78,17 @@ export function buildApp(
     return sendError(reply, 404, "not_found", "route not found");
   });
   registerSessionSupport(app);
+  // Sign-in and connect starts share one count per client.
+  const oidcDeps = { ...deps, oidcStarts: oidcStartWindow(deps.oidc) };
   app.register(healthRoutes, deps);
   app.register(authRoutes, deps);
-  app.register(oidcRoutes, deps);
+  app.register(oidcRoutes, oidcDeps);
   // Every route that needs a signed-in user is registered in here, behind
   // requireUser, which answers 401 or sets request.user.
   app.register((signedIn, _opts, done) => {
     signedIn.addHook("onRequest", seams.requireUser ?? requireUser(deps));
     signedIn.register(meRoutes, deps);
-    signedIn.register(oidcAccountRoutes, deps);
+    signedIn.register(oidcAccountRoutes, oidcDeps);
     signedIn.register(recipeRoutes, deps);
     signedIn.register(importRoutes, deps);
     // Admin-only routes: requireAdmin answers 403 to everyone else.

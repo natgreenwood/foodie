@@ -13,6 +13,10 @@ import {
 import { buildApp, logSerializers } from "../app.js";
 import { createUser } from "../auth/accounts.js";
 import { oidcProvider, type OidcProvider } from "../auth/oidc-provider.js";
+import {
+  deleteExpiredOidcLogins,
+  OIDC_LOGIN_CLEANUP_BATCH,
+} from "../auth/oidc.js";
 import { oidcIdentity, oidcLogin, user } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import {
@@ -37,6 +41,7 @@ afterAll(() => mock.close());
 function provider(
   issuerUrl = mock.issuer,
   displayName: string | null = "Home SSO",
+  limits: { maxPendingLogins?: number; startsPerMinute?: number } = {},
 ): OidcProvider {
   return oidcProvider({
     issuerUrl,
@@ -44,6 +49,8 @@ function provider(
     clientSecret: mock.clientSecret,
     redirectUrl: REDIRECT_URL,
     displayName,
+    maxPendingLogins: limits.maxPendingLogins ?? 1000,
+    startsPerMinute: limits.startsPerMinute ?? 10,
   });
 }
 
@@ -847,6 +854,164 @@ describe("ID token signature", () => {
 
       expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
+    },
+  );
+});
+
+// SEC-1: starting a trip is bounded per client and across all clients.
+describe("admission limits on starting a trip", () => {
+  const rateLimited = {
+    error: "rate_limited",
+    message: "too many sign-in attempts; try again in a minute",
+  };
+  const tripCount = async (tx: TestTransaction) =>
+    (await tx.select({ id: oidcLogin.id }).from(oidcLogin)).length;
+
+  dbTest(
+    "admits ten starts a minute from one client, refuses the eleventh, and admits again after the minute",
+    async ({ tx }) => {
+      const { request, logLines } = start(tx);
+      for (let i = 0; i < 10; i++) {
+        expect((await request("GET", "/auth/oidc/start")).statusCode).toBe(302);
+      }
+      const trips = await tripCount(tx);
+      expect(trips).toBe(10);
+
+      const refused = await request("GET", "/auth/oidc/start");
+
+      expect(refused.statusCode).toBe(429);
+      expect(refused.json()).toEqual(rateLimited);
+      expect(hasCookie(refused, OIDC_COOKIE)).toBe(false);
+      expect(await tripCount(tx)).toBe(trips);
+      expect(
+        logLines.filter((l) => l.msg === "auth: oidc start refused"),
+      ).toEqual([
+        expect.objectContaining({
+          level: 40,
+          reason: "client_starts",
+          key: "127.0.0.1",
+        }),
+      ]);
+
+      const realNow = Date.now.bind(Date);
+      vi.spyOn(Date, "now").mockImplementation(() => realNow() + 61_000);
+      onTestFinished(() => {
+        vi.restoreAllMocks();
+      });
+      expect((await request("GET", "/auth/oidc/start")).statusCode).toBe(302);
+    },
+  );
+
+  dbTest(
+    "counts sign-in and connect starts together, and refuses connect the same way",
+    async ({ tx }) => {
+      const { request, startConnect, localAccount } = start(
+        tx,
+        provider(mock.issuer, "Home SSO", { startsPerMinute: 3 }),
+      );
+      const cook = await localAccount();
+      expect((await request("GET", "/auth/oidc/start")).statusCode).toBe(302);
+      expect((await startConnect(cook.token)).statusCode).toBe(302);
+      expect((await request("GET", "/auth/oidc/start")).statusCode).toBe(302);
+      const trips = await tripCount(tx);
+
+      const refused = await startConnect(cook.token);
+
+      expect(refused.statusCode).toBe(429);
+      expect(refused.json()).toEqual(rateLimited);
+      expect(hasCookie(refused, OIDC_COOKIE)).toBe(false);
+      expect(await tripCount(tx)).toBe(trips);
+    },
+  );
+
+  dbTest(
+    "refuses a start once the trips in progress reach the bound, before contacting the provider",
+    async ({ tx }) => {
+      const before = mock.requests.length;
+      // A fresh provider, so a start would have to fetch discovery.
+      const { request, startConnect, localAccount, logLines } = start(
+        tx,
+        provider(mock.issuer, "Home SSO", { maxPendingLogins: 2 }),
+      );
+      const cook = await localAccount();
+      const inProgress = (n: number) => ({
+        id: `in-progress-${n}-${randomUUID()}`,
+        state: "s",
+        nonce: "n",
+        codeVerifier: "v",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      await tx.insert(oidcLogin).values([inProgress(1), inProgress(2)]);
+      // Expired trips do not count against the bound.
+      await tx.insert(oidcLogin).values({
+        ...inProgress(3),
+        expiresAt: new Date(Date.now() - 1000),
+      });
+
+      for (const res of [
+        await request("GET", "/auth/oidc/start"),
+        await startConnect(cook.token),
+      ]) {
+        expect(res.statusCode).toBe(429);
+        expect(res.json()).toEqual(rateLimited);
+        expect(hasCookie(res, OIDC_COOKIE)).toBe(false);
+      }
+
+      expect(await tripCount(tx)).toBe(2);
+      expect(mock.requests.slice(before)).toEqual([]);
+      expect(
+        logLines.filter((l) => l.msg === "auth: oidc start refused"),
+      ).toEqual([
+        expect.objectContaining({ reason: "pending_logins", key: "127.0.0.1" }),
+        expect.objectContaining({ reason: "pending_logins", key: "127.0.0.1" }),
+      ]);
+    },
+  );
+
+  dbTest(
+    "leaves no trip behind when the provider cannot be reached",
+    async ({ tx }) => {
+      const down = await startMockProvider();
+      await down.close();
+      const { request } = start(tx, provider(down.issuer));
+
+      const res = await request("GET", "/auth/oidc/start");
+
+      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(await tripCount(tx)).toBe(0);
+    },
+  );
+
+  dbTest(
+    "deletes at most a batch of expired trips per call, oldest first",
+    async ({ tx }) => {
+      const expired = Array.from({ length: 250 }, (_, i) => ({
+        id: `expired-${i}-${randomUUID()}`,
+        state: "s",
+        nonce: "n",
+        codeVerifier: "v",
+        expiresAt: new Date(Date.now() - 60_000 - i * 1000),
+      }));
+      await tx.insert(oidcLogin).values(expired);
+
+      expect(await deleteExpiredOidcLogins(tx)).toBe(OIDC_LOGIN_CLEANUP_BATCH);
+      // The 100 oldest went first.
+      const left = await tx.select({ id: oidcLogin.id }).from(oidcLogin);
+      expect(left.map((r) => r.id).sort()).toEqual(
+        expired
+          .slice(0, 250 - OIDC_LOGIN_CLEANUP_BATCH)
+          .map((r) => r.id)
+          .sort(),
+      );
+
+      // A start and a callback each delete one batch too.
+      const { request } = start(tx);
+      await request("GET", "/auth/oidc/start");
+      expect(await tripCount(tx)).toBe(250 - 2 * 100 + 1);
+      await request("GET", "/auth/oidc/callback?code=x&state=y", {
+        [OIDC_COOKIE]: "not-a-trip",
+      });
+      expect(await tripCount(tx)).toBe(1);
     },
   );
 });

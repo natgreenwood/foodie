@@ -176,6 +176,13 @@ and the scopes `openid profile email`. Set all four of these, or none (in
   `http://localhost:5173/api/auth/oidc/callback` in development.
 - `OIDC_DISPLAY_NAME` (optional): the sign-in button's label.
 
+- `OIDC_MAX_PENDING_LOGINS` (optional, default 1000): how many trips to the
+  provider may be in progress at once, across all browsers. Each start
+  records one for up to 10 minutes.
+- `OIDC_STARTS_PER_MINUTE` (optional, default 10): how many sign-in and
+  connect starts one client address may make in any minute, counted
+  together.
+
 With none set, OIDC is off. Setting only some stops the api from starting.
 Both URLs must be `https`, except in development (`NODE_ENV=development`).
 With `bws run`, name the secrets `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`,
@@ -220,6 +227,15 @@ that answer with redirects; the callback lands on `/` signed in, or on
 - `DELETE /auth/oidc/connection`: signed in. Disconnects the identity, 204;
   409 `no_local_password` for an account with no password, which would have
   no way left to sign in.
+- A start (`start` or `connect`) over either limit answers 429
+  `{ error: "rate_limited", message }`, records nothing, does not contact
+  the provider and logs `auth: oidc start refused` with the reason and the
+  client address. The per-client count is kept in memory by each api
+  process, so it restarts with the api and two processes count separately.
+  The client address is `request.ip`: behind a proxy that is the proxy's
+  address, and every client shares one count, until the api can be told
+  to trust that proxy (`TRUST_PROXY`, NATG-281, not merged yet). The bound on trips in progress is kept in the
+  database and holds across processes.
 - `GET /me` and `PATCH /me` both say how the account signs in:
   `hasPassword`, and `oidc: { connected, connectedAt }`.
 

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, eq, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, sql } from "drizzle-orm";
 import { oidcIdentity, oidcLogin, user } from "../db/schema.js";
 import {
   byEmail,
@@ -14,31 +14,78 @@ import type { OidcChecks, OidcClaims } from "./oidc-provider.js";
 // How long a browser has to come back from the provider.
 export const OIDC_LOGIN_TTL_MS = 10 * 60 * 1000;
 
-// Records a trip to the provider and returns the token for its cookie. For
-// a signed-in user connecting an identity, userId is theirs; null for a
-// sign-in. Expired trips are deleted on the way.
+// The most expired trips one start or callback deletes, so no caller can
+// make the api work through the whole table.
+export const OIDC_LOGIN_CLEANUP_BATCH = 100;
+
+// The pg_advisory_xact_lock key that serialises starts, so two cannot both
+// count the trips in progress below the bound and both insert ("oidc").
+const OIDC_LOGIN_LOCK = 0x6f696463;
+
+// Deletes up to OIDC_LOGIN_CLEANUP_BATCH expired trips, oldest first, and
+// returns how many it deleted.
+export async function deleteExpiredOidcLogins(db: Db): Promise<number> {
+  const expired = db
+    .select({ id: oidcLogin.id })
+    .from(oidcLogin)
+    .where(lte(oidcLogin.expiresAt, sql`now()`))
+    .orderBy(oidcLogin.expiresAt)
+    .limit(OIDC_LOGIN_CLEANUP_BATCH);
+  const deleted = await db
+    .delete(oidcLogin)
+    .where(inArray(oidcLogin.id, expired))
+    .returning({ id: oidcLogin.id });
+  return deleted.length;
+}
+
+// Records a trip to the provider and returns the token for its cookie, or
+// null when maxPending trips are in progress already. For a signed-in user
+// connecting an identity, userId is theirs; null for a sign-in. Some expired
+// trips are deleted on the way.
 export async function startOidcLogin(
   db: Db,
   checks: OidcChecks,
   userId: number | null,
+  maxPending: number,
   now = new Date(),
-): Promise<{ token: string; expiresAt: Date }> {
+): Promise<{ token: string; expiresAt: Date } | null> {
   const token = randomBytes(32).toString("base64url");
   const expiresAt = new Date(now.getTime() + OIDC_LOGIN_TTL_MS);
-  await db.delete(oidcLogin).where(lte(oidcLogin.expiresAt, sql`now()`));
-  await db.insert(oidcLogin).values({
-    id: sessionId(token),
-    state: checks.state,
-    nonce: checks.nonce,
-    codeVerifier: checks.codeVerifier,
-    userId,
-    expiresAt,
+  return db.transaction(async (t) => {
+    // Held to the end of this transaction, around the count and the insert.
+    await t.execute(sql`SELECT pg_advisory_xact_lock(${OIDC_LOGIN_LOCK})`);
+    await deleteExpiredOidcLogins(t);
+    // Counts no further than the bound.
+    const inProgress = t
+      .select({ one: sql`1` })
+      .from(oidcLogin)
+      .where(gt(oidcLogin.expiresAt, sql`now()`))
+      .limit(maxPending)
+      .as("in_progress");
+    const [counted] = await t
+      .select({ pending: sql<number>`count(*)::int` })
+      .from(inProgress);
+    if ((counted?.pending ?? 0) >= maxPending) return null;
+    await t.insert(oidcLogin).values({
+      id: sessionId(token),
+      state: checks.state,
+      nonce: checks.nonce,
+      codeVerifier: checks.codeVerifier,
+      userId,
+      expiresAt,
+    });
+    return { token, expiresAt };
   });
-  return { token, expiresAt };
+}
+
+// Deletes the trip a token started, when the browser is not sent on it after
+// all.
+export async function discardOidcLogin(db: Db, token: string): Promise<void> {
+  await db.delete(oidcLogin).where(eq(oidcLogin.id, sessionId(token)));
 }
 
 // The trip a cookie's token started, deleted so it can be used only once;
-// null if unknown or expired.
+// null if unknown or expired. Some expired trips are deleted too.
 export async function takeOidcLogin(
   db: Db,
   token: string,
@@ -53,6 +100,7 @@ export async function takeOidcLogin(
       userId: oidcLogin.userId,
       live: sql<boolean>`${oidcLogin.expiresAt} > now()`,
     });
+  await deleteExpiredOidcLogins(db);
   if (!row?.live) return null;
   const { state, nonce, codeVerifier, userId } = row;
   return { checks: { state, nonce, codeVerifier }, userId };

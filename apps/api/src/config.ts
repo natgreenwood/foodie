@@ -29,6 +29,12 @@ export interface OidcConfig {
   redirectUrl: URL;
   // The sign-in button's label; null for the web app's generic one.
   displayName: string | null;
+  // Trips to the provider that may be in progress at once, across all
+  // browsers; a start beyond it is refused (OIDC_MAX_PENDING_LOGINS).
+  maxPendingLogins: number;
+  // Starts one client address may make in any minute, per api process
+  // (OIDC_STARTS_PER_MINUTE).
+  startsPerMinute: number;
 }
 
 export class ConfigError extends Error {
@@ -93,6 +99,23 @@ const OIDC_REQUIRED = [
   "OIDC_REDIRECT_URL",
 ] as const;
 
+// A whole number of at least 1, or the default when unset or empty.
+function parseLimit(
+  env: NodeJS.ProcessEnv,
+  name: "OIDC_MAX_PENDING_LOGINS" | "OIDC_STARTS_PER_MINUTE",
+  fallback: number,
+): number {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new ConfigError(
+      `${name} must be a whole number of at least 1, got "${raw}"`,
+    );
+  }
+  return value;
+}
+
 // All four or none. Plain http is accepted only in development, where a
 // local provider may have no certificate. The secret is never echoed back.
 function parseOidc(
@@ -129,6 +152,8 @@ function parseOidc(
     clientSecret: env.OIDC_CLIENT_SECRET!,
     redirectUrl: url("OIDC_REDIRECT_URL"),
     displayName: env.OIDC_DISPLAY_NAME?.trim() || null,
+    maxPendingLogins: parseLimit(env, "OIDC_MAX_PENDING_LOGINS", 1000),
+    startsPerMinute: parseLimit(env, "OIDC_STARTS_PER_MINUTE", 10),
   };
 }
 

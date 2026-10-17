@@ -395,8 +395,12 @@ export const oidcLogin = pgTable(
     }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
-  // Serves the cascade on user delete.
-  (t) => [index("oidc_login_user_id_idx").on(t.userId)],
+  (t) => [
+    // Serves the cascade on user delete.
+    index("oidc_login_user_id_idx").on(t.userId),
+    // Serves the bounded cleanup and the count of trips in progress.
+    index("oidc_login_expires_at_idx").on(t.expiresAt),
+  ],
 );
 
 // The AI providers the admin can configure (NATG-277). Both AI settings

@@ -23,6 +23,9 @@ export interface OidcProvider {
   displayName: string | null;
   // The path of the redirect URL, as the browser requests it.
   callbackPath: string;
+  // The admission limits on starting a trip, from the configuration.
+  maxPendingLogins: number;
+  startsPerMinute: number;
   // Fresh random state, nonce and PKCE verifier for one trip to the provider.
   newChecks(): OidcChecks;
   // Where to send the browser to sign in at the provider.
@@ -80,6 +83,8 @@ export function oidcProvider(
   return {
     displayName: settings.displayName,
     callbackPath: settings.redirectUrl.pathname,
+    maxPendingLogins: settings.maxPendingLogins,
+    startsPerMinute: settings.startsPerMinute,
 
     newChecks() {
       return {
