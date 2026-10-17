@@ -1,12 +1,22 @@
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { describe, expect } from "vitest";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import {
+  createOwnedRecipe,
   deleteOwnedRecipe,
   findOwnedRecipe,
   listOwnedRecipes,
+  type NewRecipe,
 } from "./recipes.js";
-import { recipe, user } from "./schema.js";
+import {
+  ingredient,
+  measurement,
+  recipe,
+  recipeIngredient,
+  recipeStep,
+  recipeTag,
+  user,
+} from "./schema.js";
 
 async function newUser(tx: TestTransaction): Promise<{ id: number }> {
   const [row] = await tx
@@ -94,5 +104,178 @@ describe("deleteOwnedRecipe", () => {
     expect(
       await tx.select({ id: recipe.id }).from(recipe).where(eq(recipe.id, id)),
     ).toEqual([{ id }]);
+  });
+});
+
+describe("createOwnedRecipe", () => {
+  const SOURCE = "https://www.example.com/recipes/dal";
+
+  async function catalogue(tx: TestTransaction) {
+    const [lentils] = await tx
+      .insert(ingredient)
+      .values({ source: "test" })
+      .returning({ id: ingredient.id });
+    const [gram] = await tx
+      .insert(measurement)
+      .values({ type: "mass", factorToBase: "1" })
+      .returning({ id: measurement.id });
+    return { lentilsId: lentils!.id, gramId: gram!.id };
+  }
+
+  function draft(
+    ids: { lentilsId: number; gramId: number },
+    overrides: Partial<NewRecipe> = {},
+  ): NewRecipe {
+    return {
+      title: "Dal",
+      sourceUrl: SOURCE,
+      servings: 4,
+      prepMinutes: 10,
+      cookMinutes: 30,
+      ingredients: [
+        {
+          position: 1,
+          ingredientId: ids.lentilsId,
+          measurementId: ids.gramId,
+          quantity: "250",
+          prepNotes: "rinsed",
+          notes: null,
+        },
+        {
+          position: 2,
+          ingredientId: ids.lentilsId,
+          measurementId: null,
+          quantity: null,
+          prepNotes: null,
+          notes: "to serve",
+        },
+      ],
+      steps: [
+        { position: 1, text: "Simmer the lentils." },
+        { position: 2, text: "Serve." },
+      ],
+      tags: ["Dinner", " dinner ", "vegan"],
+      ...overrides,
+    };
+  }
+
+  dbTest(
+    "creates the recipe with its lines, steps and tags for the owner",
+    async ({ tx }) => {
+      const owner = await newUser(tx);
+      const ids = await catalogue(tx);
+
+      const result = await createOwnedRecipe(tx, owner, draft(ids));
+
+      if (!("recipe" in result)) throw new Error("expected a recipe");
+      expect(result.alreadyImported).toBe(false);
+      expect(result.recipe).toMatchObject({
+        title: "Dal",
+        sourceUrl: SOURCE,
+        servings: 4,
+        prepMinutes: 10,
+        cookMinutes: 30,
+      });
+      const id = result.recipe.id;
+      expect(await findOwnedRecipe(tx, owner, id)).toEqual(result.recipe);
+      expect(
+        await tx
+          .select({
+            position: recipeIngredient.position,
+            ingredientId: recipeIngredient.ingredientId,
+            measurementId: recipeIngredient.measurementId,
+            quantity: recipeIngredient.quantity,
+            prepNotes: recipeIngredient.prepNotes,
+            notes: recipeIngredient.notes,
+          })
+          .from(recipeIngredient)
+          .where(eq(recipeIngredient.recipeId, id))
+          .orderBy(asc(recipeIngredient.position)),
+      ).toEqual(draft(ids).ingredients);
+      expect(
+        await tx
+          .select({ position: recipeStep.position, text: recipeStep.text })
+          .from(recipeStep)
+          .where(eq(recipeStep.recipeId, id))
+          .orderBy(asc(recipeStep.position)),
+      ).toEqual(draft(ids).steps);
+      // " dinner " normalises to the same tag as "Dinner": kept once.
+      expect(
+        await tx
+          .select({ tag: recipeTag.tag })
+          .from(recipeTag)
+          .where(eq(recipeTag.recipeId, id))
+          .orderBy(asc(recipeTag.normalisedTag)),
+      ).toEqual([{ tag: "Dinner" }, { tag: "vegan" }]);
+    },
+  );
+
+  dbTest(
+    "creates a second recipe for a URL the owner already has, and says so",
+    async ({ tx }) => {
+      const owner = await newUser(tx);
+      const ids = await catalogue(tx);
+      const first = await createOwnedRecipe(tx, owner, draft(ids));
+
+      const second = await createOwnedRecipe(tx, owner, draft(ids));
+
+      if (!("recipe" in first) || !("recipe" in second)) {
+        throw new Error("expected recipes");
+      }
+      expect(second.alreadyImported).toBe(true);
+      expect(second.recipe.id).not.toBe(first.recipe.id);
+      expect(await listOwnedRecipes(tx, owner)).toHaveLength(2);
+    },
+  );
+
+  dbTest(
+    "does not count another user's recipe from the same URL",
+    async ({ tx }) => {
+      const ids = await catalogue(tx);
+      await createOwnedRecipe(tx, await newUser(tx), draft(ids));
+
+      const result = await createOwnedRecipe(tx, await newUser(tx), draft(ids));
+
+      expect(result).toMatchObject({ alreadyImported: false });
+    },
+  );
+
+  dbTest(
+    "rejects lines naming an ingredient or unit that does not exist, writing nothing",
+    async ({ tx }) => {
+      const owner = await newUser(tx);
+      const ids = await catalogue(tx);
+      // Ids past every row this transaction or the seed wrote.
+      const missing = Math.max(ids.lentilsId, ids.gramId) + 1000;
+      const [first, second] = draft(ids).ingredients;
+      const input = draft(ids, {
+        ingredients: [
+          { ...first!, position: 3, ingredientId: missing },
+          { ...second!, position: 1 },
+          { ...first!, position: 2, measurementId: missing },
+        ],
+      });
+
+      const result = await createOwnedRecipe(tx, owner, input);
+
+      expect(result).toEqual({ unresolvedPositions: [2, 3] });
+      expect(await listOwnedRecipes(tx, owner)).toEqual([]);
+    },
+  );
+
+  dbTest("creates a recipe with no lines, steps or tags", async ({ tx }) => {
+    const owner = await newUser(tx);
+    const ids = await catalogue(tx);
+
+    const result = await createOwnedRecipe(
+      tx,
+      owner,
+      draft(ids, { ingredients: [], steps: [], tags: [] }),
+    );
+
+    expect(result).toMatchObject({
+      recipe: { title: "Dal" },
+      alreadyImported: false,
+    });
   });
 });

@@ -16,6 +16,9 @@ export type ApiErrorCode =
   | "no_other_sign_in"
   | "rate_limited"
   | "not_found"
+  | "invalid_lines"
+  | "invalid_steps"
+  | "unresolved_lines"
   | "internal_error";
 
 // A request's path as a log line may carry it: never the query string or a
