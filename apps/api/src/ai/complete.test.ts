@@ -226,7 +226,7 @@ dbTest(
 );
 
 dbTest(
-  "reports a non-2xx with provider, model, status and message",
+  "reports a non-2xx with provider, model, status and error code",
   async ({ tx }) => {
     await configure(tx, "anthropic", "claude-haiku-5-5");
     respond(401, {
@@ -243,10 +243,12 @@ dbTest(
       model: "claude-haiku-5-5",
       reason: "http_error",
       status: 401,
-      providerMessage: "invalid x-api-key",
+      code: "authentication_error",
+      providerMessage: "HTTP 401 (authentication_error)",
       message:
-        "anthropic claude-haiku-5-5: http_error, status 401: invalid x-api-key",
+        "anthropic claude-haiku-5-5: http_error, status 401 (authentication_error)",
     });
+    expect((err as Error).message).not.toContain("invalid x-api-key");
     expect((err as Error).message).not.toContain(API_KEY);
     expect((err as Error).message).not.toContain(request.user);
   },
@@ -263,6 +265,7 @@ dbTest(
     ).rejects.toMatchObject({
       reason: "http_error",
       status: 502,
+      code: null,
       providerMessage: "HTTP 502",
     });
   },
@@ -310,6 +313,7 @@ dbTest("gives up after the timeout", async ({ tx }) => {
     model: "llama3.1:8b",
     reason: "timeout",
     status: null,
+    cause: { name: "TimeoutError", code: null },
   });
 });
 
@@ -341,7 +345,9 @@ dbTest("reports a connection failure with its cause", async ({ tx }) => {
   await configure(tx, "ollama", "llama3.1:8b", "http://ollama:11434");
   fetchMock.mockRejectedValue(
     new TypeError("fetch failed", {
-      cause: new Error("connect ECONNREFUSED 10.0.0.5:11434"),
+      cause: Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:11434"), {
+        code: "ECONNREFUSED",
+      }),
     }),
   );
 
@@ -355,7 +361,33 @@ dbTest("reports a connection failure with its cause", async ({ tx }) => {
 });
 
 dbTest(
-  "scrubs an echoed key and prompt from a provider's error",
+  "gives a connection failure a cause of only its name and code",
+  async ({ tx }) => {
+    const baseUrl = "http://me:s3cret-pass@ollama.lan:11434";
+    await configure(tx, "ollama", "llama3.1:8b", baseUrl);
+    const inner = Object.assign(
+      new Error(`connect ECONNREFUSED ${baseUrl} ${request.user}`),
+      { code: "ECONNREFUSED" },
+    );
+    fetchMock.mockRejectedValue(
+      new TypeError(`fetch failed for ${baseUrl}`, { cause: inner }),
+    );
+
+    const err = (await complete({ db: tx, settingsKey }, request).catch(
+      (e: unknown) => e,
+    )) as AiProviderError;
+    expect(err).toBeInstanceOf(AiProviderError);
+    // Exactly these keys: no message, no nested cause.
+    expect(err.cause).toStrictEqual({
+      name: "TypeError",
+      code: "ECONNREFUSED",
+    });
+    expect(JSON.stringify(err.cause)).not.toContain("s3cret-pass");
+  },
+);
+
+dbTest(
+  "never quotes a provider's error.message, which may echo the key and prompt",
   async ({ tx }) => {
     await configure(tx, "openai", "gpt-5-mini");
     respond(401, {
@@ -369,9 +401,8 @@ dbTest(
     )) as AiProviderError;
     expect(err).toBeInstanceOf(AiProviderError);
     expect(err.status).toBe(401);
-    expect(err.providerMessage).toBe(
-      'Invalid key [redacted] for "[redacted]" / "[redacted]"',
-    );
+    expect(err.providerMessage).toBe("HTTP 401");
+    expect(err.message).toBe("openai gpt-5-mini: http_error, status 401");
     for (const secret of [API_KEY, request.system, request.user]) {
       expect(err.message).not.toContain(secret);
     }
@@ -405,17 +436,95 @@ dbTest(
   },
 );
 
+dbTest("quotes nothing from an error body without a code", async ({ tx }) => {
+  await configure(tx, "openrouter", "google/gemini-flash");
+  respond(401, { error: `bad key, prompt was ${request.user}`, detail: "x" });
+
+  await expect(
+    complete({ db: tx, settingsKey }, request),
+  ).rejects.toMatchObject({ status: 401, providerMessage: "HTTP 401" });
+});
+
+// Every character here is absent from the error's own words for this model
+// and status, so a match can only be a leak.
+for (const [password, prompt] of [
+  ["Q", "W"],
+  ["QZ", "WG"],
+  ["QZX", "WGF"],
+] as const) {
+  dbTest(
+    `keeps a ${password.length}-character password and prompt out of a 401`,
+    async ({ tx }) => {
+      const baseUrl = `http://Kq:${password}@ollama.lan:11434`;
+      await configure(tx, "ollama", "llama3.1:8b", baseUrl);
+      const short = { ...request, user: prompt };
+      respond(401, {
+        error: {
+          code: "invalid_api_key",
+          message: `key ${baseUrl} user Kq pw=${password} prompt=${prompt}`,
+        },
+      });
+
+      const err = (await complete({ db: tx, settingsKey }, short).catch(
+        (e: unknown) => e,
+      )) as AiProviderError;
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect(err).toMatchObject({
+        status: 401,
+        code: "invalid_api_key",
+        providerMessage: "HTTP 401 (invalid_api_key)",
+        message: "ollama llama3.1:8b: http_error, status 401 (invalid_api_key)",
+      });
+      for (const secret of [baseUrl, "Kq", password, prompt]) {
+        expect(err.message).not.toContain(secret);
+        expect(err.providerMessage).not.toContain(secret);
+      }
+    },
+  );
+}
+
 dbTest(
-  "quotes only error.message, never another error body",
+  "falls back to error.type when an OpenAI-compatible error has no code",
   async ({ tx }) => {
     await configure(tx, "openrouter", "google/gemini-flash");
-    respond(401, { error: `bad key, prompt was ${request.user}`, detail: "x" });
+    respond(400, {
+      error: { code: null, type: "invalid_request_error", message: "x" },
+    });
 
     await expect(
       complete({ db: tx, settingsKey }, request),
-    ).rejects.toMatchObject({ status: 401, providerMessage: "HTTP 401" });
+    ).rejects.toMatchObject({
+      code: "invalid_request_error",
+      providerMessage: "HTTP 400 (invalid_request_error)",
+    });
   },
 );
+
+for (const [what, code] of [
+  ["spaces", "invalid api key"],
+  ["a prompt fragment", "2 eggs, 100 g"],
+  ["more than 64 characters", "x".repeat(65)],
+  ["a number", 401],
+  ["an object", { message: request.user }],
+] as const) {
+  dbTest(
+    `gives only the status for an error code of ${what}`,
+    async ({ tx }) => {
+      await configure(tx, "openai", "gpt-5-mini");
+      respond(401, {
+        error: { code, type: code, message: `prompt was ${request.user}` },
+      });
+
+      await expect(
+        complete({ db: tx, settingsKey }, request),
+      ).rejects.toMatchObject({
+        code: null,
+        providerMessage: "HTTP 401",
+        message: "openai gpt-5-mini: http_error, status 401",
+      });
+    },
+  );
+}
 
 dbTest(
   "refuses an Ollama URL whose password does not decode",

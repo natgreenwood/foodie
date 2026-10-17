@@ -20,9 +20,15 @@ export const COMPLETION_TIMEOUT_MS = 120_000;
 // Far beyond any answer a sane maxTokens allows; a body past it is not one.
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
 
-// The provider's error message is cut to this in our own message, so one
+// A network failure's message is cut to this in our own message, so one
 // verbose error cannot flood the log line.
 const MAX_PROVIDER_MESSAGE = 500;
+
+// The only text taken from a provider's error body, or from a caught error
+// for `cause`: an identifier such as invalid_api_key or ECONNREFUSED. Free
+// text is never quoted, since a provider may echo a credential or the prompt
+// back in it, in part or in full, where no scrub can find it.
+const ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
 
 export interface CompletionRequest {
   system: string;
@@ -82,8 +88,8 @@ export type ProviderFailureReason =
   "unreachable" | "timeout" | "http_error" | "bad_response";
 
 // Never carries the credential, the Ollama base URL (which may hold a
-// password) or the prompt: everything taken from the provider's answer is
-// scrubbed of them first, since a provider may echo them back.
+// password) or the prompt. Nothing from the provider's answer is quoted but
+// its error code, and every message is also scrubbed of them.
 export class AiProviderError extends Error {
   override name = "AiProviderError";
   constructor(
@@ -92,13 +98,20 @@ export class AiProviderError extends Error {
     readonly reason: ProviderFailureReason,
     // The provider's HTTP status; null if there was no response.
     readonly status: number | null,
-    // The provider's error.message, scrubbed, or what was wrong with its
-    // answer. Never its raw body.
+    // For http_error, the provider's error code (Anthropic's error.type; the
+    // OpenAI-compatible error.code, else error.type) when it matches
+    // ERROR_CODE; otherwise null.
+    readonly code: string | null,
+    // For http_error, "HTTP <status>" and the code; otherwise what went wrong.
+    // Never the provider's own words.
     readonly providerMessage: string,
+    // `cause`, when there is one, is only { name, code } of the caught error.
     options?: ErrorOptions,
   ) {
     super(
-      `${provider} ${model}: ${reason}, status ${status ?? "none"}: ${providerMessage}`,
+      reason === "http_error"
+        ? `${provider} ${model}: ${reason}, status ${status}${code === null ? "" : ` (${code})`}`
+        : `${provider} ${model}: ${reason}, status ${status ?? "none"}: ${providerMessage}`,
       options,
     );
   }
@@ -147,6 +160,7 @@ export async function complete(
       model,
       reason,
       status,
+      null,
       // Scrubbed before cutting, so no secret survives cut in half.
       scrub(message, secrets).slice(0, MAX_PROVIDER_MESSAGE),
       options,
@@ -160,10 +174,12 @@ export async function complete(
           "timeout",
           status,
           `no response within ${deps.timeoutMs ?? COMPLETION_TIMEOUT_MS} ms`,
-          { cause: err },
+          { cause: causeOf(err) },
         )
       : // fetch's own message is only "fetch failed"; the reason is in cause.
-        fail("unreachable", status, networkReason(err), { cause: err });
+        fail("unreachable", status, networkReason(err), {
+          cause: causeOf(err),
+        });
 
   let res: Response;
   try {
@@ -188,7 +204,17 @@ export async function complete(
 
   const json = body === null ? null : parseJson(body);
   if (status < 200 || status >= 300) {
-    throw fail("http_error", status, errorMessage(json) ?? `HTTP ${status}`);
+    const raw = errorCode(provider, json);
+    // A code that happens to hold a secret is dropped, not redacted.
+    const code = raw !== null && scrub(raw, secrets) === raw ? raw : null;
+    throw new AiProviderError(
+      provider,
+      model,
+      "http_error",
+      status,
+      code,
+      scrub(`HTTP ${status}${code === null ? "" : ` (${code})`}`, secrets),
+    );
   }
   if (body === null) {
     throw fail("bad_response", status, `over ${MAX_RESPONSE_BYTES} bytes`);
@@ -286,7 +312,7 @@ function ollamaEndpoint(baseUrl: string): Omit<ProviderRequest, "body"> | null {
   if (user !== "" || password !== "") {
     const basic = Buffer.from(`${user}:${password}`).toString("base64");
     headers.authorization = `Basic ${basic}`;
-    secrets.push(basic, base.password, password);
+    secrets.push(basic, base.username, user, base.password, password);
     base.username = "";
     base.password = "";
     secrets.push(base.href);
@@ -314,27 +340,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-// The message in an error body, { error: { message } } from Anthropic and
-// the OpenAI-compatible APIs; null for any other body, which is never
-// quoted.
-function errorMessage(json: unknown): string | null {
+// The code in an error body, { error: { type, code } }: Anthropic's
+// error.type, or the OpenAI-compatible error.code, else error.type. Null when
+// it is not a string matching ERROR_CODE. Nothing else in the body, its
+// message included, is ever quoted.
+function errorCode(provider: AiProvider, json: unknown): string | null {
   if (!isRecord(json) || !isRecord(json.error)) return null;
-  const { message } = json.error;
-  return typeof message === "string" ? message : null;
+  const { code, type } = json.error;
+  const candidates = provider === "anthropic" ? [type] : [code, type];
+  const found = candidates.find((c) => typeof c === "string");
+  return typeof found === "string" && ERROR_CODE.test(found) ? found : null;
 }
 
-// Shorter values are left alone: redacting a two-letter password everywhere
-// would wreck the message and hide little.
-const MIN_SCRUBBED_LENGTH = 4;
+// Only the name and code of a caught error, for `cause`: its message and its
+// own causes may quote the request, so they never reach our error.
+function causeOf(err: unknown): { name: string; code: string | null } {
+  const name = err instanceof Error ? err.name : "";
+  let code: string | null = null;
+  for (
+    let current: unknown = err;
+    code === null && current instanceof Error;
+    current = current.cause
+  ) {
+    const own = (current as { code?: unknown }).code;
+    if (typeof own === "string" && ERROR_CODE.test(own)) code = own;
+  }
+  return { name: ERROR_CODE.test(name) ? name : "Error", code };
+}
 
-// `text` with every occurrence of each secret replaced, longest first so a
-// URL goes whole rather than leaving its host around a redacted password.
-// Only exact copies are caught: a provider quoting part of a prompt is not.
+// `text` with every occurrence of each secret replaced, in one pass and
+// longest first, so a URL goes whole rather than leaving its host around a
+// redacted password, and a one-letter secret cannot eat into a marker
+// already put in. No secret is too short: an ugly message beats a leaked one.
+// Only exact copies are caught: a provider quoting part of a prompt is not,
+// which is why provider text is never quoted at all.
 function scrub(text: string, secrets: readonly string[]): string {
-  return [...new Set(secrets)]
-    .filter((secret) => secret.length >= MIN_SCRUBBED_LENGTH)
-    .sort((a, b) => b.length - a.length)
-    .reduce((out, secret) => out.replaceAll(secret, "[redacted]"), text);
+  const sorted = [...new Set(secrets)]
+    .filter((secret) => secret !== "")
+    .sort((a, b) => b.length - a.length);
+  if (sorted.length === 0) return text;
+  const pattern = new RegExp(
+    sorted.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+    "g",
+  );
+  return text.replace(pattern, "[redacted]");
 }
 
 // Messages API: content is a list of blocks; the answer is its text blocks.
