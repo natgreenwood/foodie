@@ -57,6 +57,8 @@ function describeError(error: unknown): { message: string; detail?: string } {
       };
     case "import_not_permitted":
       return { message: "This site does not permit importing its recipes" };
+    case "unauthenticated":
+      return { message: "Your session has ended. Sign in again to import." };
     case null:
       return {
         message: `Can't reach the API: ${error.message}. Check the api container is running (docker compose ps), then try again.`,
