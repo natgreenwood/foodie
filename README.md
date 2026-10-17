@@ -48,6 +48,26 @@ static build with nginx on port 8080 as a non-root user and proxies `/api/*` to
 `API_UPSTREAM` (default `http://api:3000`). nginx resolves that host when it
 starts, so the api must be reachable by then.
 
+By default the api logs the address of whatever connected to it, which behind
+nginx is nginx. To log the client's address instead, for example on a failed
+sign-in, set `TRUST_PROXY` on the api to the address or CIDR range of the
+proxy in front of it, e.g. `TRUST_PROXY=10.0.0.5` or a comma-separated list
+such as `10.0.0.0/8,172.16.0.0/12`. The api then takes the client's address
+from the `X-Forwarded-For` header, which the nginx config already sends, but
+only on requests that come from a listed address.
+
+- List only the proxy in front of the api. Any address on the list can set
+  the client address the api logs.
+- When it is set, the api's port must be reachable only through that proxy.
+  Otherwise a client that connects from inside a listed range can send its
+  own `X-Forwarded-For`.
+- It takes addresses, not a hop count: `TRUST_PROXY=1` stops the api from
+  starting, as does any entry that is not an IP address or CIDR range.
+
+Compose leaves it unset. There is no nginx in the compose setup, the Vite dev
+proxy does not send `X-Forwarded-For`, and the api's port is published to the
+host, so the logs there show the dev proxy's or your own address.
+
 ### Without Docker
 
 Requires Node 24 (see `.nvmrc`) and pnpm (`corepack enable` picks up the
