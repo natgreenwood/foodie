@@ -1,7 +1,7 @@
 import { Writable } from "node:stream";
 import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
-import { describe, expect, onTestFinished } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { buildApp } from "../app.js";
 import { ensureAdmin } from "../auth/accounts.js";
 import { loadConfig } from "../config.js";
@@ -471,6 +471,72 @@ describe("signed-in routes", () => {
       (await app.inject({ method: "GET", url: "/health" })).statusCode,
     ).toBe(200);
     expect((await post("/auth/logout")).statusCode).toBe(204);
+  });
+});
+
+describe("auth routes when a request fails", () => {
+  dbTest(
+    "answer a body over the size limit with 413, logged below error",
+    async ({ tx }) => {
+      const { app, logLines } = start(tx);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/auth/login",
+        headers: { "content-type": "application/json" },
+        payload: JSON.stringify({
+          email: "a@b.c",
+          password: "x".repeat(2_000_000),
+        }),
+      });
+
+      expect(res.statusCode).toBe(413);
+      expect(res.json()).toEqual({
+        error: "invalid_request",
+        message: "body is too large",
+      });
+      expect(logLines.filter((l) => (l.level as number) >= 50)).toEqual([]);
+      expect(logLines).toContainEqual(
+        expect.objectContaining({
+          level: 40,
+          msg: "auth: request refused",
+          route: "POST /auth/login",
+          status: 413,
+          code: "FST_ERR_CTP_BODY_TOO_LARGE",
+        }),
+      );
+    },
+  );
+
+  it("still answer an unexpected failure with 500, logged at error", async () => {
+    // A database every query on which throws, as Drizzle does, with the
+    // query's parameters after the first line of the message.
+    const broken = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("Failed query: select\nparams: a@b.c");
+        },
+      },
+    ) as unknown as TestTransaction;
+    const { post, logLines } = start(broken);
+
+    const res = await post("/auth/login", { email: "a@b.c", password: "x" });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({
+      error: "internal_error",
+      message: "something went wrong",
+    });
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        level: 50,
+        msg: "auth: request failed",
+        route: "POST /auth/login",
+        error: "Failed query: select",
+      }),
+    );
+    expect(JSON.stringify(logLines)).not.toContain("params: a@b.c");
   });
 });
 
