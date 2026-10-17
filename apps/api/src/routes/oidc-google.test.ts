@@ -150,7 +150,10 @@ function start(
     const started = await app.inject({
       method: "POST",
       url: `/auth/oidc/${id}/connect`,
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: REDIRECT_URLS[id].origin,
+      },
       payload: "",
       cookies: { [SESSION_COOKIE]: token },
     });
@@ -357,6 +360,25 @@ describe("connecting Google from the profile", () => {
       ]);
     },
   );
+
+  dbTest("refuses a start from an untrusted origin", async ({ tx }) => {
+    const { app, localAccount } = start(tx);
+    const local = await localAccount();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/oidc/google/connect",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://evil.localhost:5173",
+      },
+      payload: "",
+      cookies: { [SESSION_COOKIE]: local.token },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: "untrusted_origin" });
+  });
 
   dbTest("refuses an identity with another email", async ({ tx }) => {
     const { oidcConnect, localAccount } = start(tx);
