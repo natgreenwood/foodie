@@ -162,7 +162,8 @@ stops the api from starting.
 ### Signing in with OIDC
 
 Users can also sign in through one OpenID Connect provider, any that follows
-the standard (verified against PocketID). The api finds everything about the
+the standard. It is tested against a mock provider; checking it end to end
+against PocketID is still to do. The api finds everything about the
 provider from its discovery document, `<issuer>/.well-known/openid-configuration`,
 and signs in as a confidential client with the authorization code flow, PKCE
 and the scopes `openid profile email`. Set all four of these, or none (in

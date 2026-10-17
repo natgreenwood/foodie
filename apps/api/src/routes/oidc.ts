@@ -190,8 +190,11 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
   });
 
   // Unlinks the account's identity: 204, also when there was none. 409
-  // no_local_password for an account with no local password.
+  // no_local_password for an account with no local password. 404 like the
+  // other OIDC routes when OIDC is off, leaving any links as they are for
+  // when it is configured again.
   app.delete("/auth/oidc/connection", async (request, reply) => {
+    if (!oidc) return notConfigured(reply);
     const { refused } = await disconnectOidc(db, request.user!.id);
     if (refused) {
       return sendError(

@@ -17,7 +17,7 @@ import {
   deleteExpiredOidcLogins,
   OIDC_LOGIN_CLEANUP_BATCH,
 } from "../auth/oidc.js";
-import { oidcIdentity, oidcLogin, user } from "../db/schema.js";
+import { oidcIdentity, oidcLogin, recipe, user } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import {
   startMockProvider,
@@ -249,10 +249,17 @@ describe("GET /auth/oidc/config", () => {
         enabled: false,
         displayName: null,
       });
+      // A link made while OIDC was on.
+      await tx.insert(oidcIdentity).values({
+        userId: cook.id,
+        issuer: "https://id.example.com",
+        subject: "made-while-on",
+      });
       for (const [method, url] of [
         ["GET", "/auth/oidc/start"],
         ["GET", "/auth/oidc/callback?code=x&state=y"],
         ["POST", "/auth/oidc/connect"],
+        ["DELETE", "/auth/oidc/connection"],
       ] as const) {
         const res = await request(method, url, {
           [SESSION_COOKIE]: cook.token,
@@ -263,6 +270,7 @@ describe("GET /auth/oidc/config", () => {
           message: "oidc sign-in is not configured",
         });
       }
+      expect(await identitiesOf(tx, cook.id)).toHaveLength(1);
     },
   );
 });
@@ -368,6 +376,10 @@ describe("signing in through the provider", () => {
     async ({ tx }) => {
       const { oidcSignIn, localAccount, request, login } = start(tx);
       const local = await localAccount();
+      const [savedRecipe] = await tx
+        .insert(recipe)
+        .values({ ownerId: local.id, title: "Test soup", servings: 4 })
+        .returning({ id: recipe.id });
 
       const res = await oidcSignIn(
         identity({ email: local.email.toUpperCase(), email_verified: true }),
@@ -380,6 +392,15 @@ describe("signing in through the provider", () => {
       expect(me.json()).toMatchObject({ id: local.id, email: local.email });
       expect(await accountsWithEmail(tx, local.email)).toHaveLength(1);
       expect(await identitiesOf(tx, local.id)).toHaveLength(1);
+      const recipes = await request("GET", "/recipes", {
+        [SESSION_COOKIE]: cookieValue(res, SESSION_COOKIE),
+      });
+      expect(recipes.statusCode).toBe(200);
+      expect(recipes.json()).toMatchObject({
+        recipes: [
+          expect.objectContaining({ id: savedRecipe!.id, title: "Test soup" }),
+        ],
+      });
       // The local password still works.
       expect((await login(local.email)).statusCode).toBe(200);
     },
