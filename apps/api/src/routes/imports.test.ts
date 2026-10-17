@@ -17,7 +17,13 @@ import {
 import { MAX_LINE_CHARS } from "../import/extract/extract.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE, type AuthDeps } from "./auth.js";
-import type { ImportDeps } from "./imports.js";
+import {
+  MAX_LINES,
+  MAX_STEPS,
+  MAX_TAG_CHARS,
+  MAX_TAGS,
+  type ImportDeps,
+} from "./imports.js";
 
 const URL_ = "https://www.example.com.au/recipes/spaghetti";
 const FETCHED_AT = new Date("2026-10-16T12:00:00Z");
@@ -750,6 +756,88 @@ describe("POST /imports", () => {
       expect(res.statusCode).toBe(400);
       expect(res.json()).toMatchObject({ error: "invalid_request" });
       expect(rejectionLog()).toHaveLength(1);
+    },
+  );
+
+  // Counts and tag size are capped so a body under the byte limit cannot
+  // fail the insert (NATG-316, NATG-317).
+  function sized(
+    ids: { lentilsId: number; gramId: number },
+    counts: { lines?: number; steps?: number; tags?: readonly string[] },
+  ) {
+    const body = reviewed(
+      ids,
+      Array.from({ length: counts.lines ?? 1 }, (_, i) => ({
+        position: i + 1,
+        quantity: "1",
+        ingredientId: ids.lentilsId,
+        measurementId: null,
+      })),
+    );
+    body.recipe.steps = Array.from({ length: counts.steps ?? 1 }, (_, i) => ({
+      position: i + 1,
+      text: `Step ${i + 1}.`,
+    }));
+    body.recipe.tags = [...(counts.tags ?? [])];
+    return body;
+  }
+
+  const tagsOf = (n: number) => Array.from({ length: n }, (_, i) => `tag ${i}`);
+
+  dbTest.for([
+    ["ingredient lines", { lines: MAX_LINES }, { lines: MAX_LINES + 1 }],
+    ["steps", { steps: MAX_STEPS }, { steps: MAX_STEPS + 1 }],
+    ["tags", { tags: tagsOf(MAX_TAGS) }, { tags: tagsOf(MAX_TAGS + 1) }],
+    [
+      "tag characters",
+      { tags: ["t".repeat(MAX_TAG_CHARS)] },
+      { tags: ["t".repeat(MAX_TAG_CHARS + 1)] },
+    ],
+    [
+      "tag characters of 4-byte code points",
+      { tags: ["\u{1F345}".repeat(MAX_TAG_CHARS)] },
+      { tags: ["\u{1F345}".repeat(MAX_TAG_CHARS + 1)] },
+    ],
+  ] as const)(
+    "takes the most %s allowed and answers 400 for one more",
+    async ([, atCap, overCap], { tx }) => {
+      const ids = await setUp(tx);
+
+      const ok = await save(sized(ids, atCap), ids.token);
+      const over = await save(sized(ids, overCap), ids.token);
+
+      expect(ok.statusCode).toBe(201);
+      expect(over.statusCode).toBe(400);
+      expect(over.json()).toMatchObject({ error: "invalid_request" });
+      expect(
+        await tx.select().from(recipe).where(eq(recipe.ownerId, ids.cookId)),
+      ).toHaveLength(1);
+    },
+  );
+
+  dbTest(
+    "answers 400 for the NATG-317 tag, leaving no recipe",
+    async ({ tx }) => {
+      const ids = await setUp(tx);
+      // 1,000 CJK characters, 3,000 UTF-8 bytes: past the index entry limit.
+      let tag = "";
+      for (let i = 0; i < 1000; i++) {
+        tag += String.fromCharCode(0x4e00 + ((i * 7919) % 20000));
+      }
+
+      const res = await save(
+        {
+          sourceUrl: "https://example.com/probe",
+          recipe: { title: "Probe", ingredients: [], steps: [], tags: [tag] },
+        },
+        ids.token,
+      );
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: "invalid_request" });
+      expect(
+        await tx.select().from(recipe).where(eq(recipe.ownerId, ids.cookId)),
+      ).toEqual([]);
     },
   );
 

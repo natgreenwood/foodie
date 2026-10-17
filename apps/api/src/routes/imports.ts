@@ -324,6 +324,17 @@ type Rejection =
 // The largest value an integer column holds.
 const MAX_INT = 2_147_483_647;
 
+// Real recipes stay near 60 lines, 40 steps and 20 tags. These caps keep
+// each bulk insert well under Postgres's bind-parameter limit (NATG-316).
+export const MAX_LINES = 200;
+export const MAX_STEPS = 100;
+export const MAX_TAGS = 50;
+// A tag is in recipe_tag's primary key and an index, whose entries Postgres
+// caps at about 2.7 kB (NATG-317). Characters are code points; the byte cap
+// bounds the key whatever they are.
+export const MAX_TAG_CHARS = 100;
+export const MAX_TAG_BYTES = 400;
+
 // Every check the recipe tables' constraints make is made here first, so bad
 // input is a 400 or 422 rather than a failed insert. sourceUrl is the
 // normalised URL, for the log; null until it is known to be one.
@@ -365,28 +376,25 @@ function parseSaveBody(
       "recipe.servings must be a positive whole number, and the minutes whole numbers, or null",
     );
   }
-  const lines = positioned(draft.ingredients);
+  const lines = positioned(draft.ingredients, MAX_LINES);
   if (lines === null) {
     return invalid(
       sourceUrl,
-      "recipe.ingredients must be a list of lines with distinct whole-number positions",
+      `recipe.ingredients must be a list of at most ${MAX_LINES} lines with distinct whole-number positions`,
     );
   }
-  const steps = positioned(draft.steps);
+  const steps = positioned(draft.steps, MAX_STEPS);
   if (steps === null) {
     return invalid(
       sourceUrl,
-      "recipe.steps must be a list of steps with distinct whole-number positions",
+      `recipe.steps must be a list of at most ${MAX_STEPS} steps with distinct whole-number positions`,
     );
   }
   const tags = draft.tags ?? [];
-  if (
-    !Array.isArray(tags) ||
-    !tags.every((tag) => isText(tag) && !isBlank(tag))
-  ) {
+  if (!Array.isArray(tags) || tags.length > MAX_TAGS || !tags.every(isTag)) {
     return invalid(
       sourceUrl,
-      `recipe.tags must be a list of text of 1 to ${MAX_LINE_CHARS} characters`,
+      `recipe.tags must be a list of at most ${MAX_TAGS} tags of 1 to ${MAX_TAG_CHARS} characters`,
     );
   }
 
@@ -458,16 +466,18 @@ function parseSaveBody(
         position: s.position,
         text: s.text as string,
       })),
-      tags: tags as string[],
+      tags,
     },
   };
 }
 
-// The entries of a list of objects with distinct positions, or null.
+// The entries of a list of at most `max` objects with distinct positions, or
+// null.
 function positioned(
   value: unknown,
+  max: number,
 ): (Record<string, unknown> & { position: number })[] | null {
-  if (!Array.isArray(value)) return null;
+  if (!Array.isArray(value) || value.length > max) return null;
   const seen = new Set<number>();
   for (const entry of value) {
     if (!isRecord(entry)) return null;
@@ -537,6 +547,15 @@ function isOptionalText(value: unknown): boolean {
 // Blank as the tables' not-blank checks see it.
 function isBlank(text: string): boolean {
   return text.replace(/\s+/g, " ").trim() === "";
+}
+
+function isTag(value: unknown): value is string {
+  return (
+    isText(value) &&
+    !isBlank(value) &&
+    [...value].length <= MAX_TAG_CHARS &&
+    Buffer.byteLength(value, "utf8") <= MAX_TAG_BYTES
+  );
 }
 
 function sendError(
