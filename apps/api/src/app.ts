@@ -11,6 +11,7 @@ import {
   requireAdmin,
   requireUser,
 } from "./routes/auth.js";
+import { sendError } from "./routes/errors.js";
 import { healthRoutes, type HealthDeps } from "./routes/health.js";
 import { importRoutes, type ImportDeps } from "./routes/imports.js";
 import { meRoutes } from "./routes/me.js";
@@ -67,6 +68,11 @@ export function buildApp(
   seams: AppSeams = {},
 ) {
   const app = Fastify(options);
+  // Fastify's own 404 logs and answers "Route GET:<url> not found" with the
+  // raw URL, query string included; this one repeats nothing the client sent.
+  app.setNotFoundHandler((_request, reply) =>
+    sendError(reply, 404, "not_found", "route not found"),
+  );
   registerSessionSupport(app);
   app.register(healthRoutes, deps);
   app.register(authRoutes, deps);

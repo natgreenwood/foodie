@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { connect, type AddressInfo } from "node:net";
 import { Writable } from "node:stream";
 import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
@@ -618,6 +619,50 @@ describe("AI provider settings", () => {
       ]);
     },
   );
+
+  dbTest(
+    "answers an unknown route without repeating its URL",
+    async ({ tx }) => {
+      const { app } = start(tx);
+
+      const res = await app.inject({ url: "/admin/missing?apiKey=sk-x" });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({
+        error: "not_found",
+        message: "route not found",
+      });
+    },
+  );
+
+  // app.inject drops a fragment before Fastify sees it, so this one is sent
+  // over a socket, as a hand-rolled client could.
+  dbTest("never logs a key sent in a fragment on the wire", async ({ tx }) => {
+    const { app, logLines } = start(tx);
+    const key = `sk-ant-${randomBytes(24).toString("hex")}`;
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const { port } = app.server.address() as AddressInfo;
+
+    const response = await new Promise<string>((resolve, reject) => {
+      let received = "";
+      const socket = connect(port, "127.0.0.1", () => {
+        socket.write(
+          `GET /admin/missing#apiKey=${key} HTTP/1.1\r\n` +
+            "Host: localhost\r\nConnection: close\r\n\r\n",
+        );
+      });
+      socket.on("data", (chunk) => (received += chunk.toString()));
+      socket.on("end", () => resolve(received));
+      socket.on("error", reject);
+    });
+
+    expect(response).toMatch(/^HTTP\/1\.1 404 /);
+    expect(response).not.toContain(key);
+    expect(incomingRequests(logLines)).toEqual([
+      expect.objectContaining({ url: "/admin/missing" }),
+    ]);
+    expect(logLines.join("")).not.toContain(key);
+  });
 
   dbTest("redacts a credential if one is ever logged", ({ tx }) => {
     const { app, logLines } = start(tx);
