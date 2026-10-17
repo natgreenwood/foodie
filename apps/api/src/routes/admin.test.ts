@@ -602,21 +602,36 @@ describe("AI provider settings", () => {
     },
   );
 
-  dbTest.for(["/health?verbose=1", "/administrators?apiKey=sk-x"])(
-    "keeps the query string of %s, which is not under /admin",
-    async (url, { tx }) => {
+  // Spellings Fastify routes to an admin route or answers 404 for. The key
+  // must not reach the log or the response from either.
+  dbTest.for([
+    ["/%61dmin/ai", 401],
+    ["/admin/missing", 404],
+    ["/admin", 404],
+    ["//admin/ai", 404],
+    ["/ADMIN/ai", 404],
+    ["/admin%2Fai", 404],
+    ["/administrators", 404],
+    ["/health", 200],
+  ] as const)(
+    "logs %s without the query string, and the key nowhere",
+    async ([path, status], { tx }) => {
       const { app, logLines } = start(tx);
+      const key = `sk-ant-${randomBytes(24).toString("hex")}`;
 
-      await app.inject({ url });
+      const res = await app.inject({ url: `${path}?apiKey=${key}&x=1` });
 
+      expect(res.statusCode).toBe(status);
+      expect(res.body).not.toContain(key);
       expect(incomingRequests(logLines)).toEqual([
         {
           method: "GET",
-          url,
+          url: path,
           host: "localhost:80",
           remoteAddress: "127.0.0.1",
         },
       ]);
+      expect(logLines.join("")).not.toContain(key);
     },
   );
 
