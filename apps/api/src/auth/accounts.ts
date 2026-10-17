@@ -106,7 +106,8 @@ export async function updateProfile(
   return row ?? null;
 }
 
-function sessionId(token: string): string {
+// The session table's id for a cookie token.
+export function sessionId(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 

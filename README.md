@@ -138,6 +138,9 @@ stops the api from starting.
 Routes under `/admin` are for admins only: they answer 401 `unauthenticated`
 without a session and 403 `forbidden` to a signed-in user who is not an
 admin. Every change is idempotent and logged with the acting admin's id.
+Each change also re-checks the acting admin when it is made, not only when
+the request arrived: a request still in flight when its sender is disabled
+or demoted answers 401 or 403 and changes nothing.
 
 - `GET /admin/users`: every account as `{ users: [...] }`, with `isAdmin`,
   `disabledAt` and `hasPassword`; never a password hash.

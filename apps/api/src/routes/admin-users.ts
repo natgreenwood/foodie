@@ -1,15 +1,22 @@
 import type { FastifyPluginCallback, FastifyReply } from "fastify";
+import { hashPassword, type Db } from "../auth/accounts.js";
 import {
+  asAdmin,
   deleteUser,
   disableUser,
   enableUser,
   listUsers,
   setAdmin,
-  setPassword,
+  setPasswordHash,
   type AdminUser,
 } from "../auth/admin.js";
 import { passwordProblem } from "../auth/credentials.js";
-import { isRecord, type AuthDeps } from "./auth.js";
+import {
+  adminActor,
+  isRecord,
+  sendAdminRefusal,
+  type AuthDeps,
+} from "./auth.js";
 import { apiErrorHandler, sendError } from "./errors.js";
 
 export interface AdminUserListResponse {
@@ -32,7 +39,8 @@ function notFound(reply: FastifyReply) {
 // requireAdmin. Every change is idempotent and answers the account as it now
 // is, except delete, which answers 204 and then 404. An admin cannot
 // disable, delete or revoke their own account, so there is always at least
-// the acting admin left.
+// the acting admin left. Every change re-checks the acting admin inside its
+// own transaction (asAdmin), not only when the request arrived.
 export const adminUserRoutes: FastifyPluginCallback<AuthDeps> = (
   app,
   { db },
@@ -49,24 +57,24 @@ export const adminUserRoutes: FastifyPluginCallback<AuthDeps> = (
   const actions: {
     path: string;
     selfAllowed: boolean;
-    run: (id: number) => Promise<AdminUser | null>;
+    run: (t: Db, id: number) => Promise<AdminUser | null>;
   }[] = [
     {
       path: "disable",
       selfAllowed: false,
       // Also ends the account's sessions.
-      run: (id) => disableUser(db, id),
+      run: disableUser,
     },
-    { path: "enable", selfAllowed: true, run: (id) => enableUser(db, id) },
+    { path: "enable", selfAllowed: true, run: enableUser },
     {
       path: "grant-admin",
       selfAllowed: true,
-      run: (id) => setAdmin(db, id, true),
+      run: (t, id) => setAdmin(t, id, true),
     },
     {
       path: "revoke-admin",
       selfAllowed: false,
-      run: (id) => setAdmin(db, id, false),
+      run: (t, id) => setAdmin(t, id, false),
     },
   ];
 
@@ -79,7 +87,11 @@ export const adminUserRoutes: FastifyPluginCallback<AuthDeps> = (
         if (!action.selfAllowed && id === request.user!.id) {
           return refuseSelf(reply, action.path);
         }
-        const updated = await action.run(id);
+        const result = await asAdmin(db, adminActor(request), id, (t) =>
+          action.run(t, id),
+        );
+        if (result.refused) return sendAdminRefusal(reply, result.refused);
+        const updated = result.value;
         if (!updated) return notFound(reply);
         request.log.info(
           { adminId: request.user!.id, userId: id, action: action.path },
@@ -109,7 +121,12 @@ export const adminUserRoutes: FastifyPluginCallback<AuthDeps> = (
       if (problem !== null) {
         return sendError(reply, 400, "invalid_request", problem);
       }
-      const updated = await setPassword(db, id, body.password);
+      const passwordHash = await hashPassword(body.password);
+      const result = await asAdmin(db, adminActor(request), id, (t) =>
+        setPasswordHash(t, id, passwordHash),
+      );
+      if (result.refused) return sendAdminRefusal(reply, result.refused);
+      const updated = result.value;
       if (!updated) return notFound(reply);
       request.log.info(
         { adminId: request.user!.id, userId: id, action: "set-password" },
@@ -126,7 +143,11 @@ export const adminUserRoutes: FastifyPluginCallback<AuthDeps> = (
       const id = parseUserId(request.params.id);
       if (id === null) return notFound(reply);
       if (id === request.user!.id) return refuseSelf(reply, "delete");
-      if (!(await deleteUser(db, id))) return notFound(reply);
+      const result = await asAdmin(db, adminActor(request), id, (t) =>
+        deleteUser(t, id),
+      );
+      if (result.refused) return sendAdminRefusal(reply, result.refused);
+      if (!result.value) return notFound(reply);
       request.log.info(
         { adminId: request.user!.id, userId: id, action: "delete" },
         "admin users: changed",

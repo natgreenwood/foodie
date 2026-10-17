@@ -10,7 +10,13 @@ import {
   setProviderCredential,
   type AiProvider,
 } from "../ai/settings.js";
-import { isRecord, type AuthDeps } from "./auth.js";
+import { asAdmin } from "../auth/admin.js";
+import {
+  adminActor,
+  isRecord,
+  sendAdminRefusal,
+  type AuthDeps,
+} from "./auth.js";
 import { apiErrorHandler, sendError } from "./errors.js";
 
 export interface AdminAiDeps extends AuthDeps {
@@ -79,7 +85,8 @@ function unknownProvider(reply: FastifyReply) {
 // /admin/ai: the platform-wide AI provider credentials and the model each
 // procedure uses. Registered behind requireUser and requireAdmin. Responses
 // say only whether a provider is configured, never its credential, and no
-// log line here carries one. Every write is idempotent.
+// log line here carries one. Every write is idempotent, and re-checks the
+// acting admin inside its own transaction (asAdmin).
 export const adminAiRoutes: FastifyPluginCallback<AdminAiDeps> = (
   app,
   { db, settingsKey },
@@ -119,7 +126,10 @@ export const adminAiRoutes: FastifyPluginCallback<AdminAiDeps> = (
       if ("problem" in parsed) {
         return sendError(reply, 400, "invalid_request", parsed.problem);
       }
-      await setProviderCredential(db, settingsKey, provider, parsed.credential);
+      const result = await asAdmin(db, adminActor(request), null, (t) =>
+        setProviderCredential(t, settingsKey, provider, parsed.credential),
+      );
+      if (result.refused) return sendAdminRefusal(reply, result.refused);
       request.log.info(
         { adminId: request.user!.id, provider, action: "set" },
         "admin ai: provider changed",
@@ -134,7 +144,10 @@ export const adminAiRoutes: FastifyPluginCallback<AdminAiDeps> = (
     async (request, reply) => {
       const { provider } = request.params;
       if (!isAiProvider(provider)) return unknownProvider(reply);
-      await clearProviderCredential(db, provider);
+      const result = await asAdmin(db, adminActor(request), null, (t) =>
+        clearProviderCredential(t, provider),
+      );
+      if (result.refused) return sendAdminRefusal(reply, result.refused);
       request.log.info(
         { adminId: request.user!.id, provider, action: "clear" },
         "admin ai: provider changed",
@@ -182,7 +195,10 @@ export const adminAiRoutes: FastifyPluginCallback<AdminAiDeps> = (
         );
       }
       const selection = { procedure, provider: body.provider, model };
-      await setModelSelection(db, selection);
+      const result = await asAdmin(db, adminActor(request), null, (t) =>
+        setModelSelection(t, selection),
+      );
+      if (result.refused) return sendAdminRefusal(reply, result.refused);
       request.log.info(
         { adminId: request.user!.id, ...selection },
         "admin ai: model changed",
