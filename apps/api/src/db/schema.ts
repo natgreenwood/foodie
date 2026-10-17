@@ -350,3 +350,50 @@ export const session = pgTable(
   // Serves the cascade on user delete.
   (t) => [index("session_user_id_idx").on(t.userId)],
 );
+
+// The AI providers the admin can configure (NATG-277). Both AI settings
+// tables check against this list, so adding a provider is a migration.
+const aiProviderCheck = (column: AnyPgColumn) =>
+  sql`${column} IN ('anthropic', 'openai', 'openrouter', 'ollama')`;
+
+// The platform-wide credential for each configured AI provider: its API key,
+// or for Ollama the server's base URL. Clearing a provider deletes its row.
+// `credential` is AES-256-GCM ciphertext under SETTINGS_ENCRYPTION_KEY
+// (src/settings/encryption.ts); the plain value is never stored.
+export const aiProviderSetting = pgTable(
+  "ai_provider_setting",
+  {
+    provider: text("provider").primaryKey(),
+    credential: text("credential").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check("ai_provider_setting_provider_known", aiProviderCheck(t.provider)),
+  ],
+);
+
+// The provider and model each AI procedure uses, one row per procedure.
+// `default` is what a procedure without its own row falls back to; adding a
+// procedure is a row, not a migration. Per-procedure settings such as a
+// reasoning level or usage quota (NATG-241) are later columns here.
+export const aiModelSelection = pgTable(
+  "ai_model_selection",
+  {
+    procedure: text("procedure").primaryKey(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check("ai_model_selection_provider_known", aiProviderCheck(t.provider)),
+    check(
+      "ai_model_selection_procedure_not_blank",
+      sql`btrim(${t.procedure}) <> ''`,
+    ),
+    check("ai_model_selection_model_not_blank", sql`btrim(${t.model}) <> ''`),
+  ],
+);
