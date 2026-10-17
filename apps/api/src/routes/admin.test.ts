@@ -3,7 +3,7 @@ import { Writable } from "node:stream";
 import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
 import { describe, expect, onTestFinished } from "vitest";
-import { buildApp, logRedactPaths } from "../app.js";
+import { buildApp, logRedactPaths, logSerializers } from "../app.js";
 import { providerCredential } from "../ai/settings.js";
 import { createUser } from "../auth/accounts.js";
 import { session, user } from "../db/schema.js";
@@ -17,7 +17,7 @@ const unused = () => Promise.reject(new Error("not used by these tests"));
 type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 // The app on the test transaction, logging everything at trace level with
-// the server's redaction, with its log lines collected.
+// the server's serializers and redaction, with its log lines collected.
 function start(tx: TestTransaction) {
   const logLines: string[] = [];
   const stream = new Writable({
@@ -35,7 +35,14 @@ function start(tx: TestTransaction) {
       secureCookies: true,
       settingsKey,
     },
-    { logger: { level: "trace", stream, redact: logRedactPaths } },
+    {
+      logger: {
+        level: "trace",
+        stream,
+        serializers: logSerializers,
+        redact: logRedactPaths,
+      },
+    },
   );
   onTestFinished(() => app.close());
 
@@ -559,6 +566,95 @@ describe("AI provider settings", () => {
     expect(logLines.join("")).not.toContain("sk-logged-by-mistake");
     expect(logLines.join("")).not.toContain("u:p@h");
   });
+
+  dbTest.for([
+    { password: "S3NTINEL" },
+    { user: { password: "S3NTINEL" } },
+    { passwordHash: "S3NTINEL" },
+    { account: { passwordHash: "S3NTINEL" } },
+    { clientSecret: "S3NTINEL" },
+    { oidc: { clientSecret: "S3NTINEL" } },
+    { client_secret: "S3NTINEL" },
+    { form: { client_secret: "S3NTINEL" } },
+    { checks: { state: "S3NTINEL", nonce: "S3NTINEL", codeVerifier: "x" } },
+    { trip: { checks: { codeVerifier: "S3NTINEL" } } },
+    { codeVerifier: "S3NTINEL" },
+    { trip: { codeVerifier: "S3NTINEL" } },
+    { code_verifier: "S3NTINEL" },
+    { form: { code_verifier: "S3NTINEL" } },
+    { query: { code: "S3NTINEL", state: "s" } },
+    { callback: { query: { code: "S3NTINEL" } } },
+    { token: "S3NTINEL" },
+    { session: { token: "S3NTINEL" } },
+    { access_token: "S3NTINEL" },
+    { tokens: { access_token: "S3NTINEL" } },
+    { id_token: "S3NTINEL" },
+    { tokens: { id_token: "S3NTINEL" } },
+    { refresh_token: "S3NTINEL" },
+    { tokens: { refresh_token: "S3NTINEL" } },
+    { cookies: { foodie_session: "S3NTINEL" } },
+    { request: { cookies: { foodie_oidc: "S3NTINEL" } } },
+    { headers: { cookie: "foodie_session=S3NTINEL" } },
+    { request: { headers: { cookie: "foodie_session=S3NTINEL" } } },
+    { headers: { "set-cookie": "foodie_session=S3NTINEL" } },
+    { response: { headers: { "set-cookie": "foodie_session=S3NTINEL" } } },
+    { headers: { authorization: "Bearer S3NTINEL" } },
+    { request: { headers: { authorization: "Bearer S3NTINEL" } } },
+  ])(
+    "redacts an authentication secret if one is ever logged: %j",
+    (fields, { tx }) => {
+      const { app, logLines } = start(tx);
+
+      app.log.info(fields, "oops");
+
+      expect(logLines).toHaveLength(1);
+      expect(logLines[0]).toContain("[Redacted]");
+      expect(logLines[0]).not.toContain("S3NTINEL");
+    },
+  );
+
+  dbTest("keeps the fields a log line needs", ({ tx }) => {
+    const { app, logLines } = start(tx);
+
+    app.log.info(
+      { code: "FST_ERR_CTP_INVALID_JSON_BODY", email: "cook@example.com" },
+      "unparseable body",
+    );
+
+    expect(logLines).toHaveLength(1);
+    expect(logLines[0]).toContain("FST_ERR_CTP_INVALID_JSON_BODY");
+    expect(logLines[0]).toContain("cook@example.com");
+    expect(logLines[0]).not.toContain("[Redacted]");
+  });
+
+  // Spellings of an admin path Fastify routes to an admin route, answers 404
+  // for, or routes elsewhere, each with a key in the query string. Neither the
+  // log nor the response may carry it. The logged url is not asserted: how a
+  // path is spelled in the log is NATG-305's call, not this test's.
+  dbTest.for([
+    ["/%61dmin/ai", 401],
+    ["/admin/missing", 404],
+    ["/admin", 404],
+    ["//admin/ai", 404],
+    ["/ADMIN/ai", 404],
+    ["/admin%2Fai", 404],
+    ["/administrators", 404],
+    ["/health", 200],
+  ] as const)(
+    "GET %s?apiKey=… answers %i with the key in neither the log nor the body",
+    async ([path, status], { tx }) => {
+      const { app, logLines } = start(tx);
+      const key = `sk-ant-${randomBytes(24).toString("hex")}`;
+
+      const res = await app.inject({ url: `${path}?apiKey=${key}&x=1` });
+
+      expect(res.statusCode).toBe(status);
+      expect(res.body).not.toContain(key);
+      // The request was logged, so the check below is not of an empty log.
+      expect(logLines.join("")).toContain('"msg":"incoming request"');
+      expect(logLines.join("")).not.toContain(key);
+    },
+  );
 });
 
 describe("PUT /admin/ai/models/:procedure", () => {

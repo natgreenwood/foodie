@@ -17,10 +17,19 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-// Lowercase, trimmed, internal whitespace (spaces, tabs, newlines) collapsed
-// to one space. Used for the per-locale uniqueness of names; accents are kept.
+// Exactly the characters JavaScript's \s matches, so this agrees with
+// normaliseUnit in import/measurement-lookup.ts. Listed rather than written as
+// Postgres \s, which asks the libc and so differs by image: musl matches U+0085
+// and not NBSP, glibc matches U+1680 and not NBSP, and neither matches U+202F
+// or U+FEFF.
+const whitespace =
+  "[\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+";
+
+// Lowercase, trimmed, internal whitespace (including NBSP and the other
+// Unicode spaces above) collapsed to one space. Used for the per-locale
+// uniqueness of names and the not-blank checks; accents are kept.
 function normalised(column: AnyPgColumn): SQL {
-  return sql`lower(btrim(regexp_replace(${column}, '\\s+', ' ', 'g')))`;
+  return sql`lower(btrim(regexp_replace(${column}, '${sql.raw(whitespace)}', ' ', 'g')))`;
 }
 
 // Quantities only add up within a type: millilitres to grams needs the
@@ -349,6 +358,58 @@ export const session = pgTable(
   },
   // Serves the cascade on user delete.
   (t) => [index("session_user_id_idx").on(t.userId)],
+);
+
+// A provider identity that signs in to an account (NATG-226). Matched on
+// issuer and subject only, never on email, so an email changed at the
+// provider neither breaks nor moves the link. One identity per provider per
+// account. Deleting the account deletes the link, so the same identity then
+// gets a new account.
+export const oidcIdentity = pgTable(
+  "oidc_identity",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    issuer: text("issuer").notNull(),
+    subject: text("subject").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("oidc_identity_issuer_subject_key").on(t.issuer, t.subject),
+    // Also serves the cascade on user delete.
+    uniqueIndex("oidc_identity_user_issuer_key").on(t.userId, t.issuer),
+  ],
+);
+
+// A browser on its way through the provider: the state, nonce and PKCE
+// verifier its callback is checked against. The browser holds a random token
+// in its own cookie; `id` is its SHA-256, as for session. Used once: the
+// callback deletes the row it reads. `user_id` is set when a signed-in user
+// is connecting an identity rather than signing in.
+export const oidcLogin = pgTable(
+  "oidc_login",
+  {
+    id: text("id").primaryKey(),
+    state: text("state").notNull(),
+    nonce: text("nonce").notNull(),
+    codeVerifier: text("code_verifier").notNull(),
+    userId: bigint("user_id", { mode: "number" }).references(() => user.id, {
+      onDelete: "cascade",
+    }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    // Serves the cascade on user delete.
+    index("oidc_login_user_id_idx").on(t.userId),
+    // Serves the bounded cleanup and the count of trips in progress.
+    index("oidc_login_expires_at_idx").on(t.expiresAt),
+  ],
 );
 
 // The AI providers the admin can configure (NATG-277). Both AI settings

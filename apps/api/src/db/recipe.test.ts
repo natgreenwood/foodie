@@ -59,6 +59,20 @@ describe("recipe", () => {
     });
   });
 
+  dbTest(
+    "rejects a title that is only a non-breaking space",
+    async ({ tx }) => {
+      const ownerId = await newUser(tx);
+      await expect(
+        tx.transaction((sp) =>
+          sp.insert(recipe).values({ ownerId, title: "\u00a0" }),
+        ),
+      ).rejects.toMatchObject({
+        cause: { constraint: "recipe_title_not_blank" },
+      });
+    },
+  );
+
   dbTest("is deleted with its owner, lines and all", async ({ tx }) => {
     const ownerId = await newUser(tx);
     const [mine] = await tx
@@ -274,6 +288,23 @@ describe("recipe_step", () => {
       cause: { constraint: "recipe_step_text_not_blank" },
     });
   });
+
+  dbTest(
+    "rejects step text that is only a non-breaking space",
+    async ({ tx }) => {
+      const id = await newRecipe(tx);
+
+      await expect(
+        tx.transaction((sp) =>
+          sp
+            .insert(recipeStep)
+            .values({ recipeId: id, position: 1, text: "\u00a0" }),
+        ),
+      ).rejects.toMatchObject({
+        cause: { constraint: "recipe_step_text_not_blank" },
+      });
+    },
+  );
 });
 
 describe("recipe_tag", () => {
@@ -321,6 +352,36 @@ describe("recipe_tag", () => {
     await expect(
       tx.transaction((sp) =>
         sp.insert(recipeTag).values({ recipeId: id, tag: " \n " }),
+      ),
+    ).rejects.toMatchObject({
+      cause: { constraint: "recipe_tag_tag_not_blank" },
+    });
+  });
+
+  dbTest(
+    "rejects a tag that matches another once non-breaking spaces are collapsed",
+    async ({ tx }) => {
+      const id = await newRecipe(tx);
+      await tx.insert(recipeTag).values({ recipeId: id, tag: "gluten free" });
+
+      await expect(
+        tx.transaction((sp) =>
+          sp
+            .insert(recipeTag)
+            .values({ recipeId: id, tag: "gluten\u00a0free\u00a0" }),
+        ),
+      ).rejects.toMatchObject({
+        cause: { constraint: "recipe_tag_recipe_id_normalised_tag_pk" },
+      });
+    },
+  );
+
+  dbTest("rejects a tag that is only a non-breaking space", async ({ tx }) => {
+    const id = await newRecipe(tx);
+
+    await expect(
+      tx.transaction((sp) =>
+        sp.insert(recipeTag).values({ recipeId: id, tag: "\u00a0" }),
       ),
     ).rejects.toMatchObject({
       cause: { constraint: "recipe_tag_tag_not_blank" },
