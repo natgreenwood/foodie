@@ -15,6 +15,12 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # Required; the api will not start without it. See .env.example.
       SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
+      # Optional, all four or none; see .env.example.
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
+      OIDC_DISPLAY_NAME: ${OIDC_DISPLAY_NAME:-}
     ports:
       - "${API_PORT:-3000}:3000"
     volumes:

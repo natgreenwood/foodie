@@ -142,7 +142,8 @@ deletes its recipes. Recipes that existed before accounts were given to the
 lowest-id admin by migration `0008_recipe_owner`, which refuses to run if
 there are recipes and no admin.
 
-`/health` and the three `/auth` routes are open. Routes registered inside the
+`/health`, the three `/auth` routes above and the open OIDC routes below are
+open. Routes registered inside the
 signed-in scope in `apps/api/src/app.ts` answer 401 `unauthenticated` without
 a valid session.
 
@@ -157,6 +158,71 @@ later does not change its password. If someone registered that email before
 it was made admin, the api takes the account over: it sets the password to
 `ADMIN_PASSWORD` and signs out all its sessions. Setting only one of the two
 stops the api from starting.
+
+### Signing in with OIDC
+
+Users can also sign in through one OpenID Connect provider, any that follows
+the standard (verified against PocketID). The api finds everything about the
+provider from its discovery document, `<issuer>/.well-known/openid-configuration`,
+and signs in as a confidential client with the authorization code flow, PKCE
+and the scopes `openid profile email`. Set all four of these, or none (in
+`.env` for compose):
+
+- `OIDC_ISSUER_URL`: the provider's issuer, e.g. `https://id.example.com`.
+- `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`: Foodie's client at the provider.
+- `OIDC_REDIRECT_URL`: the callback as the browser reaches it, which is the
+  URL to register at the provider. Through the web app that is
+  `<web origin>/api/auth/oidc/callback`, e.g.
+  `http://localhost:5173/api/auth/oidc/callback` in development.
+- `OIDC_DISPLAY_NAME` (optional): the sign-in button's label.
+
+With none set, OIDC is off. Setting only some stops the api from starting.
+Both URLs must be `https`, except in development (`NODE_ENV=development`).
+With `bws run`, name the secrets `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`,
+as for [the settings key](#supplying-the-key-from-bitwarden-secrets-manager-bws).
+
+**PocketID:** turn on its `EMAILS_VERIFIED` setting. PocketID leaves it off,
+and then reports every email as unverified, so a first OIDC sign-in with the
+email of an existing Foodie account is refused instead of linked.
+
+How accounts are matched:
+
+- An identity is linked to one account by the provider's issuer and `sub`,
+  and always signs in to it, even if its email changes at the provider.
+- A first sign-in whose email matches no account creates one, with no
+  password; who may sign in is decided at the provider. The `name` claim
+  becomes the display name, and later sign-ins never change it.
+- A first sign-in whose email matches an account (ignoring case) is linked
+  to it only when the provider sends `email_verified: true`; otherwise it is
+  refused.
+- A disabled account is refused. A deleted account's identity gets a new,
+  empty account.
+- The admin role is never read from or changed by the provider.
+
+Routes. `start` and `callback` are browser navigations that answer with
+redirects; the callback lands on `/` signed in, or on
+`/sign-in?oidc_error=<code>`:
+
+- `GET /auth/oidc/config`: `{ enabled, displayName }`. Open.
+- `GET /auth/oidc/start`: redirects to the provider. Open.
+- `GET /auth/oidc/callback`: where the provider sends the browser back.
+  Open. Each trip to the provider can come back once, within 10 minutes.
+- `POST /auth/oidc/connect`: signed in. Answers `{ authorizationUrl }` to
+  send the browser to; the callback then lands on `/profile?oidc=connected`
+  or `/profile?oidc_error=<code>`. Accepted only when the provider's email is
+  the account's, ignoring case.
+- `GET /auth/oidc/connection`: signed in. `{ connected, hasPassword }`.
+- `DELETE /auth/oidc/connection`: signed in. Disconnects the identity, 204;
+  409 `password_required` for an account with no password, which would have
+  no way left to sign in.
+
+`oidc_error` is one of `account_exists`, `account_disabled`, `email_missing`
+(sign-in); `email_mismatch`, `identity_in_use`, `already_connected`
+(connect); and `expired`, `provider_unavailable`, `failed` (either).
+
+An account with no password cannot sign in with a password: the sign-in form
+answers it exactly as it answers a wrong password. Signing out of Foodie does
+not sign out of the provider.
 
 ### Administration
 
@@ -174,7 +240,9 @@ or demoted answers 401 or 403 and changes nothing.
 - `POST /admin/users/:id/grant-admin` and `/revoke-admin`: take effect on
   that user's next request.
 - `PUT /admin/users/:id/password` `{ password }`: the new password works
-  straight away; the account's sessions are left alone.
+  straight away; the account's sessions are left alone. 409
+  `password_not_allowed` for an account with no password, which signs in
+  only through OIDC.
 - `DELETE /admin/users/:id`: deletes the account, its sessions and its
   recipes. 204, then 404.
 
