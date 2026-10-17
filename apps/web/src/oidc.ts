@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AuthError, call, errorFrom, reportUnauthenticated } from "./auth";
+import { navigate } from "./router";
 
 // Mirrors the "Contract for NATG-288" in the api's OIDC routes
 // (apps/api/src/routes/oidc.ts and me.ts).
@@ -90,6 +91,18 @@ export function usePageRestored(restored: () => void) {
     window.addEventListener("pageshow", onPageShow);
     return () => window.removeEventListener("pageshow", onPageShow);
   }, [restored]);
+}
+
+// Once the page has shown what an OIDC redirect came back to say, the
+// address stops saying it, so a reload or a shared link does not say it
+// again. Only the named parameters go: ?next, anything else and the hash
+// stay. Through the router, so the pages see the new address; a no-op once
+// they have gone, as Strict Mode runs effects twice.
+export function clearOidcOutcome(names: readonly string[]) {
+  const url = new URL(window.location.href);
+  if (!names.some((name) => url.searchParams.has(name))) return;
+  for (const name of names) url.searchParams.delete(name);
+  navigate(url.pathname + url.search + url.hash, { replace: true });
 }
 
 // How the account signs in, from GET /me's hasPassword and oidc. Fetched
