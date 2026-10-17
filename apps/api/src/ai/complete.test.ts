@@ -313,6 +313,30 @@ dbTest("gives up after the timeout", async ({ tx }) => {
   });
 });
 
+dbTest(
+  "keeps the status when the body times out after the headers",
+  async ({ tx }) => {
+    await configure(tx, "ollama", "llama3.1:8b", "http://ollama:11434");
+    // Headers at once, then a body that never ends until aborted.
+    fetchMock.mockImplementation((_url, init) => {
+      const signal = init!.signal!;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"choices":'));
+          signal.addEventListener("abort", () =>
+            controller.error(signal.reason),
+          );
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200 }));
+    });
+
+    await expect(
+      complete({ db: tx, settingsKey, timeoutMs: 20 }, request),
+    ).rejects.toMatchObject({ reason: "timeout", status: 200 });
+  },
+);
+
 dbTest("reports a connection failure with its cause", async ({ tx }) => {
   await configure(tx, "ollama", "llama3.1:8b", "http://ollama:11434");
   fetchMock.mockRejectedValue(
@@ -329,3 +353,85 @@ dbTest("reports a connection failure with its cause", async ({ tx }) => {
     providerMessage: "connect ECONNREFUSED 10.0.0.5:11434",
   });
 });
+
+dbTest(
+  "scrubs an echoed key and prompt from a provider's error",
+  async ({ tx }) => {
+    await configure(tx, "openai", "gpt-5-mini");
+    respond(401, {
+      error: {
+        message: `Invalid key ${API_KEY} for "${request.system}" / "${request.user}"`,
+      },
+    });
+
+    const err = (await complete({ db: tx, settingsKey }, request).catch(
+      (e: unknown) => e,
+    )) as AiProviderError;
+    expect(err).toBeInstanceOf(AiProviderError);
+    expect(err.status).toBe(401);
+    expect(err.providerMessage).toBe(
+      'Invalid key [redacted] for "[redacted]" / "[redacted]"',
+    );
+    for (const secret of [API_KEY, request.system, request.user]) {
+      expect(err.message).not.toContain(secret);
+    }
+  },
+);
+
+dbTest(
+  "scrubs an echoed Ollama URL, with or without its password",
+  async ({ tx }) => {
+    const baseUrl = "http://me:s3cret-pass@ollama.lan:11434";
+    await configure(tx, "ollama", "llama3.1:8b", baseUrl);
+    respond(401, {
+      error: {
+        message: `denied ${baseUrl} (http://ollama.lan:11434/v1/chat/completions, http://ollama.lan:11434) pw s3cret-pass prompt ${request.user}`,
+      },
+    });
+
+    const err = (await complete({ db: tx, settingsKey }, request).catch(
+      (e: unknown) => e,
+    )) as AiProviderError;
+    expect(err).toBeInstanceOf(AiProviderError);
+    expect(err.status).toBe(401);
+    for (const secret of [
+      baseUrl,
+      "s3cret-pass",
+      "ollama.lan:11434",
+      request.user,
+    ]) {
+      expect(err.message).not.toContain(secret);
+    }
+  },
+);
+
+dbTest(
+  "quotes only error.message, never another error body",
+  async ({ tx }) => {
+    await configure(tx, "openrouter", "google/gemini-flash");
+    respond(401, { error: `bad key, prompt was ${request.user}`, detail: "x" });
+
+    await expect(
+      complete({ db: tx, settingsKey }, request),
+    ).rejects.toMatchObject({ status: 401, providerMessage: "HTTP 401" });
+  },
+);
+
+dbTest(
+  "refuses an Ollama URL whose password does not decode",
+  async ({ tx }) => {
+    await configure(tx, "ollama", "llama3.1:8b", "http://u:%ZZ@host");
+
+    const err = await complete({ db: tx, settingsKey }, request).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(AiNotConfiguredError);
+    expect(err).toMatchObject({
+      reason: "invalid_credential",
+      procedure: "default",
+      provider: "ollama",
+    });
+    expect((err as Error).message).not.toContain("%ZZ");
+    expect(fetchMock).not.toHaveBeenCalled();
+  },
+);

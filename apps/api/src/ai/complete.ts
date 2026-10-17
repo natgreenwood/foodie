@@ -48,7 +48,10 @@ export interface CompleteDeps {
 //   `default`.
 // - no_credential: the chosen provider has no API key (or, for Ollama, no
 //   base URL) stored.
-export type NotConfiguredReason = "no_selection" | "no_credential";
+// - invalid_credential: the stored credential cannot be used, such as an
+//   Ollama base URL whose user or password does not decode.
+export type NotConfiguredReason =
+  "no_selection" | "no_credential" | "invalid_credential";
 
 // The admin has not finished setting AI up. Callers map it to a "configure
 // a provider" response rather than a failure.
@@ -60,10 +63,13 @@ export class AiNotConfiguredError extends Error {
     // The chosen provider; null for no_selection.
     readonly provider: AiProvider | null,
   ) {
+    // Never the credential itself.
     super(
       reason === "no_selection"
         ? `no AI provider selected for ${procedure}`
-        : `AI provider ${provider} selected for ${procedure} has no credential`,
+        : reason === "no_credential"
+          ? `AI provider ${provider} selected for ${procedure} has no credential`
+          : `AI provider ${provider} selected for ${procedure} has an unusable credential`,
     );
   }
 }
@@ -76,7 +82,8 @@ export type ProviderFailureReason =
   "unreachable" | "timeout" | "http_error" | "bad_response";
 
 // Never carries the credential, the Ollama base URL (which may hold a
-// password) or the prompt.
+// password) or the prompt: everything taken from the provider's answer is
+// scrubbed of them first, since a provider may echo them back.
 export class AiProviderError extends Error {
   override name = "AiProviderError";
   constructor(
@@ -85,7 +92,8 @@ export class AiProviderError extends Error {
     readonly reason: ProviderFailureReason,
     // The provider's HTTP status; null if there was no response.
     readonly status: number | null,
-    // The provider's own error message, or what was wrong with its answer.
+    // The provider's error.message, scrubbed, or what was wrong with its
+    // answer. Never its raw body.
     readonly providerMessage: string,
     options?: ErrorOptions,
   ) {
@@ -124,6 +132,10 @@ export async function complete(
   }
 
   const call = buildRequest(provider, model, credential, request);
+  if (call === null) {
+    throw new AiNotConfiguredError("invalid_credential", procedure, provider);
+  }
+  const secrets = [credential, ...call.secrets, request.system, request.user];
   const fail = (
     reason: ProviderFailureReason,
     status: number | null,
@@ -135,34 +147,43 @@ export async function complete(
       model,
       reason,
       status,
-      message.slice(0, MAX_PROVIDER_MESSAGE),
+      // Scrubbed before cutting, so no secret survives cut in half.
+      scrub(message, secrets).slice(0, MAX_PROVIDER_MESSAGE),
       options,
     );
 
-  let status: number;
-  let body: string | null;
+  // A failure with no answer: a timeout, or the connection failing. `status`
+  // is the response's when its headers had arrived before the body failed.
+  const noAnswer = (err: unknown, status: number | null) =>
+    err instanceof Error && err.name === "TimeoutError"
+      ? fail(
+          "timeout",
+          status,
+          `no response within ${deps.timeoutMs ?? COMPLETION_TIMEOUT_MS} ms`,
+          { cause: err },
+        )
+      : // fetch's own message is only "fetch failed"; the reason is in cause.
+        fail("unreachable", status, networkReason(err), { cause: err });
+
+  let res: Response;
   try {
-    const res = await fetch(call.url, {
+    res = await fetch(call.url, {
       method: "POST",
       headers: { "content-type": "application/json", ...call.headers },
       body: JSON.stringify(call.body),
       // Covers the body too: it aborts the response stream being read.
       signal: AbortSignal.timeout(deps.timeoutMs ?? COMPLETION_TIMEOUT_MS),
     });
-    status = res.status;
+  } catch (err) {
+    throw noAnswer(err, null);
+  }
+  const { status } = res;
+  let body: string | null;
+  try {
     const bytes = await readCapped(res.body, MAX_RESPONSE_BYTES);
     body = bytes === null ? null : bytes.toString("utf8");
   } catch (err) {
-    if (err instanceof Error && err.name === "TimeoutError") {
-      throw fail(
-        "timeout",
-        null,
-        `no response within ${deps.timeoutMs ?? COMPLETION_TIMEOUT_MS} ms`,
-        { cause: err },
-      );
-    }
-    // fetch's own message is only "fetch failed"; the reason is in cause.
-    throw fail("unreachable", null, networkReason(err), { cause: err });
+    throw noAnswer(err, status);
   }
 
   const json = body === null ? null : parseJson(body);
@@ -183,6 +204,9 @@ interface ProviderRequest {
   url: string;
   headers: Record<string, string>;
   body: unknown;
+  // Forms of the credential, beyond the stored value, that must never reach
+  // an error: for Ollama the URL with and without its user and password.
+  secrets: string[];
 }
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -195,7 +219,7 @@ function buildRequest(
   model: string,
   credential: string,
   { system, user, maxTokens }: CompletionRequest,
-): ProviderRequest {
+): ProviderRequest | null {
   if (provider === "anthropic") {
     return {
       url: ANTHROPIC_URL,
@@ -209,6 +233,7 @@ function buildRequest(
         system,
         messages: [{ role: "user", content: user }],
       },
+      secrets: [],
     };
   }
   const messages = [
@@ -222,6 +247,7 @@ function buildRequest(
       // Not max_tokens: OpenAI's reasoning models refuse it with a 400, and
       // every OpenAI model takes max_completion_tokens. Do not change it back.
       body: { model, messages, max_completion_tokens: maxTokens },
+      secrets: [],
     };
   }
   if (provider === "openrouter") {
@@ -229,30 +255,51 @@ function buildRequest(
       url: OPENROUTER_URL,
       headers: { authorization: `Bearer ${credential}` },
       body: { model, messages, max_tokens: maxTokens },
+      secrets: [],
     };
   }
-  return {
-    ...ollamaEndpoint(credential),
-    body: { model, messages, max_tokens: maxTokens },
-  };
+  const endpoint = ollamaEndpoint(credential);
+  if (endpoint === null) return null;
+  return { ...endpoint, body: { model, messages, max_tokens: maxTokens } };
 }
 
 // Ollama's credential is its server's base URL, as the admin saved it (e.g.
 // http://ollama:11434, or behind a proxy at a path). One trailing /v1 is
 // dropped, since Ollama's own docs show the base URL with it. The stored
 // value stays as the admin typed it. fetch refuses a URL with a user and
-// password in it, so those become a Basic header instead.
-function ollamaEndpoint(baseUrl: string): Omit<ProviderRequest, "body"> {
-  const base = new URL(baseUrl);
+// password in it, so those become a Basic header instead. Null when the URL
+// does not parse or its user or password does not decode (e.g. "%ZZ"),
+// which the admin route's check lets through.
+function ollamaEndpoint(baseUrl: string): Omit<ProviderRequest, "body"> | null {
+  let base: URL;
+  let user: string;
+  let password: string;
+  try {
+    base = new URL(baseUrl);
+    user = decodeURIComponent(base.username);
+    password = decodeURIComponent(base.password);
+  } catch {
+    return null;
+  }
   const headers: Record<string, string> = {};
-  if (base.username !== "" || base.password !== "") {
-    const userinfo = `${decodeURIComponent(base.username)}:${decodeURIComponent(base.password)}`;
-    headers.authorization = `Basic ${Buffer.from(userinfo).toString("base64")}`;
+  const secrets = [base.href];
+  if (user !== "" || password !== "") {
+    const basic = Buffer.from(`${user}:${password}`).toString("base64");
+    headers.authorization = `Basic ${basic}`;
+    secrets.push(basic, base.password, password);
     base.username = "";
     base.password = "";
+    secrets.push(base.href);
   }
   base.pathname = `${base.pathname.replace(/\/+$/, "").replace(/\/v1$/, "")}/`;
-  return { url: new URL("v1/chat/completions", base).toString(), headers };
+  const url = new URL("v1/chat/completions", base).toString();
+  secrets.push(url);
+  // An echo may drop the trailing slash URL adds to a bare host.
+  return {
+    url,
+    headers,
+    secrets: secrets.flatMap((secret) => [secret, secret.replace(/\/+$/, "")]),
+  };
 }
 
 function parseJson(body: string): unknown {
@@ -267,16 +314,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-// The message in an error body: { error: { message } } from Anthropic and
-// the OpenAI-compatible APIs, or { error: "..." } from older Ollama.
+// The message in an error body, { error: { message } } from Anthropic and
+// the OpenAI-compatible APIs; null for any other body, which is never
+// quoted.
 function errorMessage(json: unknown): string | null {
-  if (!isRecord(json)) return null;
-  const { error } = json;
-  if (typeof error === "string") return error;
-  if (isRecord(error) && typeof error.message === "string") {
-    return error.message;
-  }
-  return null;
+  if (!isRecord(json) || !isRecord(json.error)) return null;
+  const { message } = json.error;
+  return typeof message === "string" ? message : null;
+}
+
+// Shorter values are left alone: redacting a two-letter password everywhere
+// would wreck the message and hide little.
+const MIN_SCRUBBED_LENGTH = 4;
+
+// `text` with every occurrence of each secret replaced, longest first so a
+// URL goes whole rather than leaving its host around a redacted password.
+// Only exact copies are caught: a provider quoting part of a prompt is not.
+function scrub(text: string, secrets: readonly string[]): string {
+  return [...new Set(secrets)]
+    .filter((secret) => secret.length >= MIN_SCRUBBED_LENGTH)
+    .sort((a, b) => b.length - a.length)
+    .reduce((out, secret) => out.replaceAll(secret, "[redacted]"), text);
 }
 
 // Messages API: content is a list of blocks; the answer is its text blocks.
