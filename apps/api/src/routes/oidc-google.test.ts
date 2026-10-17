@@ -356,7 +356,9 @@ describe("connecting Google from the profile", () => {
         identity({ email: local.email.toUpperCase(), email_verified: false }),
       );
 
-      expect(res.headers.location).toBe("/profile?oidc=connected");
+      expect(res.headers.location).toBe(
+        "/profile?oidc=connected&oidc_provider=google",
+      );
       expect((await me(local.token)).oidc.providers).toEqual([
         { id: "generic", displayName: "Home SSO", connected: true },
         { id: "google", displayName: "Google", connected: true },

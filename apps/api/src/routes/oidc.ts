@@ -87,7 +87,8 @@ interface ProviderParams {
 
 // The oidc_error the web app is redirected back with, on /sign-in for a
 // sign-in and on /profile for a connect, alongside oidc_provider naming the
-// provider's id so the page can say which one refused. A code, never text:
+// provider's id so the page can say which one refused. A successful connect
+// carries oidc_provider too, for the same reason. A code, never text:
 // the web app owns the wording, so a crafted link cannot put words on our
 // pages.
 // Besides the refusals, provider_error covers a provider that could not be
@@ -479,5 +480,7 @@ async function finishConnect(
     return redirectWithError(reply, PROFILE_PAGE, refused, oidc.id);
   }
   request.log.info({ userId, provider: oidc.id }, "auth: oidc connected");
-  return reply.redirect(`${PROFILE_PAGE}?oidc=connected`);
+  return reply.redirect(
+    `${PROFILE_PAGE}?oidc=connected&oidc_provider=${oidc.id}`,
+  );
 }

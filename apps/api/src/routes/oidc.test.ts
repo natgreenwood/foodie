@@ -1375,7 +1375,9 @@ describe("connecting an identity from the profile", () => {
       const res = await oidcConnect(local.token, who);
 
       expect(res.statusCode).toBe(302);
-      expect(res.headers.location).toBe("/profile?oidc=connected");
+      expect(res.headers.location).toBe(
+        "/profile?oidc=connected&oidc_provider=generic",
+      );
       expect(await identitiesOf(tx, local.id)).toEqual([
         { issuer: mock.issuer.origin, subject: who.sub },
       ]);
@@ -1411,7 +1413,9 @@ describe("connecting an identity from the profile", () => {
 
     const res = await oidcConnect(local.token, who);
 
-    expect(res.headers.location).toBe("/profile?oidc=connected");
+    expect(res.headers.location).toBe(
+      "/profile?oidc=connected&oidc_provider=generic",
+    );
     expect(await identitiesOf(tx, local.id)).toHaveLength(1);
   });
 
