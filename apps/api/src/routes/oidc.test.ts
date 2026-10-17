@@ -1004,6 +1004,93 @@ describe("admission limits on starting a trip", () => {
     ]);
   });
 
+  // SEC-D1: a client usually holds a whole IPv6 /64, so changing address
+  // within it must not reset its budget.
+  describe("per-client key", () => {
+    const limited = () =>
+      provider(mock.issuer, "Home SSO", { startsPerMinute: 2 });
+    const from = (
+      app: ReturnType<typeof start>["app"],
+      url: string,
+      remoteAddress: string,
+    ) => app.inject({ method: "GET", url, remoteAddress });
+
+    dbTest.for([
+      ["/auth/oidc/start", 302],
+      ["/auth/oidc/callback?code=c&state=s", 302],
+    ] as const)(
+      "%s: addresses in one /64 share a budget, another /64 has its own",
+      async ([url, admitted], { tx }) => {
+        const { app, logLines } = start(tx, limited());
+
+        expect((await from(app, url, "2001:db8:1:2::1")).statusCode).toBe(
+          admitted,
+        );
+        expect((await from(app, url, "2001:db8:1:2::2")).statusCode).toBe(
+          admitted,
+        );
+        const refused = await from(app, url, "2001:db8:1:2:ffff::9");
+        const other = await from(app, url, "2001:db8:1:3::1");
+
+        expect(refused.statusCode).toBe(429);
+        expect(refused.json()).toEqual(rateLimited);
+        expect(other.statusCode).toBe(admitted);
+        // Logged as counted: the /64, not the address that sent it.
+        expect(logLines.filter((l) => l.msg === "oidc: rate limited")).toEqual([
+          expect.objectContaining({ key: "2001:db8:1:2::" }),
+        ]);
+      },
+    );
+
+    dbTest(
+      "an IPv4-mapped address and its plain IPv4 form share a budget",
+      async ({ tx }) => {
+        const { app } = start(tx, limited());
+
+        for (const address of ["10.0.0.5", "::ffff:10.0.0.5"]) {
+          expect(
+            (await from(app, "/auth/oidc/start", address)).statusCode,
+          ).toBe(302);
+        }
+
+        expect(
+          (await from(app, "/auth/oidc/start", "::ffff:10.0.0.5")).statusCode,
+        ).toBe(429);
+      },
+    );
+
+    dbTest("the shared start window counts the /64 too", async ({ tx }) => {
+      const { app, localAccount, logLines } = start(tx, limited());
+      const cook = await localAccount();
+
+      expect(
+        (await from(app, "/auth/oidc/start", "2001:db8:1:2::1")).statusCode,
+      ).toBe(302);
+      const connect = await app.inject({
+        method: "POST",
+        url: "/auth/oidc/connect",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: "",
+        cookies: { [SESSION_COOKIE]: cook.token },
+        remoteAddress: "2001:db8:1:2::2",
+      });
+      expect(connect.statusCode).toBe(302);
+      // Under the start route's own limit, over the window shared with
+      // connect.
+      const refused = await from(app, "/auth/oidc/start", "2001:db8:1:2::3");
+
+      expect(refused.statusCode).toBe(429);
+      expect(
+        logLines.filter((l) => l.msg === "auth: oidc start refused"),
+      ).toEqual([
+        expect.objectContaining({
+          reason: "client_starts",
+          key: "2001:db8:1:2::",
+        }),
+      ]);
+    });
+  });
+
   dbTest(
     "refuses a start once the trips in progress reach the bound, before contacting the provider",
     async ({ tx }) => {

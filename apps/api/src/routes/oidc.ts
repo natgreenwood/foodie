@@ -4,6 +4,7 @@ import type {
   FastifyRequest,
 } from "fastify";
 import { sessionUser } from "../auth/accounts.js";
+import { clientKey } from "../auth/client-key.js";
 import {
   connectOidcIdentity,
   disconnectOidc,
@@ -31,7 +32,7 @@ export interface OidcRouteDeps extends OidcDeps {
   oidcStarts: SlidingWindow;
 }
 
-// Client addresses the start window remembers at most.
+// Client keys the start window remembers at most.
 export const OIDC_START_KEYS = 10_000;
 
 // The per-client window for an app; per api process, like the app.
@@ -46,7 +47,7 @@ export function oidcStartWindow(oidc: OidcProvider | null | undefined) {
 const RATE_LIMITED_MESSAGE = "too many sign-in attempts; try again in a minute";
 
 // @fastify/rate-limit's limit on start, callback and connect: per client
-// address, a fixed minute per route. Before the handler, so a refused start
+// key, a fixed minute per route. Before the handler, so a refused start
 // writes nothing. The start window above stays the sliding count that
 // sign-in and connect share; this one also covers the callback.
 function perClientLimit(oidc: OidcProvider | null | undefined) {
@@ -245,9 +246,9 @@ async function beginTrip(
   oidc: OidcProvider,
   userId: number | null,
 ): Promise<URL | "rate_limited" | "provider_error"> {
-  // request.ip: the client, once TRUST_PROXY names the proxy in front of
-  // the api (NATG-281); until then every client behind a proxy shares one.
-  const key = request.ip;
+  // The same key as the per-route limits (see clientKey). It follows
+  // TRUST_PROXY (NATG-281); without it every client behind a proxy shares one.
+  const key = clientKey(request);
   if (!deps.oidcStarts.admit(key)) {
     request.log.warn(
       { reason: "client_starts", key },

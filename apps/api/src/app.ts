@@ -4,6 +4,7 @@ import Fastify, {
   type FastifyRequest,
   type FastifyServerOptions,
 } from "fastify";
+import { clientKey } from "./auth/client-key.js";
 import { adminAiRoutes, type AdminAiDeps } from "./routes/admin-ai.js";
 import { adminUserRoutes } from "./routes/admin-users.js";
 import {
@@ -78,13 +79,10 @@ export function buildApp(
     );
     return sendError(reply, 404, "not_found", "route not found");
   });
-  // Limits only the routes that set config.rateLimit, per client address:
-  // request.ip, which follows TRUST_PROXY. A refusal is a RateLimitedError,
-  // which the routes' apiErrorHandler answers as 429 rate_limited.
-  app.register(rateLimit, {
-    global: false,
-    keyGenerator: (request) => request.ip,
-  });
+  // Limits only the routes that set config.rateLimit, per client (see
+  // clientKey). A refusal is a RateLimitedError, which the routes'
+  // apiErrorHandler answers as 429 rate_limited.
+  app.register(rateLimit, { global: false, keyGenerator: clientKey });
   registerSessionSupport(app);
   // Sign-in and connect starts share one count per client.
   const oidcDeps = { ...deps, oidcStarts: oidcStartWindow(deps.oidc) };

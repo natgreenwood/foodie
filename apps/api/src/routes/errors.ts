@@ -1,4 +1,5 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
+import { clientKey } from "../auth/client-key.js";
 import { describeError } from "../db/errors.js";
 
 // The error codes the signed-in api (auth, profile, recipes, admin) answers with,
@@ -70,7 +71,10 @@ export function apiErrorHandler(module: string) {
       return sendError(reply, 400, "invalid_request", "body must be JSON");
     }
     if (err instanceof RateLimitedError) {
-      request.log.warn({ route, key: request.ip }, `${module}: rate limited`);
+      request.log.warn(
+        { route, key: clientKey(request) },
+        `${module}: rate limited`,
+      );
       return sendError(reply, 429, "rate_limited", err.message);
     }
     // Fastify's own 4xx errors (a body over the limit, an unsupported content
