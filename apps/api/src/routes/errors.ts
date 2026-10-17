@@ -16,6 +16,9 @@ export type ApiErrorCode =
   | "no_local_password"
   | "rate_limited"
   | "not_found"
+  | "invalid_lines"
+  | "invalid_steps"
+  | "unresolved_lines"
   | "internal_error";
 
 // A request's path as a log line may carry it: percent-decoded, so every

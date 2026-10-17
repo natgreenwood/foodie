@@ -1,10 +1,11 @@
+import { eq } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { Writable } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp, type AppSeams } from "../app.js";
 import { createSession } from "../auth/accounts.js";
-import { user } from "../db/schema.js";
+import { ingredient, measurement, recipe, user } from "../db/schema.js";
 import { measurements, UNIT } from "../import/extract/__fixtures__/units.js";
 import {
   FetchFailedError,
@@ -13,7 +14,8 @@ import {
   type FetchedPage,
   type FetchFailureReason,
 } from "../import/fetch.js";
-import { dbTest } from "../test/db.js";
+import { MAX_LINE_CHARS } from "../import/extract/extract.js";
+import { dbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE, type AuthDeps } from "./auth.js";
 import type { ImportDeps } from "./imports.js";
 
@@ -485,6 +487,287 @@ describe("POST /imports/preview session", () => {
     expect(res.json()).toMatchObject({
       sourceUrl: URL_,
       recipe: { title: "Spaghetti with Tomato & Basil Sauce" },
+    });
+  });
+});
+
+describe("POST /imports", () => {
+  const SOURCE = "https://www.example.com/recipes/dal";
+  const noFetch = () => Promise.reject(new Error("save never fetches"));
+
+  // A signed-in cook with a session, and a catalogue ingredient and unit.
+  async function setUp(tx: TestTransaction) {
+    const [cook] = await tx
+      .insert(user)
+      .values({ email: `cook-${crypto.randomUUID()}@imports.test` })
+      .returning({ id: user.id });
+    const { token } = await createSession(tx, cook!.id);
+    const [lentils] = await tx
+      .insert(ingredient)
+      .values({ source: "test" })
+      .returning({ id: ingredient.id });
+    const [gram] = await tx
+      .insert(measurement)
+      .values({ type: "mass", factorToBase: "1" })
+      .returning({ id: measurement.id });
+    start(noFetch, undefined, { db: tx, seams: {} });
+    return {
+      cookId: cook!.id,
+      token,
+      lentilsId: lentils!.id,
+      gramId: gram!.id,
+    };
+  }
+
+  // A reviewed draft as the web app posts it back: the preview's lines, each
+  // with the catalogue ids the cook settled on.
+  function reviewed(
+    ids: { lentilsId: number; gramId: number },
+    lines?: Record<string, unknown>[],
+  ) {
+    return {
+      sourceUrl: SOURCE,
+      recipe: {
+        title: "Dal",
+        servings: 4,
+        prepMinutes: 10,
+        cookMinutes: 30,
+        ingredients: lines ?? [
+          {
+            position: 1,
+            rawText: "250 g red lentils, rinsed",
+            quantity: "250",
+            unit: { measurementId: ids.gramId, key: null },
+            ingredientText: "red lentils",
+            prepNotes: "rinsed",
+            notes: null,
+            ingredientId: ids.lentilsId,
+            measurementId: ids.gramId,
+          },
+          {
+            position: 2,
+            rawText: "Salt to taste",
+            quantity: null,
+            unit: null,
+            ingredientText: "Salt",
+            prepNotes: null,
+            notes: "to taste",
+            ingredientId: ids.lentilsId,
+            measurementId: null,
+          },
+        ],
+        steps: [{ position: 1, text: "Simmer the lentils." }],
+        tags: ["dinner"],
+      },
+    };
+  }
+
+  function save(payload: unknown, token?: string) {
+    return app.inject({
+      method: "POST",
+      url: "/imports",
+      payload: payload as object,
+      cookies: token ? { [SESSION_COOKIE]: token } : {},
+    });
+  }
+
+  function rejectionLog() {
+    return logLines.filter((l) => l.msg === "import save: rejected");
+  }
+
+  it("returns 401 without a session", async () => {
+    start(noFetch, undefined, { seams: {} });
+
+    const res = await save({ sourceUrl: SOURCE, recipe: {} });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({
+      error: "unauthenticated",
+      message: "sign in required",
+    });
+  });
+
+  dbTest("saves the draft as the cook's recipe", async ({ tx }) => {
+    const ids = await setUp(tx);
+
+    const res = await save(reviewed(ids), ids.token);
+
+    expect(res.statusCode).toBe(201);
+    const body = res.json<Record<string, unknown>>();
+    expect(body).toMatchObject({
+      title: "Dal",
+      sourceUrl: SOURCE,
+      servings: 4,
+      prepMinutes: 10,
+      cookMinutes: 30,
+      alreadyImported: false,
+    });
+    expect(body).not.toHaveProperty("ownerId");
+    const [row] = await tx
+      .select({ ownerId: recipe.ownerId })
+      .from(recipe)
+      .where(eq(recipe.id, body.id as number));
+    expect(row).toEqual({ ownerId: ids.cookId });
+  });
+
+  dbTest(
+    "saves a URL the cook already has, normalised as fetchPage does, and says so",
+    async ({ tx }) => {
+      const ids = await setUp(tx);
+      await save(reviewed(ids), ids.token);
+
+      const res = await save(
+        { ...reviewed(ids), sourceUrl: `${SOURCE}/?utm_source=x#method` },
+        ids.token,
+      );
+
+      expect(res.statusCode).toBe(201);
+      expect(res.json()).toMatchObject({
+        sourceUrl: SOURCE,
+        alreadyImported: true,
+      });
+    },
+  );
+
+  dbTest(
+    "rejects unresolved lines with their positions, and logs them",
+    async ({ tx }) => {
+      const ids = await setUp(tx);
+      const missing = Math.max(ids.lentilsId, ids.gramId) + 1000;
+      const line = (position: number, extra: Record<string, unknown>) => ({
+        position,
+        quantity: "1",
+        ingredientId: ids.lentilsId,
+        measurementId: ids.gramId,
+        ...extra,
+      });
+
+      const res = await save(
+        reviewed(ids, [
+          line(1, {}),
+          line(2, { ingredientId: undefined }),
+          line(3, { measurementId: undefined }),
+          line(4, { ingredientId: missing }),
+        ]),
+        ids.token,
+      );
+
+      // Missing ids are caught before the database is asked.
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toEqual({
+        error: "unresolved_lines",
+        message:
+          "every line needs an ingredientId, and a measurementId or null for no unit",
+        positions: [2, 3],
+      });
+      expect(rejectionLog()).toEqual([
+        expect.objectContaining({
+          userId: ids.cookId,
+          sourceUrl: SOURCE,
+          error: "unresolved_lines",
+          positions: [2, 3],
+        }),
+      ]);
+
+      const again = await save(
+        reviewed(ids, [line(1, {}), line(4, { ingredientId: missing })]),
+        ids.token,
+      );
+
+      expect(again.statusCode).toBe(422);
+      expect(again.json()).toMatchObject({
+        error: "unresolved_lines",
+        positions: [4],
+      });
+      expect(
+        await tx.select().from(recipe).where(eq(recipe.ownerId, ids.cookId)),
+      ).toEqual([]);
+    },
+  );
+
+  dbTest(
+    "rejects a quantity of 0 and over-long notes as invalid lines",
+    async ({ tx }) => {
+      const ids = await setUp(tx);
+      const [first, second] = reviewed(ids).recipe.ingredients;
+
+      const res = await save(
+        reviewed(ids, [
+          { ...first, quantity: "0" },
+          { ...second, notes: "x".repeat(MAX_LINE_CHARS + 1) },
+          { ...first, position: 3, quantity: 1.5 },
+        ]),
+        ids.token,
+      );
+
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({
+        error: "invalid_lines",
+        positions: [1, 2],
+      });
+    },
+  );
+
+  dbTest("rejects a blank step as an invalid step", async ({ tx }) => {
+    const ids = await setUp(tx);
+    const body = reviewed(ids);
+    body.recipe.steps = [
+      { position: 1, text: "Simmer." },
+      { position: 2, text: " \n " },
+    ];
+
+    const res = await save(body, ids.token);
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json()).toMatchObject({
+      error: "invalid_steps",
+      positions: [2],
+    });
+  });
+
+  dbTest.for([
+    ["a sourceUrl that is not http", { sourceUrl: "ftp://example.com/dal" }],
+    ["a blank title", { title: "  " }],
+    ["duplicate line positions", { duplicate: true }],
+    ["a zero servings", { servings: 0 }],
+  ] as const)(
+    "answers 400 invalid_request for %s",
+    async ([, change], { tx }) => {
+      const ids = await setUp(tx);
+      const body = reviewed(ids);
+      if ("sourceUrl" in change) body.sourceUrl = change.sourceUrl;
+      if ("title" in change) body.recipe.title = change.title;
+      if ("servings" in change) body.recipe.servings = change.servings;
+      if ("duplicate" in change) {
+        body.recipe.ingredients = [
+          body.recipe.ingredients[0]!,
+          body.recipe.ingredients[0]!,
+        ];
+      }
+
+      const res = await save(body, ids.token);
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: "invalid_request" });
+      expect(rejectionLog()).toHaveLength(1);
+    },
+  );
+
+  dbTest("answers an unparseable body in the api's shape", async ({ tx }) => {
+    const ids = await setUp(tx);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/imports",
+      headers: { "content-type": "application/json" },
+      payload: "{",
+      cookies: { [SESSION_COOKIE]: ids.token },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: "invalid_request",
+      message: "body must be JSON",
     });
   });
 });
