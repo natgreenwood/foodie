@@ -29,17 +29,31 @@ export function sendError(
 // keeps only the first.
 export function apiErrorHandler(module: string) {
   return (err: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
+    const route = `${request.method} ${request.routeOptions.url ?? request.url}`;
     if (
       err.code === "FST_ERR_CTP_INVALID_JSON_BODY" ||
       err.code === "FST_ERR_CTP_EMPTY_JSON_BODY"
     ) {
       return sendError(reply, 400, "invalid_request", "body must be JSON");
     }
+    // Fastify's own 4xx errors (a body over the limit, an unsupported content
+    // type) are the client's fault: keep the status, and log below error so
+    // anyone sending a bad request cannot raise an alert. Only Fastify's, so
+    // the message is one of its fixed texts and never a thrown error's detail.
+    if (
+      err.code?.startsWith("FST_") &&
+      err.statusCode !== undefined &&
+      err.statusCode >= 400 &&
+      err.statusCode < 500
+    ) {
+      request.log.warn(
+        { route, status: err.statusCode, code: err.code },
+        `${module}: request refused`,
+      );
+      return sendError(reply, err.statusCode, "invalid_request", err.message);
+    }
     request.log.error(
-      {
-        route: `${request.method} ${request.routeOptions.url ?? request.url}`,
-        error: describeError(err),
-      },
+      { route, error: describeError(err) },
       `${module}: request failed`,
     );
     return sendError(reply, 500, "internal_error", "something went wrong");

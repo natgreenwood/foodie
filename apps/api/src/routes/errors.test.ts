@@ -61,4 +61,44 @@ describe("apiErrorHandler", () => {
       message: "body must be JSON",
     });
   });
+
+  it("keeps the status of Fastify's own 4xx errors and logs them at warn", async () => {
+    const { app, logLines } = start();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/recipes",
+      headers: { "content-type": "application/xml" },
+      payload: "<recipe/>",
+    });
+
+    expect(res.statusCode).toBe(415);
+    expect(res.json()).toMatchObject({ error: "invalid_request" });
+    expect(logLines.filter((l) => (l.level as number) >= 50)).toEqual([]);
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        level: 40,
+        msg: "recipes: request refused",
+        route: "POST /recipes",
+        status: 415,
+      }),
+    );
+  });
+
+  it("answers a thrown 4xx that is not Fastify's with 500", async () => {
+    const { app } = start();
+    app.get("/recipes/teapot", () => {
+      throw Object.assign(new Error("detail not for clients"), {
+        statusCode: 418,
+      });
+    });
+
+    const res = await app.inject({ method: "GET", url: "/recipes/teapot" });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({
+      error: "internal_error",
+      message: "something went wrong",
+    });
+  });
 });
