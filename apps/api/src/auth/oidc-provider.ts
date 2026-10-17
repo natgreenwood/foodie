@@ -28,6 +28,10 @@ export interface OidcProvider {
   issuers: string[];
   // The path of the redirect URL, as the browser requests it.
   callbackPath: string;
+  // The origin of the redirect URL, the only one POST /auth/oidc/connect
+  // accepts a request from: the web app's, since the browser reaches the
+  // api through the web app's /api/ proxy.
+  trustedOrigin: string;
   // The admission limits on starting a trip, from the configuration.
   maxPendingLogins: number;
   startsPerMinute: number;
@@ -91,6 +95,7 @@ export function oidcProvider(
     displayName: settings.displayName,
     issuers: [...new Set([href, href.replace(/\/$/, "")])],
     callbackPath: settings.redirectUrl.pathname,
+    trustedOrigin: settings.redirectUrl.origin,
     maxPendingLogins: settings.maxPendingLogins,
     startsPerMinute: settings.startsPerMinute,
 

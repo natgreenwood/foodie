@@ -559,6 +559,66 @@ describe("AI provider settings", () => {
     expect(logLines.join("")).not.toContain("sk-logged-by-mistake");
     expect(logLines.join("")).not.toContain("u:p@h");
   });
+
+  dbTest.for([
+    { password: "S3NTINEL" },
+    { user: { password: "S3NTINEL" } },
+    { passwordHash: "S3NTINEL" },
+    { account: { passwordHash: "S3NTINEL" } },
+    { clientSecret: "S3NTINEL" },
+    { oidc: { clientSecret: "S3NTINEL" } },
+    { client_secret: "S3NTINEL" },
+    { form: { client_secret: "S3NTINEL" } },
+    { checks: { state: "S3NTINEL", nonce: "S3NTINEL", codeVerifier: "x" } },
+    { trip: { checks: { codeVerifier: "S3NTINEL" } } },
+    { codeVerifier: "S3NTINEL" },
+    { trip: { codeVerifier: "S3NTINEL" } },
+    { code_verifier: "S3NTINEL" },
+    { form: { code_verifier: "S3NTINEL" } },
+    { query: { code: "S3NTINEL", state: "s" } },
+    { callback: { query: { code: "S3NTINEL" } } },
+    { token: "S3NTINEL" },
+    { session: { token: "S3NTINEL" } },
+    { access_token: "S3NTINEL" },
+    { tokens: { access_token: "S3NTINEL" } },
+    { id_token: "S3NTINEL" },
+    { tokens: { id_token: "S3NTINEL" } },
+    { refresh_token: "S3NTINEL" },
+    { tokens: { refresh_token: "S3NTINEL" } },
+    { cookies: { foodie_session: "S3NTINEL" } },
+    { request: { cookies: { foodie_oidc: "S3NTINEL" } } },
+    { headers: { cookie: "foodie_session=S3NTINEL" } },
+    { request: { headers: { cookie: "foodie_session=S3NTINEL" } } },
+    { headers: { "set-cookie": "foodie_session=S3NTINEL" } },
+    { response: { headers: { "set-cookie": "foodie_session=S3NTINEL" } } },
+    { headers: { authorization: "Bearer S3NTINEL" } },
+    { request: { headers: { authorization: "Bearer S3NTINEL" } } },
+  ])(
+    "redacts an authentication secret if one is ever logged: %j",
+    (fields, { tx }) => {
+      const { app, logLines } = start(tx);
+
+      app.log.info(fields, "oops");
+
+      expect(logLines).toHaveLength(1);
+      expect(logLines[0]).toContain("[Redacted]");
+      expect(logLines[0]).not.toContain("S3NTINEL");
+    },
+  );
+
+  dbTest("keeps the fields a log line needs", ({ tx }) => {
+    const { app, logLines } = start(tx);
+
+    app.log.info(
+      { code: "FST_ERR_CTP_INVALID_JSON_BODY", email: "cook@example.com" },
+      "unparseable body",
+    );
+
+    expect(logLines).toHaveLength(1);
+    expect(logLines[0]).toContain("FST_ERR_CTP_INVALID_JSON_BODY");
+    expect(logLines[0]).toContain("cook@example.com");
+    expect(logLines[0]).not.toContain("[Redacted]");
+  });
 });
 
 describe("PUT /admin/ai/models/:procedure", () => {
