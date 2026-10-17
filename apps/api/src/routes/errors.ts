@@ -1,13 +1,15 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
 import { describeError } from "../db/errors.js";
 
-// The error codes the signed-in api (auth, profile, recipes) answers with,
+// The error codes the signed-in api (auth, profile, recipes, admin) answers with,
 // as { error, message }. The import preview has its own shape.
 export type ApiErrorCode =
   | "invalid_request"
   | "invalid_credentials"
   | "email_taken"
   | "unauthenticated"
+  | "forbidden"
+  | "cannot_change_own_account"
   | "not_found"
   | "internal_error";
 

@@ -9,9 +9,15 @@ Import recipes from the web, plan a week of meals, and generate shopping lists.
 Requires Docker with Compose v2.
 
 ```sh
-cp .env.example .env   # optional: same values as the compose defaults
+cp .env.example .env
+# then set SETTINGS_ENCRYPTION_KEY in .env, e.g. to the output of:
+openssl rand -base64 32
 docker compose up --build
 ```
+
+The api will not start without `SETTINGS_ENCRYPTION_KEY`; see
+[AI provider settings](#ai-provider-settings). The other values in
+`.env.example` are the compose defaults.
 
 Postgres applies `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` only
 when it first creates its volume. If you change them after the first run,
@@ -50,7 +56,7 @@ version pinned in `package.json`). You still need a Postgres; the easiest is
 
 ```sh
 pnpm install
-cp .env.example .env
+cp .env.example .env              # and set SETTINGS_ENCRYPTION_KEY, as above
 set -a; . ./.env; set +a          # export DATABASE_URL etc.
 pnpm --filter @foodie/api db:migrate
 NODE_ENV=development pnpm --filter @foodie/api dev
@@ -59,6 +65,31 @@ pnpm --filter @foodie/web dev     # in another shell; proxies /api to localhost:
 
 `NODE_ENV=development` lets the session cookie work over plain HTTP; see
 [Accounts and sign-in](#accounts-and-sign-in).
+
+### Supplying the key from Bitwarden Secrets Manager (`bws`)
+
+Instead of writing the key into `.env`, you can inject it with
+[`bws run`](https://bitwarden.com/help/secrets-manager-cli/). `bws run` sets
+one environment variable per secret, named after the secret's key, so the
+secret must be named exactly `SETTINGS_ENCRYPTION_KEY`. It needs
+`BWS_ACCESS_TOKEN` set; pass `--project-id <id>` to limit it to one project.
+
+Both the migration and the server read the key, so both must run under
+`bws run`:
+
+```sh
+# Docker: the api container migrates, then starts, with the injected key.
+bws run -- 'docker compose up --build'
+
+# Without Docker: source .env first, then run both commands under bws.
+set -a; . ./.env; set +a
+bws run -- 'pnpm --filter @foodie/api db:migrate && NODE_ENV=development pnpm --filter @foodie/api dev'
+```
+
+Delete the `SETTINGS_ENCRYPTION_KEY=` line from your `.env` when you use
+`bws`. Sourcing a `.env` that still has it empty, after `bws run` has injected
+the key (for example `bws run -- sh -c '. ./.env && …'`), replaces the key
+with an empty value and the api refuses to start.
 
 ### Checks
 
@@ -126,6 +157,52 @@ later does not change its password. If someone registered that email before
 it was made admin, the api takes the account over: it sets the password to
 `ADMIN_PASSWORD` and signs out all its sessions. Setting only one of the two
 stops the api from starting.
+
+### Administration
+
+Routes under `/admin` are for admins only: they answer 401 `unauthenticated`
+without a session and 403 `forbidden` to a signed-in user who is not an
+admin. Every change is idempotent and logged with the acting admin's id.
+Each change also re-checks the acting admin when it is made, not only when
+the request arrived: a request still in flight when its sender is disabled
+or demoted answers 401 or 403 and changes nothing.
+
+- `GET /admin/users`: every account as `{ users: [...] }`, with `isAdmin`,
+  `disabledAt` and `hasPassword`; never a password hash.
+- `POST /admin/users/:id/disable` and `/enable`: disabling ends all the
+  account's sessions at once and stops it signing in.
+- `POST /admin/users/:id/grant-admin` and `/revoke-admin`: take effect on
+  that user's next request.
+- `PUT /admin/users/:id/password` `{ password }`: the new password works
+  straight away; the account's sessions are left alone.
+- `DELETE /admin/users/:id`: deletes the account, its sessions and its
+  recipes. 204, then 404.
+
+An admin cannot disable, delete or revoke their own account: 409
+`cannot_change_own_account`. An unknown or malformed id answers 404
+`not_found`.
+
+### AI provider settings
+
+An admin sets one API key per provider for the whole app (Anthropic, OpenAI,
+OpenRouter), or for Ollama its server's base URL, and chooses the provider and
+model each AI procedure uses. In v1 there is one procedure, `default`.
+
+- `GET /admin/ai`: `providers`, a list of `{ provider, configured }`, and
+  `models`, a list of `{ procedure, provider, model }` with null provider and
+  model for a procedure not yet set. Only whether a provider is configured,
+  never its key or URL.
+- `PUT /admin/ai/providers/:provider` `{ apiKey }`, or `{ baseUrl }` for
+  `ollama`; `DELETE` the same path clears it (204 either way).
+- `PUT /admin/ai/models/:procedure` `{ provider, model }`.
+
+Keys and URLs are stored in the `ai_provider_setting` table encrypted with
+AES-256-GCM under `SETTINGS_ENCRYPTION_KEY` (32 random bytes, base64 or hex;
+`openssl rand -base64 32`). The api refuses to start if it is missing or the
+wrong length. Nothing writes a key to the log, and the logger redacts
+`apiKey`, `baseUrl` and request bodies should anything try. Keep the key in
+your secrets store, not in git. If it changes, the stored values can no longer
+be read; set them again on the admin page.
 
 ## Secrets
 

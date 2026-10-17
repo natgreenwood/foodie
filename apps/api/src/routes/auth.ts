@@ -10,6 +10,7 @@ import {
   createSession,
   createUser,
   deleteSession,
+  sessionId,
   sessionUser,
   type Db,
   type Profile,
@@ -20,6 +21,7 @@ import {
   PASSWORD_MAX_LENGTH,
   passwordProblem,
 } from "../auth/credentials.js";
+import type { AdminActor, AdminRefusal } from "../auth/admin.js";
 import { apiErrorHandler, sendError } from "./errors.js";
 
 export interface AuthDeps {
@@ -32,6 +34,8 @@ declare module "fastify" {
   interface FastifyRequest {
     // Set by requireUser on every route behind it; null elsewhere.
     user: Profile | null;
+    // The session table id of the cookie requireUser accepted; null elsewhere.
+    sessionId: string | null;
   }
 }
 
@@ -42,6 +46,7 @@ export const SESSION_COOKIE = "foodie_session";
 export function registerSessionSupport(app: FastifyInstance) {
   app.register(cookie);
   app.decorateRequest("user", null);
+  app.decorateRequest("sessionId", null);
 }
 
 // onRequest hook for every route that needs a signed-in user: loads the
@@ -50,12 +55,38 @@ export function requireUser({ db }: AuthDeps) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const token = request.cookies[SESSION_COOKIE];
     const found = token ? await sessionUser(db, token) : null;
-    if (!found) {
+    if (!token || !found) {
       if (token) reply.clearCookie(SESSION_COOKIE, { path: "/" });
       return sendError(reply, 401, "unauthenticated", "sign in required");
     }
     request.user = found;
+    request.sessionId = sessionId(token);
   };
+}
+
+// onRequest hook, after requireUser, for every admin route: answers 403 to
+// a signed-in user who is not an admin. request.user is read from the
+// database on each request, so a revoked admin is refused at once.
+export async function requireAdmin(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  if (!request.user?.isAdmin) {
+    return sendError(reply, 403, "forbidden", "admin only");
+  }
+}
+
+// The signed-in admin as the actor of a privileged change, for asAdmin.
+export function adminActor(request: FastifyRequest): AdminActor {
+  return { userId: request.user!.id, sessionId: request.sessionId! };
+}
+
+// The answer when asAdmin finds the actor is no longer allowed to act: the
+// same as requireUser and requireAdmin would now give.
+export function sendAdminRefusal(reply: FastifyReply, refusal: AdminRefusal) {
+  return refusal === "forbidden"
+    ? sendError(reply, 403, "forbidden", "admin only")
+    : sendError(reply, 401, "unauthenticated", "sign in required");
 }
 
 // POST /auth/register, /auth/login and /auth/logout. Open to anyone.

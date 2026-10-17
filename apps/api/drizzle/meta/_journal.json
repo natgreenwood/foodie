@@ -64,6 +64,13 @@
       "when": 1792194079126,
       "tag": "0008_recipe_owner",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792196950086,
+      "tag": "0009_ai_settings",
+      "breakpoints": true
     }
   ]
 }

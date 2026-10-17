@@ -80,6 +80,7 @@ function start(
       loadUnits: loadUnits ?? (() => Promise.resolve({ measurements })),
       db,
       secureCookies: false,
+      settingsKey: Buffer.alloc(32),
     },
     { logger: { level: "info", stream } },
     seams,

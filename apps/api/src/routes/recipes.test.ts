@@ -16,6 +16,7 @@ function start(tx: TestTransaction) {
     loadUnits: unused,
     db: tx,
     secureCookies: true,
+    settingsKey: Buffer.alloc(32),
   });
   onTestFinished(() => app.close());
 

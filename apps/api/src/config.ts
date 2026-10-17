@@ -1,4 +1,5 @@
 import { normaliseEmail, passwordProblem } from "./auth/credentials.js";
+import { parseEncryptionKey } from "./settings/encryption.js";
 
 export interface Config {
   host: string;
@@ -11,6 +12,8 @@ export interface Config {
   // Secure on the session cookie, so it is only sent over HTTPS. Off only
   // when NODE_ENV is development, as in the compose dev image.
   secureCookies: boolean;
+  // AES-256 key for settings stored encrypted, such as AI provider API keys.
+  settingsEncryptionKey: Buffer;
 }
 
 export class ConfigError extends Error {
@@ -51,6 +54,23 @@ function parseAdmin(
   return { email, password };
 }
 
+// Required: without it no AI provider key could be stored or read. The value
+// is never echoed back.
+function parseSettingsKey(raw: string | undefined): Buffer {
+  if (!raw) {
+    throw new ConfigError(
+      "SETTINGS_ENCRYPTION_KEY is required: 32 random bytes as base64 or hex, e.g. from `openssl rand -base64 32`",
+    );
+  }
+  const key = parseEncryptionKey(raw);
+  if (key === null) {
+    throw new ConfigError(
+      "SETTINGS_ENCRYPTION_KEY must be exactly 32 bytes, as 64 hex characters or base64",
+    );
+  }
+  return key;
+}
+
 // Reads configuration from the environment and fails fast on anything
 // missing or malformed. Values are never echoed back for DATABASE_URL because
 // it carries the database password.
@@ -66,5 +86,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databaseUrl,
     admin: parseAdmin(env),
     secureCookies: env.NODE_ENV !== "development",
+    settingsEncryptionKey: parseSettingsKey(env.SETTINGS_ENCRYPTION_KEY),
   };
 }

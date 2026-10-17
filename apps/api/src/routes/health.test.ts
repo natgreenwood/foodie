@@ -1,13 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../app.js";
-import type { AuthDeps } from "./auth.js";
+import type { AdminAiDeps } from "./admin-ai.js";
 import type { ImportDeps } from "./imports.js";
 
-// The import and auth routes are not exercised here.
+// The import, auth and admin routes are not exercised here.
 const unused = () => Promise.reject(new Error("not used by these tests"));
 const importDeps: ImportDeps = { fetchPage: unused, loadUnits: unused };
-const authDeps: AuthDeps = { db: {} as AuthDeps["db"], secureCookies: false };
+const authDeps: AdminAiDeps = {
+  db: {} as AdminAiDeps["db"],
+  secureCookies: false,
+  settingsKey: Buffer.alloc(32),
+};
 
 describe("GET /health", () => {
   let app: FastifyInstance;
