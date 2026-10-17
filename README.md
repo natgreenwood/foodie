@@ -204,9 +204,10 @@ and the scopes `openid profile email`. Set all four of these, or none (in
 - `OIDC_MAX_PENDING_LOGINS` (optional, default 1000): how many trips to the
   provider may be in progress at once, across all browsers. Each start
   records one for up to 10 minutes.
-- `OIDC_STARTS_PER_MINUTE` (optional, default 10): how many sign-in and
-  connect starts one client address may make in any minute, counted
-  together.
+- `OIDC_STARTS_PER_MINUTE` (optional, default 10): how many requests one
+  client address may make in a minute to each of `start`, `callback`,
+  `connect` and `connection`, and to `start` and `connect` together (see the
+  limits below).
 
 Both limits apply to Google too, counted together with the generic
 provider.
@@ -270,15 +271,31 @@ answer with redirects; the callback lands on `/` signed in, or on
   `/auth/oidc/config` also still answers the generic provider's
   `displayName` at the top level, for the web app until it reads
   `providers`.
-- A start (`start` or `connect`) over either limit answers 429
-  `{ error: "rate_limited", message }`, records nothing, does not contact
-  the provider and logs `auth: oidc start refused` with the reason and the
-  client address. The per-client count is kept in memory by each api
-  process, so it restarts with the api and two processes count separately.
-  The client address is `request.ip`: behind a proxy that is the proxy's
-  address, and every client shares one count, until the api can be told
-  to trust that proxy (`TRUST_PROXY`, NATG-281, not merged yet). The bound on trips in progress is kept in the
-  database and holds across processes.
+- Three limits answer 429 `{ error: "rate_limited", message }`:
+  - `start`, `callback`, `connect` and `connection` (`DELETE`) are each
+    limited per client by `@fastify/rate-limit`: `OIDC_STARTS_PER_MINUTE`
+    requests per fixed minute, counted separately for each route as
+    registered. Every
+    provider's requests to `/auth/oidc/:provider/start` share one count;
+    the generic provider's routes without an id count on their own. A
+    refusal there logs `oidc: rate limited` with the route pattern and the
+    client key.
+  - `start` and `connect` also share one sliding minute per client, of the
+    same size, across every provider and route, so together they cannot
+    exceed it. A refusal there logs `auth: oidc start refused` with
+    `reason: client_starts`.
+  - A start when `OIDC_MAX_PENDING_LOGINS` trips are in progress, across
+    every provider, logs `auth: oidc start refused` with
+    `reason: pending_logins`.
+
+  A refused start records nothing and does not contact the provider. The
+  per-client counts are kept in memory by each api process, so they
+  restart with the api and two processes count separately. The client key
+  is `request.ip`, with an IPv6 address counted by its /64: behind a proxy
+  that is the proxy's address, and every client shares one count, unless
+  `TRUST_PROXY` names that proxy (see above). The bound on trips in
+  progress is kept in the database and holds across processes.
+
 - `GET /me` and `PATCH /me` both say how the account signs in:
   `hasPassword`, and `oidc: { providers: [{ id, displayName, connected }] }`
   with one entry per configured provider, in the config order. `oidc` also
