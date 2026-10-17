@@ -669,7 +669,6 @@ describe("POST /imports", () => {
       expect(rejectionLog()).toEqual([
         expect.objectContaining({
           userId: ids.cookId,
-          sourceUrl: SOURCE,
           error: "unresolved_lines",
           positions: [2, 3],
         }),
@@ -688,6 +687,48 @@ describe("POST /imports", () => {
       expect(
         await tx.select().from(recipe).where(eq(recipe.ownerId, ids.cookId)),
       ).toEqual([]);
+    },
+  );
+
+  // A private-link URL can carry a secret in its path or query (SEC-1).
+  dbTest(
+    "logs a rejection without any part of the source URL",
+    async ({ tx }) => {
+      const ids = await setUp(tx);
+      const sourceUrl =
+        "https://example.com/share/PATHTOKEN9f3a/dal?token=QUERYTOKEN7c1e";
+      const tooMany = Array.from({ length: MAX_TAGS + 1 }, (_, i) => `t${i}`);
+      const unresolved = reviewed(ids, [{ position: 1, quantity: "1" }]);
+
+      const invalid = await save(
+        {
+          ...reviewed(ids),
+          sourceUrl,
+          recipe: { ...reviewed(ids).recipe, tags: tooMany },
+        },
+        ids.token,
+      );
+      const unprocessable = await save({ ...unresolved, sourceUrl }, ids.token);
+
+      expect(invalid.statusCode).toBe(400);
+      expect(unprocessable.statusCode).toBe(422);
+      expect(rejectionLog()).toEqual([
+        expect.objectContaining({
+          userId: ids.cookId,
+          error: "invalid_request",
+        }),
+        expect.objectContaining({
+          userId: ids.cookId,
+          error: "unresolved_lines",
+          positions: [1],
+        }),
+      ]);
+      for (const line of rejectionLog()) {
+        expect(line).not.toHaveProperty("sourceUrl");
+      }
+      const everything = JSON.stringify(logLines);
+      expect(everything).not.toContain("PATHTOKEN9f3a");
+      expect(everything).not.toContain("QUERYTOKEN7c1e");
     },
   );
 

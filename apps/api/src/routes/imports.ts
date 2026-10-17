@@ -289,7 +289,6 @@ const saveRoute: FastifyPluginCallback<Pick<AuthDeps, "db">> = (
     request.log.info(
       {
         userId,
-        sourceUrl: parsed.sourceUrl,
         error: rejection.error,
         positions: rejection.positions ?? [],
       },
@@ -334,20 +333,16 @@ export const MAX_TAGS = 50;
 export const MAX_TAG_CHARS = 100;
 
 // Every check the recipe tables' constraints make is made here first, so bad
-// input is a 400 or 422 rather than a failed insert. sourceUrl is the
-// normalised URL, for the log; null until it is known to be one.
+// input is a 400 or 422 rather than a failed insert.
 function parseSaveBody(
   body: unknown,
-):
-  | { sourceUrl: string; recipe: NewRecipe }
-  | { sourceUrl: string | null; rejection: Rejection } {
-  const invalid = (sourceUrl: string | null, message: string) => ({
-    sourceUrl,
+): { recipe: NewRecipe } | { rejection: Rejection } {
+  const invalid = (message: string) => ({
     rejection: { status: 400, error: "invalid_request", message } as const,
   });
-  if (!isRecord(body)) return invalid(null, "body must be an object");
+  if (!isRecord(body)) return invalid("body must be an object");
   if (typeof body.sourceUrl !== "string") {
-    return invalid(null, "sourceUrl must be a string");
+    return invalid("sourceUrl must be a string");
   }
   let sourceUrl: string;
   try {
@@ -355,13 +350,12 @@ function parseSaveBody(
     sourceUrl = normaliseUrl(body.sourceUrl);
   } catch (err) {
     if (!(err instanceof InvalidUrlError)) throw err;
-    return invalid(null, "sourceUrl must be an http or https URL");
+    return invalid("sourceUrl must be an http or https URL");
   }
   const draft = body.recipe;
-  if (!isRecord(draft)) return invalid(sourceUrl, "recipe must be an object");
+  if (!isRecord(draft)) return invalid("recipe must be an object");
   if (!isText(draft.title) || isBlank(draft.title)) {
     return invalid(
-      sourceUrl,
       `recipe.title must be text of 1 to ${MAX_LINE_CHARS} characters`,
     );
   }
@@ -370,28 +364,24 @@ function parseSaveBody(
   const cookMinutes = optionalInt(draft.cookMinutes, 0);
   if (servings === false || prepMinutes === false || cookMinutes === false) {
     return invalid(
-      sourceUrl,
       "recipe.servings must be a positive whole number, and the minutes whole numbers, or null",
     );
   }
   const lines = positioned(draft.ingredients, MAX_LINES);
   if (lines === null) {
     return invalid(
-      sourceUrl,
       `recipe.ingredients must be a list of at most ${MAX_LINES} lines with distinct whole-number positions`,
     );
   }
   const steps = positioned(draft.steps, MAX_STEPS);
   if (steps === null) {
     return invalid(
-      sourceUrl,
       `recipe.steps must be a list of at most ${MAX_STEPS} steps with distinct whole-number positions`,
     );
   }
   const tags = draft.tags ?? [];
   if (!Array.isArray(tags) || tags.length > MAX_TAGS || !tags.every(isTag)) {
     return invalid(
-      sourceUrl,
       `recipe.tags must be a list of at most ${MAX_TAGS} tags of 1 to ${MAX_TAG_CHARS} characters`,
     );
   }
@@ -401,7 +391,6 @@ function parseSaveBody(
     message: string,
     positions: number[],
   ) => ({
-    sourceUrl,
     rejection: { status: 422, error, message, positions } as const,
   });
   const badLines = lines
@@ -445,7 +434,6 @@ function parseSaveBody(
   }
 
   return {
-    sourceUrl,
     recipe: {
       title: draft.title,
       sourceUrl,
