@@ -86,8 +86,10 @@ interface ProviderParams {
 }
 
 // The oidc_error the web app is redirected back with, on /sign-in for a
-// sign-in and on /profile for a connect. A code, never text: the web app
-// owns the wording, so a crafted link cannot put words on our pages.
+// sign-in and on /profile for a connect, alongside oidc_provider naming the
+// provider's id so the page can say which one refused. A code, never text:
+// the web app owns the wording, so a crafted link cannot put words on our
+// pages.
 // Besides the refusals, provider_error covers a provider that could not be
 // reached, answered with an error or a response that did not check out, and
 // a trip that is missing, timed out, or was started by a user no longer
@@ -105,8 +107,11 @@ function redirectWithError(
   reply: FastifyReply,
   page: string,
   error: OidcRedirectError,
+  provider: OidcProviderId,
 ) {
-  return reply.redirect(`${page}?oidc_error=${error}`);
+  return reply.redirect(
+    `${page}?oidc_error=${error}&oidc_provider=${provider}`,
+  );
 }
 
 function notConfigured(reply: FastifyReply) {
@@ -150,7 +155,7 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
     const trip = await beginTrip(request, reply, deps, oidc, null);
     if (trip === "rate_limited") return rateLimited(reply);
     if (trip === "provider_error") {
-      return redirectWithError(reply, SIGN_IN_PAGE, "provider_error");
+      return redirectWithError(reply, SIGN_IN_PAGE, "provider_error", oidc.id);
     }
     return reply.redirect(trip.href);
   }
@@ -169,7 +174,7 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
     reply.clearCookie(OIDC_COOKIE, { path: oidc.callbackPath });
     const trip = token ? await takeOidcLogin(db, token) : null;
     const page = trip?.userId ? PROFILE_PAGE : SIGN_IN_PAGE;
-    if (!trip) return redirectWithError(reply, page, "provider_error");
+    if (!trip) return redirectWithError(reply, page, "provider_error", oidc.id);
 
     let claims: OidcClaims;
     try {
@@ -182,7 +187,7 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
         { ip: request.ip, provider: oidc.id, error: describeError(err) },
         "auth: oidc callback failed",
       );
-      return redirectWithError(reply, page, "provider_error");
+      return redirectWithError(reply, page, "provider_error", oidc.id);
     }
 
     if (trip.userId !== null) {
@@ -196,14 +201,15 @@ export const oidcRoutes: FastifyPluginCallback<OidcRouteDeps> = (
       );
       return null;
     });
-    if (!result) return redirectWithError(reply, page, "provider_error");
+    if (!result)
+      return redirectWithError(reply, page, "provider_error", oidc.id);
     if (result.refused) {
       // The same line a failed local sign-in writes.
       request.log.warn(
         { email: claims.email, ip: request.ip, reason: result.refused },
         "auth: sign-in failed",
       );
-      return redirectWithError(reply, page, result.refused);
+      return redirectWithError(reply, page, result.refused, oidc.id);
     }
     await startSession(deps, reply, result.user.id);
     request.log.info(
@@ -292,7 +298,7 @@ export const oidcAccountRoutes: FastifyPluginCallback<OidcRouteDeps> = (
     const trip = await beginTrip(request, reply, deps, oidc, request.user!.id);
     if (trip === "rate_limited") return rateLimited(reply);
     if (trip === "provider_error") {
-      return redirectWithError(reply, PROFILE_PAGE, "provider_error");
+      return redirectWithError(reply, PROFILE_PAGE, "provider_error", oidc.id);
     }
     return reply.redirect(trip.href);
   }
@@ -456,7 +462,7 @@ async function finishConnect(
   const token = request.cookies[SESSION_COOKIE];
   const current = token ? await sessionUser(db, token) : null;
   if (current?.id !== userId) {
-    return redirectWithError(reply, PROFILE_PAGE, "provider_error");
+    return redirectWithError(reply, PROFILE_PAGE, "provider_error", oidc.id);
   }
   const { refused } = await connectOidcIdentity(db, userId, claims);
   if (refused) {
@@ -470,7 +476,7 @@ async function finishConnect(
       },
       "auth: oidc connect refused",
     );
-    return redirectWithError(reply, PROFILE_PAGE, refused);
+    return redirectWithError(reply, PROFILE_PAGE, refused, oidc.id);
   }
   request.log.info({ userId, provider: oidc.id }, "auth: oidc connected");
   return reply.redirect(`${PROFILE_PAGE}?oidc=connected`);

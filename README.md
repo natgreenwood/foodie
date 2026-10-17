@@ -288,7 +288,11 @@ of `email_unverified`, `account_disabled` (sign-in), `email_mismatch`
 (connect), `already_connected` (either: the identity or the account is
 already linked elsewhere) and `provider_error` (either: the provider could
 not be reached or refused, its answer did not check out, it sent no email,
-or the trip was missing, expired or no longer signed in).
+or the trip was missing, expired or no longer signed in). Every
+`oidc_error` redirect also carries `oidc_provider=<id>`, the id of the
+provider whose route answered (`generic` on the alias routes), so the web app
+can name it from `/auth/oidc/config`; it falls back to generic wording when
+the parameter is absent or names no configured provider.
 
 An account with no password cannot sign in with a password: the sign-in form
 answers it exactly as it answers a wrong password. Signing out of Foodie does

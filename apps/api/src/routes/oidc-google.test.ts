@@ -269,7 +269,7 @@ describe("signing in with Google", () => {
         identity({ email: local.email, email_verified: false }),
       );
       expect(unverified.headers.location).toBe(
-        "/sign-in?oidc_error=email_unverified",
+        "/sign-in?oidc_error=email_unverified&oidc_provider=google",
       );
       expect(await identitiesOf(tx, local.id)).toEqual([]);
 
@@ -293,7 +293,9 @@ describe("signing in with Google", () => {
 
     const res = await oidcSignIn("google", who);
 
-    expect(res.headers.location).toBe("/sign-in?oidc_error=account_disabled");
+    expect(res.headers.location).toBe(
+      "/sign-in?oidc_error=account_disabled&oidc_provider=google",
+    );
     expect(res.cookies.some((c) => c.name === SESSION_COOKIE)).toBe(false);
   });
 
@@ -307,7 +309,7 @@ describe("signing in with Google", () => {
       const res = await oidcSignIn("google", identity({ email: local.email }));
 
       expect(res.headers.location).toBe(
-        "/sign-in?oidc_error=already_connected",
+        "/sign-in?oidc_error=already_connected&oidc_provider=google",
       );
     },
   );
@@ -328,8 +330,9 @@ describe("signing in with Google", () => {
       const crossed = await request("GET", "/auth/oidc/callback?code=x", {
         [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE),
       });
+      // Named for the callback that answered, not the trip it was handed.
       expect(crossed.headers.location).toBe(
-        "/sign-in?oidc_error=provider_error",
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
       );
     },
   );
@@ -386,7 +389,9 @@ describe("connecting Google from the profile", () => {
 
     const res = await oidcConnect("google", local.token, identity());
 
-    expect(res.headers.location).toBe("/profile?oidc_error=email_mismatch");
+    expect(res.headers.location).toBe(
+      "/profile?oidc_error=email_mismatch&oidc_provider=google",
+    );
     expect(await identitiesOf(tx, local.id)).toEqual([]);
   });
 });

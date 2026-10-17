@@ -351,7 +351,9 @@ describe("GET /auth/oidc/start", () => {
       const res = await request("GET", "/auth/oidc/start");
 
       expect(res.statusCode).toBe(302);
-      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(hasCookie(res, OIDC_COOKIE)).toBe(false);
       expect(await tx.select().from(oidcLogin)).toEqual([]);
       expect(logLines).toContainEqual(
@@ -456,7 +458,9 @@ describe("signing in through the provider", () => {
       const res = await oidcSignIn(who);
 
       expect(res.statusCode).toBe(302);
-      expect(res.headers.location).toBe("/sign-in?oidc_error=email_unverified");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=email_unverified&oidc_provider=generic",
+      );
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(await accountsWithEmail(tx, local.email)).toHaveLength(1);
       expect(await identitiesOf(tx, local.id)).toEqual([]);
@@ -481,7 +485,7 @@ describe("signing in through the provider", () => {
       const res = await oidcSignIn(identity({ email: local.email }));
 
       expect(res.headers.location).toBe(
-        "/sign-in?oidc_error=already_connected",
+        "/sign-in?oidc_error=already_connected&oidc_provider=generic",
       );
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(await identitiesOf(tx, local.id)).toEqual([
@@ -585,7 +589,9 @@ describe("signing in through the provider", () => {
 
       const res = await oidcSignIn(who);
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=account_disabled");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=account_disabled&oidc_provider=generic",
+      );
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(await accountsWithEmail(tx, who.email!)).toHaveLength(1);
       expect(logLines).toContainEqual(
@@ -610,7 +616,9 @@ describe("signing in through the provider", () => {
 
       const res = await oidcSignIn(identity({ email: local.email }));
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=account_disabled");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=account_disabled&oidc_provider=generic",
+      );
       expect(await identitiesOf(tx, local.id)).toEqual([]);
     },
   );
@@ -642,7 +650,9 @@ describe("signing in through the provider", () => {
 
     const res = await oidcSignIn(who);
 
-    expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+    expect(res.headers.location).toBe(
+      "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+    );
     expect(await tx.select().from(oidcIdentity)).toEqual([]);
   });
 });
@@ -664,7 +674,7 @@ describe("GET /auth/oidc/callback", () => {
       const replay = await request("GET", lastCallback(), cookies);
 
       expect(replay.headers.location).toBe(
-        "/sign-in?oidc_error=provider_error",
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
       );
       expect(hasCookie(replay, SESSION_COOKIE)).toBe(false);
     },
@@ -682,7 +692,9 @@ describe("GET /auth/oidc/callback", () => {
         identity(),
       );
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(res.cookies.find((c) => c.name === OIDC_COOKIE)).toMatchObject({
         value: "",
@@ -706,7 +718,9 @@ describe("GET /auth/oidc/callback", () => {
         identity(),
       );
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+      );
     },
   );
 
@@ -724,7 +738,9 @@ describe("GET /auth/oidc/callback", () => {
         identity(),
       );
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(await tx.select().from(oidcIdentity)).toEqual([]);
       expect(logLines).toContainEqual(
@@ -740,7 +756,9 @@ describe("GET /auth/oidc/callback", () => {
 
       const res = await oidcSignIn("deny");
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
     },
   );
@@ -939,7 +957,9 @@ describe("ID token signature", () => {
 
       const res = await oidcSignIn(who);
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
       expect(await accountsWithEmail(tx, who.email!)).toEqual([]);
       expect(logLines).toContainEqual(
@@ -1000,7 +1020,9 @@ describe("ID token signature", () => {
 
       const res = await rotatingBetweenAuthorizeAndToken(ctx, identity());
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(hasCookie(res, SESSION_COOKIE)).toBe(false);
     },
   );
@@ -1086,7 +1108,7 @@ describe("admission limits on starting a trip", () => {
       expect(
         (await request("GET", "/auth/oidc/callback?code=c&state=s")).headers
           .location,
-      ).toBe("/sign-in?oidc_error=provider_error");
+      ).toBe("/sign-in?oidc_error=provider_error&oidc_provider=generic");
     }
 
     const refused = await request("GET", "/auth/oidc/callback?code=c&state=s");
@@ -1241,7 +1263,9 @@ describe("admission limits on starting a trip", () => {
 
       const res = await request("GET", "/auth/oidc/start");
 
-      expect(res.headers.location).toBe("/sign-in?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/sign-in?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(await tripCount(tx)).toBe(0);
     },
   );
@@ -1403,7 +1427,9 @@ describe("connecting an identity from the profile", () => {
 
     const res = await oidcConnect(local.token, who);
 
-    expect(res.headers.location).toBe("/profile?oidc_error=email_mismatch");
+    expect(res.headers.location).toBe(
+      "/profile?oidc_error=email_mismatch&oidc_provider=generic",
+    );
     expect(await identitiesOf(tx, local.id)).toEqual([]);
     expect(logLines).toContainEqual(
       expect.objectContaining({
@@ -1428,7 +1454,7 @@ describe("connecting an identity from the profile", () => {
       });
 
       expect(res.headers.location).toBe(
-        "/profile?oidc_error=already_connected",
+        "/profile?oidc_error=already_connected&oidc_provider=generic",
       );
       expect(await identitiesOf(tx, local.id)).toEqual([]);
     },
@@ -1445,7 +1471,9 @@ describe("connecting an identity from the profile", () => {
       identity({ email: local.email }),
     );
 
-    expect(res.headers.location).toBe("/profile?oidc_error=already_connected");
+    expect(res.headers.location).toBe(
+      "/profile?oidc_error=already_connected&oidc_provider=generic",
+    );
     expect(await identitiesOf(tx, local.id)).toEqual([
       { issuer: mock.issuer.origin, subject: first.sub },
     ]);
@@ -1469,7 +1497,9 @@ describe("connecting an identity from the profile", () => {
         identity({ email: local.email }),
       );
 
-      expect(res.headers.location).toBe("/profile?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/profile?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(await identitiesOf(tx, local.id)).toEqual([]);
     },
   );
@@ -1491,7 +1521,9 @@ describe("connecting an identity from the profile", () => {
       const res = await startConnect(local.token);
 
       expect(res.statusCode).toBe(302);
-      expect(res.headers.location).toBe("/profile?oidc_error=provider_error");
+      expect(res.headers.location).toBe(
+        "/profile?oidc_error=provider_error&oidc_provider=generic",
+      );
       expect(hasCookie(res, OIDC_COOKIE)).toBe(false);
     },
   );
@@ -1631,7 +1663,7 @@ describe("DELETE /auth/oidc/connection", () => {
       // Unverified, so the provider can no longer reach the account.
       const again = await oidcSignIn({ ...who, email_verified: false });
       expect(again.headers.location).toBe(
-        "/sign-in?oidc_error=email_unverified",
+        "/sign-in?oidc_error=email_unverified&oidc_provider=generic",
       );
     },
   );
