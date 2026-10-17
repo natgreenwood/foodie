@@ -43,7 +43,7 @@ function isProfile(body: unknown): body is Profile {
   );
 }
 
-async function call(
+export async function call(
   method: string,
   path: string,
   body?: unknown,
@@ -71,16 +71,22 @@ async function profileFrom(res: Response): Promise<Profile> {
     if (isProfile(body)) return body;
     throw new AuthError(null, "its response was not a profile");
   }
+  throw errorFrom(res, body);
+}
+
+// The AuthError for a response that is not ok, from the api's contract
+// error when it sent one.
+export function errorFrom(res: Response, body: unknown): AuthError {
   if (typeof body === "object" && body !== null) {
     const { error, message } = body as Record<string, unknown>;
     if (typeof error === "string") {
-      throw new AuthError(
+      return new AuthError(
         error,
         typeof message === "string" ? message : `HTTP ${res.status} ${error}`,
       );
     }
   }
-  throw new AuthError(null, `the server answered with HTTP ${res.status}`);
+  return new AuthError(null, `the server answered with HTTP ${res.status}`);
 }
 
 // The signed-in user, or null when there is no session.
