@@ -113,6 +113,7 @@ function start(tx: TestTransaction, oidc: OidcProvider | null = provider()) {
     authorizationUrl: string,
     cookies: Cookies,
     who: MockIdentity | "deny",
+    callbackPath = "/auth/oidc/callback",
   ): Promise<Response> {
     if (who === "deny") mock.denyNext();
     else mock.signInAs(who);
@@ -120,7 +121,7 @@ function start(tx: TestTransaction, oidc: OidcProvider | null = provider()) {
     expect(res.status).toBe(302);
     const back = new URL(res.headers.get("location")!);
     expect(back.origin + back.pathname).toBe(REDIRECT_URL.href);
-    lastCallback = `/auth/oidc/callback${back.search}`;
+    lastCallback = `${callbackPath}${back.search}`;
     return request("GET", lastCallback, cookies);
   }
 
@@ -685,6 +686,83 @@ describe("GET /auth/oidc/callback", () => {
     expect(logged).not.toContain(code);
     expect(logged).not.toContain(mock.clientSecret);
     expect(logged).not.toContain(cookieValue(res, SESSION_COOKIE));
+  });
+
+  // NATG-289: Fastify routes a percent-encoded spelling to the callback too.
+  dbTest(
+    "never logs the code when the callback path is percent-encoded",
+    async ({ tx }) => {
+      const { request, throughProvider, logLines, lastCallback } = start(tx);
+      const started = await request("GET", "/auth/oidc/start");
+
+      const res = await throughProvider(
+        started.headers.location as string,
+        { [OIDC_COOKIE]: cookieValue(started, OIDC_COOKIE) },
+        identity(),
+        "/auth/oidc/%63allback",
+      );
+
+      // It reached the real callback and signed in.
+      expect(res.headers.location).toBe("/");
+      const q = new URL(lastCallback(), "http://x").searchParams;
+      const logged = JSON.stringify(logLines);
+      expect(q.get("code")).toBeTruthy();
+      expect(logged).not.toContain(q.get("code"));
+      expect(logged).not.toContain(q.get("state"));
+      expect(logLines).toContainEqual(
+        expect.objectContaining({
+          msg: "incoming request",
+          req: expect.objectContaining({
+            url: "/auth/oidc/callback",
+          }) as unknown,
+        }),
+      );
+    },
+  );
+
+  dbTest(
+    "answers an unknown path with no query in its body or log",
+    async ({ tx }) => {
+      const { request, logLines } = start(tx);
+
+      const res = await request(
+        "GET",
+        "/auth/oidc/callback/?code=LEAK_SENTINEL&state=STATE_SENTINEL",
+      );
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({
+        error: "not_found",
+        message: "route not found",
+      });
+      const logged = JSON.stringify(logLines);
+      expect(logged).not.toContain("LEAK_SENTINEL");
+      expect(logged).not.toContain("STATE_SENTINEL");
+      expect(logLines).toContainEqual(
+        expect.objectContaining({
+          msg: "route not found",
+          method: "GET",
+          path: "/auth/oidc/callback/",
+        }),
+      );
+    },
+  );
+
+  // NATG-287: the rule is every route's, not the callback's.
+  dbTest("never logs any route's query string", async ({ tx }) => {
+    const { request, localAccount, logLines } = start(tx);
+    const cook = await localAccount();
+
+    await request("GET", "/me?apiKey=KEY_SENTINEL", {
+      [SESSION_COOKIE]: cook.token,
+    });
+
+    expect(JSON.stringify(logLines)).not.toContain("KEY_SENTINEL");
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        req: expect.objectContaining({ method: "GET", url: "/me" }) as unknown,
+      }),
+    );
   });
 });
 

@@ -215,8 +215,8 @@ that answer with redirects; the callback lands on `/` signed in, or on
 - `DELETE /auth/oidc/connection`: signed in. Disconnects the identity, 204;
   409 `no_local_password` for an account with no password, which would have
   no way left to sign in.
-- `GET /me` says how the account signs in: `hasPassword`, and
-  `oidc: { connected, connectedAt }`.
+- `GET /me` and `PATCH /me` both say how the account signs in:
+  `hasPassword`, and `oidc: { connected, connectedAt }`.
 
 `oidc_error` is a code, never text; the web app owns the wording. It is one
 of `email_unverified`, `account_disabled` (sign-in), `email_mismatch`

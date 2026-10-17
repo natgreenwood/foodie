@@ -16,6 +16,7 @@ import { importRoutes, type ImportDeps } from "./routes/imports.js";
 import { meRoutes } from "./routes/me.js";
 import { oidcAccountRoutes, oidcRoutes, type OidcDeps } from "./routes/oidc.js";
 import { recipeRoutes } from "./routes/recipes.js";
+import { pathForLog, sendError } from "./routes/errors.js";
 
 export type AppDeps = HealthDeps & ImportDeps & AdminAiDeps & OidcDeps;
 
@@ -31,15 +32,15 @@ export const logRedactPaths = [
   "*.baseUrl",
 ];
 
-// Fastify's request log line, except that the OIDC callback's query, which
-// carries the authorization code and state, is left out.
+// Fastify's request log line, with the path only: no route logs its query
+// string, so the OIDC callback's authorization code and state, or a key a
+// client put in an admin URL, never reach a log line whatever the spelling.
 export const logSerializers = {
   req(request: FastifyRequest) {
-    const [path] = request.url.split("?", 1);
     const port = request.socket.remotePort;
     return {
       method: request.method,
-      url: path === "/auth/oidc/callback" ? path : request.url,
+      url: pathForLog(request.url),
       host: request.host,
       remoteAddress: request.ip,
       ...(port === undefined ? {} : { remotePort: port }),
@@ -62,6 +63,15 @@ export function buildApp(
   seams: AppSeams = {},
 ) {
   const app = Fastify(options);
+  // Fastify's own 404 puts the full URL, query and all, in its message and
+  // its log line.
+  app.setNotFoundHandler((request, reply) => {
+    request.log.info(
+      { method: request.method, path: pathForLog(request.url) },
+      "route not found",
+    );
+    return sendError(reply, 404, "not_found", "route not found");
+  });
   registerSessionSupport(app);
   app.register(healthRoutes, deps);
   app.register(authRoutes, deps);

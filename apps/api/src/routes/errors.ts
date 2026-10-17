@@ -15,6 +15,19 @@ export type ApiErrorCode =
   | "not_found"
   | "internal_error";
 
+// A request's path as a log line may carry it: percent-decoded, so every
+// spelling of a route reads the same, and never the query string, which can
+// hold an authorization code or a credential a client put there.
+export function pathForLog(url: string): string {
+  const [path = ""] = url.split("?", 1);
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    // A malformed escape: the raw path, still without its query.
+    return path;
+  }
+}
+
 export function sendError(
   reply: FastifyReply,
   status: number,
@@ -39,7 +52,7 @@ export function apiErrorHandler(module: string) {
     }
     request.log.error(
       {
-        route: `${request.method} ${request.routeOptions.url ?? request.url}`,
+        route: `${request.method} ${request.routeOptions.url ?? pathForLog(request.url)}`,
         error: describeError(err),
       },
       `${module}: request failed`,
