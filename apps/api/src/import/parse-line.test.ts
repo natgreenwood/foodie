@@ -5,7 +5,11 @@ import {
   loadMeasurementLookup,
   type MeasurementNameRow,
 } from "./measurement-lookup.js";
-import { parseIngredientLine } from "./parse-line.js";
+import {
+  parseIngredientLine,
+  PREP_WORDS,
+  splitPrepNotes,
+} from "./parse-line.js";
 
 // The seeded units these tests use, with the seed's en-GB and en-US names
 // (drizzle/0001_seed_measurement_units.sql) and made-up ids.
@@ -86,8 +90,8 @@ describe("parseIngredientLine", () => {
       // 375 ml is 1.5 metric cups, which decides it over the .com host.
       measurementId: ID.cupMetric,
       unitText: "cups",
-      ingredientText: "plain flour, sifted",
-      prepNotes: null,
+      ingredientText: "plain flour",
+      prepNotes: "sifted",
       notes: "375ml",
       flags: [],
     });
@@ -222,7 +226,8 @@ describe("parseIngredientLine", () => {
     expect(parse("1 large onion")).toMatchObject({
       quantity: "1",
       unitText: null,
-      ingredientText: "large onion",
+      ingredientText: "onion",
+      prepNotes: "large",
       flags: [],
     });
   });
@@ -261,6 +266,71 @@ describe("parseIngredientLine", () => {
       measurementId: null,
       ingredientText: "",
       flags: [],
+    });
+  });
+});
+
+describe("prep notes", () => {
+  // The NATG-247 research examples.
+  test.each([
+    ["3 large eggs", "eggs", "large", "3", null],
+    ["1 onion, finely chopped", "onion", "finely chopped", "1", null],
+    ["2 cloves garlic, crushed", "garlic", "crushed", "2", ID.clove],
+  ])(
+    "%j splits to %j and %j",
+    (line, ingredientText, prepNotes, quantity, measurementId) => {
+      expect(parse(line)).toMatchObject({
+        quantity,
+        measurementId,
+        ingredientText,
+        prepNotes,
+        flags: [],
+      });
+    },
+  );
+
+  test.each([
+    ["finely chopped fresh parsley", "fresh parsley", "finely chopped"],
+    ["butter (softened)", "butter", "softened"],
+    [
+      "chicken thighs, skin on, boneless",
+      "chicken thighs",
+      "skin on, boneless",
+    ],
+    [
+      "large onion (about 200g), peeled and sliced",
+      "onion",
+      "large, about 200g, peeled and sliced",
+    ],
+    ["carrots, peeled, diced", "carrots", "peeled, diced"],
+    ["Onion Diced", "Onion", "Diced"],
+    ["olive oil", "olive oil", null],
+    ["", "", null],
+  ])("%j is %j with prep notes %j", (text, ingredientText, prepNotes) => {
+    expect(splitPrepNotes(text)).toEqual({ ingredientText, prepNotes });
+  });
+
+  test("text made only of prep words is kept whole", () => {
+    expect(splitPrepNotes("large")).toEqual({
+      ingredientText: "large",
+      prepNotes: null,
+    });
+    expect(splitPrepNotes("chopped, to serve")).toEqual({
+      ingredientText: "chopped, to serve",
+      prepNotes: null,
+    });
+  });
+
+  test("the word list is one constant, in lower case", () => {
+    expect(PREP_WORDS.has("diced")).toBe(true);
+    expect([...PREP_WORDS].every((w) => w === w.toLowerCase())).toBe(true);
+  });
+
+  test("to taste stays in notes, not prep notes", () => {
+    expect(parse("Salt, to taste")).toMatchObject({
+      ingredientText: "Salt",
+      prepNotes: null,
+      notes: "to taste",
     });
   });
 });
