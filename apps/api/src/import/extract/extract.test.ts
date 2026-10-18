@@ -60,11 +60,14 @@ describe("extractRecipe: JSON-LD", () => {
       quantityText: "1 1/2",
       unit: { measurementId: UNIT.cupMetric, key: "cup_metric" },
       unitText: "cups",
-      ingredientText: "plain flour, sifted",
-      prepNotes: null,
+      ingredientText: "plain flour",
+      prepNotes: "sifted",
       notes: null,
       flags: [],
       section: null,
+      // Filled in by the ingredient match, not by extraction.
+      ingredientId: null,
+      candidates: [],
     });
   });
 

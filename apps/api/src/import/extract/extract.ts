@@ -1,4 +1,5 @@
 import { load } from "cheerio";
+import type { IngredientCandidate } from "../match-ingredients.js";
 import type { MeasurementLookup } from "../measurement-lookup.js";
 import { parseIngredientLine, type ParseFlag } from "../parse-line.js";
 import { Budget } from "./budget.js";
@@ -26,6 +27,11 @@ export interface DraftIngredient {
   flags: ParseFlag[];
   // The group header the line sits under ("For the sauce"), or null.
   section: string | null;
+  // The catalogue ingredient proposed for the line, and the candidates it was
+  // chosen from (NATG-321). Null and empty here; the ingredient match in
+  // match-ingredients.ts fills them in, and flags ingredient_unmatched.
+  ingredientId: number | null;
+  candidates: IngredientCandidate[];
 }
 
 export interface DraftRecipe {
@@ -147,6 +153,8 @@ function ingredients(
       notes: parsed.notes,
       flags: parsed.flags,
       section,
+      ingredientId: null,
+      candidates: [],
     });
   }
   return result;

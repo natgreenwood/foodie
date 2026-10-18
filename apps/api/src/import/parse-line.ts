@@ -17,7 +17,10 @@ export type ParseFlag =
   // and "fl oz" are US in en-US and imperial in en-GB.
   | "unit_ambiguous"
   // "1 lb 4 oz": quantity and unit are the first amount, notes the line.
-  | "mixed_amount";
+  | "mixed_amount"
+  // No catalogue ingredient was chosen for the line (NATG-321). Set by the
+  // ingredient match, not by parseIngredientLine.
+  | "ingredient_unmatched";
 
 export interface ParsedLine {
   rawText: string;
@@ -28,8 +31,10 @@ export interface ParsedLine {
   measurementId: number | null;
   // The unit as written: "cups", "tbsp".
   unitText: string | null;
+  // The ingredient alone, prep notes split off: what the catalogue is
+  // searched for.
   ingredientText: string;
-  // parse-ingredient does not separate prep notes; story 5 does.
+  // "finely chopped", "large": see splitPrepNotes.
   prepNotes: string | null;
   notes: string | null;
   flags: ParseFlag[];
@@ -128,18 +133,89 @@ export function parseIngredientLine(
     }
   }
 
+  const { ingredientText, prepNotes } = splitPrepNotes(description);
   return {
     rawText,
     quantity: quantity === null ? null : String(quantity),
     quantityText,
     measurementId,
     unitText,
-    ingredientText: description
-      .replace(/\s+/g, " ")
-      .replace(/^[\s,]+|[\s,]+$/g, ""),
-    prepNotes: null,
+    ingredientText,
+    prepNotes,
     notes: notes.length === 0 ? null : notes.join("; "),
     flags,
+  };
+}
+
+// Words that say how an ingredient is sized, cut or prepared rather than
+// which ingredient it is (NATG-321). Kept short on purpose: "ground" and
+// "fresh" are left out because they can name a different product.
+export const PREP_WORDS: ReadonlySet<string> = new Set([
+  "large",
+  "medium",
+  "small",
+  "finely",
+  "roughly",
+  "coarsely",
+  "thinly",
+  "freshly",
+  "chopped",
+  "diced",
+  "crushed",
+  "minced",
+  "sliced",
+  "grated",
+  "shredded",
+  "cubed",
+  "halved",
+  "quartered",
+  "peeled",
+  "trimmed",
+  "softened",
+  "melted",
+  "beaten",
+  "sifted",
+]);
+
+// The ingredient head of a line's text, and its prep notes: every
+// parenthesised phrase, everything after the first comma, and runs of
+// PREP_WORDS at the start or end. "onion, finely chopped" is onion and
+// "finely chopped"; "large eggs" is eggs and "large". Text that would be left
+// empty ("large") is kept whole, with no prep notes. Done before the
+// catalogue search: the prep text keeps "large eggs" under the trigram
+// threshold for egg.
+export function splitPrepNotes(text: string): {
+  ingredientText: string;
+  prepNotes: string | null;
+} {
+  const tidy = (t: string) =>
+    t.replace(/\s+/g, " ").replace(/^[\s,]+|[\s,]+$/g, "");
+  const notes: string[] = [];
+  const unbracketed = text.replace(/\(([^()]*)\)/g, (_, inner: string) => {
+    notes.push(tidy(inner));
+    return " ";
+  });
+  const comma = unbracketed.indexOf(",");
+  if (comma !== -1) notes.push(tidy(unbracketed.slice(comma + 1)));
+
+  const words = tidy(comma === -1 ? unbracketed : unbracketed.slice(0, comma))
+    .split(" ")
+    .filter((w) => w !== "");
+  const isPrep = (w: string) => PREP_WORDS.has(w.toLowerCase());
+  let start = 0;
+  while (start < words.length && isPrep(words[start] ?? "")) start++;
+  let end = words.length;
+  while (end > start && isPrep(words[end - 1] ?? "")) end--;
+  if (start === end) return { ingredientText: tidy(text), prepNotes: null };
+
+  const prep = [
+    words.slice(0, start).join(" "),
+    words.slice(end).join(" "),
+    ...notes,
+  ].filter((n) => n !== "");
+  return {
+    ingredientText: words.slice(start, end).join(" "),
+    prepNotes: prep.length === 0 ? null : prep.join(", "),
   };
 }
 

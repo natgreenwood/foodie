@@ -6,7 +6,11 @@ import type { ImportDeps } from "./imports.js";
 
 // The import, auth and admin routes are not exercised here.
 const unused = () => Promise.reject(new Error("not used by these tests"));
-const importDeps: ImportDeps = { fetchPage: unused, loadUnits: unused };
+const importDeps: ImportDeps = {
+  fetchPage: unused,
+  loadUnits: unused,
+  matchIngredients: unused,
+};
 const authDeps: AdminAiDeps = {
   db: {} as AdminAiDeps["db"],
   secureCookies: false,

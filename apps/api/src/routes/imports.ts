@@ -1,8 +1,11 @@
 import type {
+  FastifyBaseLogger,
   FastifyError,
   FastifyPluginCallback,
   FastifyReply,
+  FastifyRequest,
 } from "fastify";
+import { complete } from "../ai/complete.js";
 import type { Database } from "../db/client.js";
 import {
   createOwnedRecipe,
@@ -14,6 +17,7 @@ import { BudgetExceededError } from "../import/extract/budget.js";
 import {
   extractRecipe,
   MAX_LINE_CHARS,
+  type DraftIngredient,
   type ExtractedRecipe,
 } from "../import/extract/extract.js";
 import {
@@ -27,24 +31,50 @@ import {
   type FetchPageOptions,
 } from "../import/fetch.js";
 import {
+  matchIngredients,
+  type IngredientMatching,
+} from "../import/match-ingredients.js";
+import {
   loadMeasurementLookup,
   type MeasurementLookup,
 } from "../import/measurement-lookup.js";
 import type { AuthDeps } from "./auth.js";
-import { apiErrorHandler, sendError as sendApiError } from "./errors.js";
+import { clientKey } from "../auth/client-key.js";
+import {
+  apiErrorHandler,
+  RateLimitedError,
+  sendError as sendApiError,
+} from "./errors.js";
 
 export interface ImportDeps {
   // fetchPage with the api's database and strategies bound.
   fetchPage: (url: string, opts: FetchPageOptions) => Promise<FetchedPage>;
   // Read on every preview, so a unit added since is matched.
   loadUnits: () => Promise<{ measurements: MeasurementLookup }>;
+  // matchIngredients with the api's database and AI settings bound.
+  matchIngredients: (
+    ingredients: readonly DraftIngredient[],
+    ctx: { sourceHost: string; log: Pick<FastifyBaseLogger, "info" | "warn"> },
+  ) => Promise<{
+    ingredients: DraftIngredient[];
+    matching: IngredientMatching;
+  }>;
 }
 
-export function importDeps(db: Database["db"]): ImportDeps {
+export function importDeps(
+  db: Database["db"],
+  settingsKey: Buffer,
+): ImportDeps {
   return {
     fetchPage: (url, opts) =>
       fetchPage(url, { db, strategies: defaultStrategies }, opts),
     loadUnits: async () => ({ measurements: await loadMeasurementLookup(db) }),
+    matchIngredients: (ingredients, ctx) =>
+      matchIngredients(
+        { db, complete: (request) => complete({ db, settingsKey }, request) },
+        ingredients,
+        ctx,
+      ),
   };
 }
 
@@ -52,20 +82,42 @@ export type PreviewResponse = {
   sourceUrl: string;
   fetchedAt: string;
   fetchStrategy: FetchedPage["strategy"];
-} & ExtractedRecipe;
+} & ExtractedRecipe & {
+    // Whether ingredients were matched; when not, a message to show.
+    ingredientMatching: IngredientMatching;
+  };
 
 export type PreviewErrorCode =
   | "invalid_url"
   | "no_recipe_found"
   | "fetch_failed"
   | "import_not_permitted"
+  | "rate_limited"
   | "internal_error";
+
+// Each preview can cost a completion on the admin's AI account (SEC-1 on
+// NATG-321), so it is limited per signed-in user: far above what a person
+// pasting URLs by hand reaches. Counted before the body is read, so a refused
+// request fetches, extracts and matches nothing. The route is behind
+// requireUser, which runs first; the client key is only a fallback.
+export const PREVIEWS_PER_MINUTE = 12;
+
+const previewLimit = {
+  max: PREVIEWS_PER_MINUTE,
+  timeWindow: 60_000,
+  keyGenerator: (request: FastifyRequest) =>
+    request.user ? `user:${request.user.id}` : clientKey(request),
+  errorResponseBuilder: () =>
+    new RateLimitedError("too many import previews; try again in a minute"),
+};
 
 export type SaveResponse = Recipe & { alreadyImported: boolean };
 
 // POST /imports/preview { url, refresh? }: the page's recipe as a draft, read
-// from its structured data (NATG-245). Nothing is stored as a recipe; the
-// fetched page is cached by fetchPage.
+// from its structured data (NATG-245), each line with a proposed catalogue
+// ingredient (NATG-321). Nothing is stored as a recipe or in the catalogue;
+// the fetched page is cached by fetchPage. AI being unconfigured or failing
+// leaves the lines unmatched rather than failing the preview.
 //
 // POST /imports { sourceUrl, recipe }: saves a reviewed draft as a recipe
 // owned by the signed-in user (NATG-250). See saveRoute.
@@ -84,11 +136,19 @@ export const importRoutes: FastifyPluginCallback<
       request.log.info({ code: err.code }, "import preview: unparseable body");
       return sendError(reply, 400, "invalid_url", "body must be JSON", "");
     }
+    if (err instanceof RateLimitedError) {
+      request.log.warn(
+        { userId: request.user?.id ?? null },
+        "import preview: rate limited",
+      );
+      return sendError(reply, 429, "rate_limited", err.message, "");
+    }
     throw err;
   });
 
   app.post<{ Body: unknown }>(
     "/imports/preview",
+    { config: { rateLimit: previewLimit } },
     async (request, reply): Promise<PreviewResponse> => {
       const body = isRecord(request.body) ? request.body : {};
       if (typeof body.url !== "string") {
@@ -208,6 +268,29 @@ export const importRoutes: FastifyPluginCallback<
         );
       }
 
+      let matched: Awaited<ReturnType<ImportDeps["matchIngredients"]>> | null =
+        null;
+      if (extracted !== null) {
+        try {
+          matched = await deps.matchIngredients(extracted.recipe.ingredients, {
+            sourceHost: new URL(page.finalUrl).hostname,
+            log: request.log,
+          });
+        } catch (err) {
+          request.log.error(
+            { err, url: page.finalUrl },
+            "import preview: ingredient match error",
+          );
+          return sendError(
+            reply,
+            500,
+            "internal_error",
+            "the ingredients could not be matched",
+            page.finalUrl,
+          );
+        }
+      }
+
       request.log.info(
         {
           url: page.finalUrl,
@@ -215,11 +298,15 @@ export const importRoutes: FastifyPluginCallback<
           cached: page.cached,
           extraction: extracted?.extraction ?? null,
           ingredients: extracted?.recipe.ingredients.length ?? 0,
+          matched:
+            matched?.ingredients.filter((i) => i.ingredientId !== null)
+              .length ?? 0,
+          matching: matched?.matching.status ?? null,
           warnings: extracted?.warnings ?? [],
         },
         "import preview",
       );
-      if (extracted === null) {
+      if (extracted === null || matched === null) {
         return sendError(
           reply,
           404,
@@ -233,6 +320,8 @@ export const importRoutes: FastifyPluginCallback<
         fetchedAt: page.fetchedAt.toISOString(),
         fetchStrategy: page.strategy,
         ...extracted,
+        recipe: { ...extracted.recipe, ingredients: matched.ingredients },
+        ingredientMatching: matched.matching,
       };
     },
   );

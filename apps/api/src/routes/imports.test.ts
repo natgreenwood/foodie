@@ -15,6 +15,7 @@ import {
   type FetchFailureReason,
 } from "../import/fetch.js";
 import { MAX_LINE_CHARS } from "../import/extract/extract.js";
+import { AI_NOT_CONFIGURED_MESSAGE } from "../import/match-ingredients.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE, type AuthDeps } from "./auth.js";
 import {
@@ -22,6 +23,7 @@ import {
   MAX_STEPS,
   MAX_TAG_CHARS,
   MAX_TAGS,
+  PREVIEWS_PER_MINUTE,
   type ImportDeps,
 } from "./imports.js";
 
@@ -65,6 +67,17 @@ const signedInAsCook: AppSeams = {
   },
 };
 
+// Every line unmatched, with no candidates and the model never asked. The
+// match itself is covered in match-ingredients.test.ts.
+const noMatches: ImportDeps["matchIngredients"] = (ingredients) =>
+  Promise.resolve({
+    ingredients: ingredients.map((line) => ({
+      ...line,
+      flags: [...line.flags, "ingredient_unmatched" as const],
+    })),
+    matching: { status: "ok" },
+  });
+
 // The fetch is mocked: these tests cover the route and its error mapping.
 function start(
   fetchPage: ImportDeps["fetchPage"],
@@ -72,7 +85,12 @@ function start(
   {
     db = {} as AuthDeps["db"],
     seams = signedInAsCook,
-  }: { db?: AuthDeps["db"]; seams?: AppSeams } = {},
+    matchIngredients = noMatches,
+  }: {
+    db?: AuthDeps["db"];
+    seams?: AppSeams;
+    matchIngredients?: ImportDeps["matchIngredients"];
+  } = {},
 ) {
   logLines = [];
   const stream = new Writable({
@@ -86,6 +104,7 @@ function start(
       pingDatabase: () => Promise.resolve(),
       fetchPage,
       loadUnits: loadUnits ?? (() => Promise.resolve({ measurements })),
+      matchIngredients,
       db,
       secureCookies: false,
       settingsKey: Buffer.alloc(32),
@@ -145,6 +164,7 @@ describe("POST /imports/preview", () => {
       "extraction",
       "warnings",
       "recipe",
+      "ingredientMatching",
     ]);
     expect((body.recipe as { ingredients: unknown[] }).ingredients[0]).toEqual({
       position: 1,
@@ -153,13 +173,181 @@ describe("POST /imports/preview", () => {
       quantityText: "1 1/2",
       unit: { measurementId: UNIT.cupMetric, key: "cup_metric" },
       unitText: "cups",
-      ingredientText: "plain flour, sifted",
-      prepNotes: null,
+      ingredientText: "plain flour",
+      prepNotes: "sifted",
       notes: null,
-      flags: [],
+      flags: ["ingredient_unmatched"],
       section: null,
+      ingredientId: null,
+      candidates: [],
     });
+    expect(body.ingredientMatching).toEqual({ status: "ok" });
     expect(fetchPage).toHaveBeenCalledWith(URL_, { refresh: false });
+  });
+
+  it("carries each line's proposed ingredient and candidates", async () => {
+    const candidate = {
+      ingredientId: 7,
+      name: "plain flour",
+      locale: "en-GB",
+      similarity: 1,
+    };
+    const matchIngredients = vi.fn<ImportDeps["matchIngredients"]>(
+      (ingredients) =>
+        Promise.resolve({
+          ingredients: ingredients.map((line) =>
+            line.position === 1
+              ? { ...line, ingredientId: 7, candidates: [candidate] }
+              : {
+                  ...line,
+                  flags: [...line.flags, "ingredient_unmatched" as const],
+                },
+          ),
+          matching: { status: "ok" },
+        }),
+    );
+    start(
+      () => Promise.resolve(page(fixture("json-ld-single.html"))),
+      undefined,
+      {
+        matchIngredients,
+      },
+    );
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{
+      recipe: { ingredients: Record<string, unknown>[] };
+    }>();
+    expect(body.recipe.ingredients[0]).toMatchObject({
+      ingredientText: "plain flour",
+      ingredientId: 7,
+      candidates: [candidate],
+      flags: [],
+    });
+    expect(body.recipe.ingredients[1]).toMatchObject({
+      ingredientId: null,
+      flags: ["ingredient_unmatched"],
+    });
+    // The page's host decides the locale tie-break.
+    expect(matchIngredients).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ position: 1, ingredientText: "plain flour" }),
+      ]),
+      expect.objectContaining({ sourceHost: "www.example.com.au" }),
+    );
+    expect(previewLog()).toEqual([
+      expect.objectContaining({
+        msg: "import preview",
+        matched: 1,
+        matching: "ok",
+      }),
+    ]);
+  });
+
+  it("still returns the preview when AI is not configured, saying why", async () => {
+    start(
+      () => Promise.resolve(page(fixture("json-ld-single.html"))),
+      undefined,
+      {
+        matchIngredients: (ingredients) =>
+          Promise.resolve({
+            ingredients: ingredients.map((line) => ({
+              ...line,
+              flags: [...line.flags, "ingredient_unmatched" as const],
+            })),
+            matching: {
+              status: "ai_not_configured",
+              message: AI_NOT_CONFIGURED_MESSAGE,
+            },
+          }),
+      },
+    );
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      ingredientMatching: {
+        status: "ai_not_configured",
+        message: AI_NOT_CONFIGURED_MESSAGE,
+      },
+    });
+  });
+
+  it("answers 500 when the match fails for any other reason", async () => {
+    start(
+      () => Promise.resolve(page(fixture("json-ld-single.html"))),
+      undefined,
+      {
+        matchIngredients: () => Promise.reject(new Error("connection lost")),
+      },
+    );
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({
+      error: "internal_error",
+      message: "the ingredients could not be matched",
+      url: URL_,
+    });
+    expect(previewLog()).toEqual([
+      expect.objectContaining({
+        level: 50,
+        msg: "import preview: ingredient match error",
+      }),
+    ]);
+  });
+
+  it("limits previews per signed-in user, refusing before any match", async () => {
+    // Signed in as the user named in x-user, so two users can be compared.
+    const asUser: AppSeams = {
+      requireUser: (request) => {
+        request.user = {
+          id: Number(request.headers["x-user"]),
+          email: "cook@imports.test",
+          displayName: null,
+          locale: "en-GB",
+          isAdmin: false,
+        };
+        return Promise.resolve();
+      },
+    };
+    const fetchPage = vi.fn(() =>
+      Promise.resolve(page(fixture("json-ld-single.html"))),
+    );
+    const matchIngredients = vi.fn(noMatches);
+    start(fetchPage, undefined, { seams: asUser, matchIngredients });
+    const previewAs = (userId: number) =>
+      app.inject({
+        method: "POST",
+        url: "/imports/preview",
+        payload: { url: URL_ },
+        headers: { "x-user": String(userId) },
+      });
+
+    for (let i = 0; i < PREVIEWS_PER_MINUTE; i++) {
+      expect((await previewAs(1)).statusCode).toBe(200);
+    }
+    const refused = await previewAs(1);
+
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toEqual({
+      error: "rate_limited",
+      message: "too many import previews; try again in a minute",
+      url: "",
+    });
+    expect(matchIngredients).toHaveBeenCalledTimes(PREVIEWS_PER_MINUTE);
+    expect(fetchPage).toHaveBeenCalledTimes(PREVIEWS_PER_MINUTE);
+    expect(
+      logLines.filter((l) => l.msg === "import preview: rate limited"),
+    ).toEqual([expect.objectContaining({ level: 40, userId: 1 })]);
+    // Counted per user, not per client address: the same client signed in
+    // as someone else is not refused.
+    expect((await previewAs(2)).statusCode).toBe(200);
+    expect(matchIngredients).toHaveBeenCalledTimes(PREVIEWS_PER_MINUTE + 1);
   });
 
   it("passes refresh through to the fetch", async () => {

@@ -15,7 +15,7 @@ const database = createDatabase(config.databaseUrl, (err) => {
 const app = buildApp(
   {
     pingDatabase: () => database.ping(),
-    ...importDeps(database.db),
+    ...importDeps(database.db, config.settingsEncryptionKey),
     db: database.db,
     secureCookies: config.secureCookies,
     settingsKey: config.settingsEncryptionKey,
