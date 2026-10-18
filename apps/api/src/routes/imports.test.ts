@@ -23,6 +23,7 @@ import {
   MAX_STEPS,
   MAX_TAG_CHARS,
   MAX_TAGS,
+  PREVIEWS_PER_MINUTE,
   type ImportDeps,
 } from "./imports.js";
 
@@ -298,6 +299,55 @@ describe("POST /imports/preview", () => {
         msg: "import preview: ingredient match error",
       }),
     ]);
+  });
+
+  it("limits previews per signed-in user, refusing before any match", async () => {
+    // Signed in as the user named in x-user, so two users can be compared.
+    const asUser: AppSeams = {
+      requireUser: (request) => {
+        request.user = {
+          id: Number(request.headers["x-user"]),
+          email: "cook@imports.test",
+          displayName: null,
+          locale: "en-GB",
+          isAdmin: false,
+        };
+        return Promise.resolve();
+      },
+    };
+    const fetchPage = vi.fn(() =>
+      Promise.resolve(page(fixture("json-ld-single.html"))),
+    );
+    const matchIngredients = vi.fn(noMatches);
+    start(fetchPage, undefined, { seams: asUser, matchIngredients });
+    const previewAs = (userId: number) =>
+      app.inject({
+        method: "POST",
+        url: "/imports/preview",
+        payload: { url: URL_ },
+        headers: { "x-user": String(userId) },
+      });
+
+    for (let i = 0; i < PREVIEWS_PER_MINUTE; i++) {
+      expect((await previewAs(1)).statusCode).toBe(200);
+    }
+    const refused = await previewAs(1);
+
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toEqual({
+      error: "rate_limited",
+      message: "too many import previews; try again in a minute",
+      url: "",
+    });
+    expect(matchIngredients).toHaveBeenCalledTimes(PREVIEWS_PER_MINUTE);
+    expect(fetchPage).toHaveBeenCalledTimes(PREVIEWS_PER_MINUTE);
+    expect(
+      logLines.filter((l) => l.msg === "import preview: rate limited"),
+    ).toEqual([expect.objectContaining({ level: 40, userId: 1 })]);
+    // Counted per user, not per client address: the same client signed in
+    // as someone else is not refused.
+    expect((await previewAs(2)).statusCode).toBe(200);
+    expect(matchIngredients).toHaveBeenCalledTimes(PREVIEWS_PER_MINUTE + 1);
   });
 
   it("passes refresh through to the fetch", async () => {

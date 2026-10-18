@@ -3,6 +3,7 @@ import type {
   FastifyError,
   FastifyPluginCallback,
   FastifyReply,
+  FastifyRequest,
 } from "fastify";
 import { complete } from "../ai/complete.js";
 import type { Database } from "../db/client.js";
@@ -38,7 +39,12 @@ import {
   type MeasurementLookup,
 } from "../import/measurement-lookup.js";
 import type { AuthDeps } from "./auth.js";
-import { apiErrorHandler, sendError as sendApiError } from "./errors.js";
+import { clientKey } from "../auth/client-key.js";
+import {
+  apiErrorHandler,
+  RateLimitedError,
+  sendError as sendApiError,
+} from "./errors.js";
 
 export interface ImportDeps {
   // fetchPage with the api's database and strategies bound.
@@ -86,7 +92,24 @@ export type PreviewErrorCode =
   | "no_recipe_found"
   | "fetch_failed"
   | "import_not_permitted"
+  | "rate_limited"
   | "internal_error";
+
+// Each preview can cost a completion on the admin's AI account (SEC-1 on
+// NATG-321), so it is limited per signed-in user: far above what a person
+// pasting URLs by hand reaches. Counted before the body is read, so a refused
+// request fetches, extracts and matches nothing. The route is behind
+// requireUser, which runs first; the client key is only a fallback.
+export const PREVIEWS_PER_MINUTE = 12;
+
+const previewLimit = {
+  max: PREVIEWS_PER_MINUTE,
+  timeWindow: 60_000,
+  keyGenerator: (request: FastifyRequest) =>
+    request.user ? `user:${request.user.id}` : clientKey(request),
+  errorResponseBuilder: () =>
+    new RateLimitedError("too many import previews; try again in a minute"),
+};
 
 export type SaveResponse = Recipe & { alreadyImported: boolean };
 
@@ -113,11 +136,19 @@ export const importRoutes: FastifyPluginCallback<
       request.log.info({ code: err.code }, "import preview: unparseable body");
       return sendError(reply, 400, "invalid_url", "body must be JSON", "");
     }
+    if (err instanceof RateLimitedError) {
+      request.log.warn(
+        { userId: request.user?.id ?? null },
+        "import preview: rate limited",
+      );
+      return sendError(reply, 429, "rate_limited", err.message, "");
+    }
     throw err;
   });
 
   app.post<{ Body: unknown }>(
     "/imports/preview",
+    { config: { rateLimit: previewLimit } },
     async (request, reply): Promise<PreviewResponse> => {
       const body = isRecord(request.body) ? request.body : {};
       if (typeof body.url !== "string") {
