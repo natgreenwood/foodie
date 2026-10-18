@@ -27,9 +27,11 @@ const whitespace =
 
 // Lowercase, trimmed, internal whitespace (including NBSP and the other
 // Unicode spaces above) collapsed to one space. Used for the per-locale
-// uniqueness of names and the not-blank checks; accents are kept.
-function normalised(column: AnyPgColumn): SQL {
-  return sql`lower(btrim(regexp_replace(${column}, '${sql.raw(whitespace)}', ' ', 'g')))`;
+// uniqueness of names and the not-blank checks; accents are kept. Exported so
+// a query can normalise its own text with exactly this expression, as the
+// ingredient match does (NATG-321).
+export function normalised(value: AnyPgColumn | SQL): SQL {
+  return sql`lower(btrim(regexp_replace(${value}, '${sql.raw(whitespace)}', ' ', 'g')))`;
 }
 
 // Quantities only add up within a type: millilitres to grams needs the

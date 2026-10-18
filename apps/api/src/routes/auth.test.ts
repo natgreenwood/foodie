@@ -34,6 +34,7 @@ function start(
       pingDatabase: () => Promise.resolve(),
       fetchPage: unused,
       loadUnits: unused,
+      matchIngredients: unused,
       db: tx,
       secureCookies,
       settingsKey: Buffer.alloc(32),

@@ -48,6 +48,7 @@ beforeAll(async () => {
     pingDatabase: () => Promise.resolve(),
     fetchPage: unused,
     loadUnits: unused,
+    matchIngredients: unused,
     db,
     secureCookies: false,
     settingsKey: Buffer.alloc(32),
