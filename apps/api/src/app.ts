@@ -15,6 +15,7 @@ import {
 } from "./routes/auth.js";
 import { healthRoutes, type HealthDeps } from "./routes/health.js";
 import { importRoutes, type ImportDeps } from "./routes/imports.js";
+import { ingredientRoutes } from "./routes/ingredients.js";
 import { measurementRoutes } from "./routes/measurements.js";
 import { meRoutes } from "./routes/me.js";
 import {
@@ -177,6 +178,7 @@ export function buildApp(
     signedIn.register(recipeRoutes, deps);
     signedIn.register(measurementRoutes, deps);
     signedIn.register(importRoutes, deps);
+    signedIn.register(ingredientRoutes, deps);
     // Admin-only routes: requireAdmin answers 403 to everyone else.
     signedIn.register((admin, _opts, adminDone) => {
       admin.addHook("onRequest", requireAdmin);

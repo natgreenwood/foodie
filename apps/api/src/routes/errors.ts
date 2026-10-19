@@ -16,6 +16,7 @@ export type ApiErrorCode =
   | "no_other_sign_in"
   | "rate_limited"
   | "not_found"
+  | "name_taken"
   | "invalid_lines"
   | "invalid_steps"
   | "unresolved_lines"
