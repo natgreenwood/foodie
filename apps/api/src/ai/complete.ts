@@ -19,6 +19,11 @@ import {
 export const COMPLETION_TIMEOUT_MS = 120_000;
 
 // Far beyond any answer a sane maxTokens allows; a body past it is not one.
+// Still so with REASONING_TOKEN_ALLOWANCE, whose reasoning may come back in
+// the body: as an Anthropic thinking block's summary and its signature (the
+// full thinking, encrypted, in base64), or as OpenRouter's reasoning text and
+// details. Estimated, not measured: about 15 bytes a token at worst, under
+// 400 KB for 25,000 tokens, where this allows about 40 bytes a token.
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 // A network failure's message is cut to this in our own message, so one
