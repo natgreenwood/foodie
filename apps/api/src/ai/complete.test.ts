@@ -222,7 +222,7 @@ describe("reasoning level", () => {
     ],
     ["openai", "gpt-5-mini", { reasoning_effort: "high" }],
     ["openai", "o4-mini-2025-04-16", { reasoning_effort: "high" }],
-    ["openrouter", "google/gemini-flash", { reasoning: { effort: "high" } }],
+    ["openrouter", "openai/gpt-5-mini", { reasoning: { effort: "high" } }],
   ] as const)(
     "is sent to %s %s as the provider's own parameter",
     async ([provider, model, fields], { tx }) => {
@@ -241,6 +241,9 @@ describe("reasoning level", () => {
     ["openai", "gpt-4.1-mini"],
     ["openai", "o1-mini"],
     ["openai", "gpt-5-chat-latest"],
+    ["openrouter", "openai/gpt-4.1-mini"],
+    ["openrouter", "anthropic/claude-haiku-5.5"],
+    ["openrouter", "google/gemini-flash"],
     ["ollama", "llama3.1:8b"],
   ] as const)(
     "is left out for %s %s, which may not take it",

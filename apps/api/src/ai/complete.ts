@@ -278,6 +278,10 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // or misspelt model id can never fail on it. Ollama gets none, since whether
 // its OpenAI-compatible endpoint takes reasoning_effort depends on the Ollama
 // version and the model, and a model that cannot think refuses it.
+// OpenRouter gets it only for the OpenAI models it passes through: its docs do
+// not promise to ignore it on a model without reasoning, an effort can switch
+// reasoning on, and for Anthropic models it sets a thinking budget of at least
+// 1024 tokens, more than a recipe import's whole maxTokens.
 function reasoningFields(
   provider: AiProvider,
   model: string,
@@ -294,8 +298,12 @@ function reasoningFields(
       ? { reasoning_effort: level }
       : {};
   }
-  // OpenRouter ignores a parameter the routed model does not take.
-  if (provider === "openrouter") return { reasoning: { effort: level } };
+  if (provider === "openrouter") {
+    return model.startsWith(OPENROUTER_OPENAI_PREFIX) &&
+      OPENAI_REASONING_MODELS.test(model.slice(OPENROUTER_OPENAI_PREFIX.length))
+      ? { reasoning: { effort: level } }
+      : {};
+  }
   return {};
 }
 
@@ -311,6 +319,9 @@ const ANTHROPIC_EFFORT_MODELS =
 // chat completions.
 const OPENAI_REASONING_MODELS =
   /^(?:o1|o3|o3-mini|o4-mini|gpt-5(?:\.\d+)?(?:-mini|-nano)?)(?:-\d{4}-\d{2}-\d{2})?$/;
+
+// OpenRouter's ids for OpenAI's own models, e.g. openai/gpt-5-mini.
+const OPENROUTER_OPENAI_PREFIX = "openai/";
 
 function buildRequest(
   provider: AiProvider,
