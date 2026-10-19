@@ -4,7 +4,11 @@ import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
 import { describe, expect, onTestFinished } from "vitest";
 import { buildApp, logRedactPaths, logSerializers } from "../app.js";
-import { providerCredential } from "../ai/settings.js";
+import {
+  listModelSelections,
+  providerCredential,
+  setModelSelection,
+} from "../ai/settings.js";
 import { createUser } from "../auth/accounts.js";
 import { session, user } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
@@ -107,6 +111,11 @@ const adminRoutes: [Method, string, object?][] = [
   ["PUT", "/admin/ai/providers/ollama", { baseUrl: "http://ollama:11434" }],
   ["DELETE", "/admin/ai/providers/openai"],
   ["PUT", "/admin/ai/models/default", { provider: "openai", model: "gpt-5" }],
+  [
+    "PUT",
+    "/admin/ai/models/default",
+    { provider: "openai", model: "gpt-5", reasoningLevel: "high" },
+  ],
 ];
 
 describe("admin routes", () => {
@@ -431,7 +440,14 @@ describe("AI provider settings", () => {
           { provider: "openrouter", configured: false },
           { provider: "ollama", configured: false },
         ],
-        models: [{ procedure: "default", provider: null, model: null }],
+        models: [
+          {
+            procedure: "default",
+            provider: null,
+            model: null,
+            reasoningLevel: null,
+          },
+        ],
       });
       expect(get.body).not.toContain(API_KEY);
       // Round trip: what the import will read is the key, trimmed.
@@ -673,6 +689,7 @@ describe("PUT /admin/ai/models/:procedure", () => {
       procedure: "default",
       provider: "openai",
       model: "gpt-5-mini",
+      reasoningLevel: null,
     });
     await request("PUT", url, admin.token, {
       provider: "openrouter",
@@ -735,4 +752,120 @@ describe("PUT /admin/ai/models/:procedure", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toMatchObject({ error: "invalid_request" });
   });
+});
+
+describe("reasoning level", () => {
+  const url = "/admin/ai/models/default";
+  const model = { provider: "openai", model: "gpt-5-mini" };
+
+  dbTest.for(["low", "medium", "high"])(
+    "stores %s and reads it back",
+    async (level, { tx }) => {
+      const { request, signedIn } = start(tx);
+      const admin = await signedIn({ admin: true });
+
+      const put = await request("PUT", url, admin.token, {
+        ...model,
+        reasoningLevel: level,
+      });
+
+      expect(put.statusCode).toBe(200);
+      expect(put.json()).toEqual({
+        procedure: "default",
+        ...model,
+        reasoningLevel: level,
+      });
+      expect(
+        (await request("GET", "/admin/ai", admin.token)).json(),
+      ).toMatchObject({
+        models: [{ procedure: "default", ...model, reasoningLevel: level }],
+      });
+    },
+  );
+
+  dbTest(
+    "keeps the stored level when left out, and clears it on null",
+    async ({ tx }) => {
+      const { request, signedIn } = start(tx);
+      const admin = await signedIn({ admin: true });
+      await request("PUT", url, admin.token, {
+        ...model,
+        reasoningLevel: "low",
+      });
+
+      const kept = await request("PUT", url, admin.token, {
+        provider: "anthropic",
+        model: "claude-haiku-5-5",
+      });
+      expect(kept.statusCode).toBe(200);
+      expect(kept.json()).toMatchObject({ reasoningLevel: "low" });
+
+      // Clearing twice is harmless.
+      for (let i = 0; i < 2; i++) {
+        const cleared = await request("PUT", url, admin.token, {
+          ...model,
+          reasoningLevel: null,
+        });
+        expect(cleared.statusCode).toBe(200);
+        expect(cleared.json()).toMatchObject({ reasoningLevel: null });
+      }
+      expect(
+        (await request("GET", "/admin/ai", admin.token)).json(),
+      ).toMatchObject({ models: [{ ...model, reasoningLevel: null }] });
+    },
+  );
+
+  dbTest.for(["max", "HIGH", "", 2, true, ["high"], { level: "high" }])(
+    "answers 400 to reasoningLevel %j and changes nothing",
+    async (reasoningLevel, { tx }) => {
+      const { request, signedIn } = start(tx);
+      const admin = await signedIn({ admin: true });
+      await request("PUT", url, admin.token, {
+        ...model,
+        reasoningLevel: "medium",
+      });
+
+      const res = await request("PUT", url, admin.token, {
+        ...model,
+        reasoningLevel,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({
+        error: "invalid_request",
+        message: "reasoningLevel must be one of low, medium, high, or null",
+      });
+      expect(await listModelSelections(tx)).toMatchObject([
+        { procedure: "default", reasoningLevel: "medium" },
+      ]);
+    },
+  );
+
+  dbTest(
+    "answers 403 to a signed-in non-admin and keeps the stored level",
+    async ({ tx }) => {
+      const { request, signedIn } = start(tx);
+      const cook = await signedIn();
+      await setModelSelection(tx, {
+        procedure: "default",
+        provider: "openai",
+        model: "gpt-5-mini",
+        reasoningLevel: "low",
+      });
+
+      for (const reasoningLevel of ["high", null]) {
+        const res = await request("PUT", url, cook.token, {
+          ...model,
+          reasoningLevel,
+        });
+        expect(res.statusCode).toBe(403);
+      }
+      expect((await request("GET", "/admin/ai", cook.token)).statusCode).toBe(
+        403,
+      );
+      expect(await listModelSelections(tx)).toEqual([
+        { procedure: "default", ...model, reasoningLevel: "low" },
+      ]);
+    },
+  );
 });

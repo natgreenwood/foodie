@@ -5,10 +5,12 @@ import {
   configuredProviders,
   isAiProcedure,
   isAiProvider,
+  isAiReasoningLevel,
   listModelSelections,
   setModelSelection,
   setProviderCredential,
   type AiProvider,
+  type AiReasoningLevel,
 } from "../ai/settings.js";
 import { asAdmin } from "../auth/admin.js";
 import {
@@ -26,11 +28,13 @@ export interface AdminAiDeps extends AuthDeps {
 
 export interface AdminAiResponse {
   providers: { provider: AiProvider; configured: boolean }[];
-  // One entry per known procedure; provider and model are null until set.
+  // One entry per known procedure; provider and model are null until set,
+  // and reasoningLevel until an admin chooses one.
   models: {
     procedure: string;
     provider: AiProvider | null;
     model: string | null;
+    reasoningLevel: AiReasoningLevel | null;
   }[];
 }
 
@@ -107,6 +111,7 @@ export const adminAiRoutes: FastifyPluginCallback<AdminAiDeps> = (
           procedure,
           provider: found?.provider ?? null,
           model: found?.model ?? null,
+          reasoningLevel: found?.reasoningLevel ?? null,
         };
       }),
     };
@@ -156,8 +161,9 @@ export const adminAiRoutes: FastifyPluginCallback<AdminAiDeps> = (
     },
   );
 
-  // { provider, model }: the model the procedure uses. The provider need not
-  // be configured yet.
+  // { provider, model, reasoningLevel? }: the model the procedure uses. The
+  // provider need not be configured yet. reasoningLevel left out keeps the
+  // stored level; null clears it. Answers with the selection as stored.
   app.put<{ Params: { procedure: string }; Body: unknown }>(
     "/admin/ai/models/:procedure",
     async (request, reply) => {
@@ -167,7 +173,8 @@ export const adminAiRoutes: FastifyPluginCallback<AdminAiDeps> = (
       }
       const body = isRecord(request.body) ? request.body : {};
       const unknown = Object.keys(body).filter(
-        (key) => key !== "provider" && key !== "model",
+        (key) =>
+          key !== "provider" && key !== "model" && key !== "reasoningLevel",
       );
       if (unknown.length > 0) {
         return sendError(
@@ -194,11 +201,30 @@ export const adminAiRoutes: FastifyPluginCallback<AdminAiDeps> = (
           `model must be a model id of at most ${MODEL_MAX_LENGTH} characters, with no spaces`,
         );
       }
-      const selection = { procedure, provider: body.provider, model };
+      const { reasoningLevel } = body;
+      if (
+        reasoningLevel !== undefined &&
+        reasoningLevel !== null &&
+        !isAiReasoningLevel(reasoningLevel)
+      ) {
+        return sendError(
+          reply,
+          400,
+          "invalid_request",
+          "reasoningLevel must be one of low, medium, high, or null",
+        );
+      }
+      const wanted = {
+        procedure,
+        provider: body.provider,
+        model,
+        reasoningLevel,
+      };
       const result = await asAdmin(db, adminActor(request), null, (t) =>
-        setModelSelection(t, selection),
+        setModelSelection(t, wanted),
       );
       if (result.refused) return sendAdminRefusal(reply, result.refused);
+      const selection = result.value;
       request.log.info(
         { adminId: request.user!.id, ...selection },
         "admin ai: model changed",
