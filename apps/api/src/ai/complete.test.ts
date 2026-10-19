@@ -358,6 +358,254 @@ dbTest("reports a 2xx without text as a bad response", async ({ tx }) => {
   });
 });
 
+describe("a 2xx that is not a whole answer", () => {
+  const models = {
+    anthropic: "claude-haiku-5-5",
+    openai: "gpt-5-mini",
+    openrouter: "google/gemini-flash",
+    ollama: "llama3.1:8b",
+  } as const;
+
+  // The provider's own words in these bodies, none of which may be quoted.
+  const providerWords = [
+    "I can't help",
+    "upstream provider error",
+    "upstream died",
+    "Policy says no",
+  ];
+
+  // [provider, 2xx body, reason, providerMessage, code]. The first nine are
+  // the rows of NATG-330's table, in order.
+  dbTest.for([
+    [
+      "anthropic",
+      { content: [] },
+      "bad_response",
+      "no text in the response",
+      null,
+    ],
+    [
+      "anthropic",
+      { content: [{ type: "text", text: "" }] },
+      "bad_response",
+      "empty text in the response",
+      null,
+    ],
+    [
+      "anthropic",
+      {
+        content: [{ type: "text", text: "2 eggs, 10" }],
+        stop_reason: "max_tokens",
+      },
+      "truncated",
+      "answer cut off at the token limit",
+      null,
+    ],
+    [
+      "openai",
+      { choices: [] },
+      "bad_response",
+      "no text in the response",
+      null,
+    ],
+    [
+      "openai",
+      { choices: [{ message: { content: "" }, finish_reason: "length" }] },
+      "truncated",
+      "answer cut off at the token limit",
+      null,
+    ],
+    [
+      "openai",
+      {
+        choices: [
+          { message: { content: "2 eggs, 10" }, finish_reason: "length" },
+        ],
+      },
+      "truncated",
+      "answer cut off at the token limit",
+      null,
+    ],
+    [
+      "openai",
+      {
+        choices: [
+          {
+            message: { content: null, refusal: "I can't help" },
+            finish_reason: "stop",
+          },
+        ],
+      },
+      "bad_response",
+      "model refused",
+      null,
+    ],
+    [
+      "openrouter",
+      { error: { code: 502, message: "upstream provider error" } },
+      "bad_response",
+      "provider reported an error (502)",
+      "502",
+    ],
+    [
+      "openrouter",
+      {
+        choices: [
+          {
+            message: { content: "" },
+            finish_reason: "error",
+            error: { message: "upstream died" },
+          },
+        ],
+      },
+      "bad_response",
+      "provider reported an error",
+      null,
+    ],
+    // The decisions beyond the table.
+    [
+      "anthropic",
+      {
+        content: [{ type: "text", text: "Policy says no" }],
+        stop_reason: "refusal",
+      },
+      "bad_response",
+      "model refused",
+      null,
+    ],
+    [
+      "anthropic",
+      { content: [{ type: "text", text: " \n\t" }], stop_reason: "end_turn" },
+      "bad_response",
+      "empty text in the response",
+      null,
+    ],
+    [
+      "ollama",
+      { choices: [{ message: { content: "  \n" }, finish_reason: "stop" }] },
+      "bad_response",
+      "empty text in the response",
+      null,
+    ],
+    [
+      "openrouter",
+      {
+        choices: [
+          {
+            message: { content: "eggs" },
+            finish_reason: "error",
+            error: { code: "server_error", message: "upstream died" },
+          },
+        ],
+      },
+      "bad_response",
+      "provider reported an error (server_error)",
+      "server_error",
+    ],
+    [
+      "openrouter",
+      { error: { code: 2100, message: "upstream provider error" } },
+      "bad_response",
+      "provider reported an error",
+      null,
+    ],
+    [
+      "openrouter",
+      { error: "upstream provider error" },
+      "bad_response",
+      "provider reported an error",
+      null,
+    ],
+  ] as const)(
+    "rejects %s %j as %s",
+    async ([provider, body, reason, providerMessage, code], { tx }) => {
+      const model = models[provider];
+      await configure(
+        tx,
+        provider,
+        model,
+        provider === "ollama" ? "http://ollama:11434" : API_KEY,
+      );
+      respond(200, body);
+
+      const err = (await complete({ db: tx, settingsKey }, request).catch(
+        (e: unknown) => e,
+      )) as AiProviderError;
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect(err).toMatchObject({
+        provider,
+        model,
+        reason,
+        status: 200,
+        code,
+        providerMessage,
+        message: `${provider} ${model}: ${reason}, status 200: ${providerMessage}`,
+      });
+      for (const words of providerWords) {
+        expect(err.message).not.toContain(words);
+      }
+    },
+  );
+
+  dbTest(
+    "keeps a reported error's code that holds the prompt out",
+    async ({ tx }) => {
+      await configure(tx, "openrouter", "google/gemini-flash");
+      // A code from the set, with a prompt that is exactly that code.
+      respond(200, { error: { code: "server_error" } });
+
+      await expect(
+        complete({ db: tx, settingsKey }, { ...request, user: "server_error" }),
+      ).rejects.toMatchObject({
+        reason: "bad_response",
+        code: null,
+        providerMessage: "provider reported an error",
+      });
+    },
+  );
+
+  dbTest.for([
+    [
+      "anthropic",
+      {
+        content: [{ type: "text", text: "eggs, flour" }],
+        stop_reason: "end_turn",
+      },
+    ],
+    [
+      "openai",
+      {
+        choices: [
+          {
+            message: { content: "eggs, flour", refusal: null },
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ],
+    [
+      "openrouter",
+      {
+        choices: [
+          { message: { content: "eggs, flour" }, finish_reason: "stop" },
+        ],
+        error: null,
+      },
+    ],
+  ] as const)(
+    "still returns a whole answer from %s",
+    async ([provider, body], { tx }) => {
+      const model = models[provider];
+      await configure(tx, provider, model);
+      respond(200, body);
+
+      await expect(complete({ db: tx, settingsKey }, request)).resolves.toEqual(
+        { text: "eggs, flour", provider, model },
+      );
+    },
+  );
+});
+
 dbTest("refuses a response past MAX_RESPONSE_BYTES", async ({ tx }) => {
   await configure(tx, "openai", "gpt-5-mini");
   respond(200, "x".repeat(MAX_RESPONSE_BYTES + 1));
