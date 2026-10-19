@@ -5,6 +5,7 @@ import {
   providerCredential,
   type AiProcedure,
   type AiProvider,
+  type AiReasoningLevel,
 } from "./settings.js";
 
 // One completion from the provider and model an admin chose (NATG-320), so
@@ -140,7 +141,8 @@ export class AiProviderError extends Error {
 }
 
 // The text the model answers `request` with, from the provider and model the
-// admin chose for `procedure`, or for `default` when the procedure has none.
+// admin chose for `procedure`, or for `default` when the procedure has none,
+// at that selection's reasoning level where the provider and model take one.
 // Rejects with AiNotConfiguredError or AiProviderError. Database and
 // decryption errors are not caught. Not retried: a caller that retries pays
 // for another completion, nothing worse.
@@ -156,7 +158,7 @@ export async function complete(
   if (!selection) {
     throw new AiNotConfiguredError("no_selection", procedure, null);
   }
-  const { provider, model } = selection;
+  const { provider, model, reasoningLevel } = selection;
   const credential = await providerCredential(
     deps.db,
     deps.settingsKey,
@@ -166,7 +168,13 @@ export async function complete(
     throw new AiNotConfiguredError("no_credential", procedure, provider);
   }
 
-  const call = buildRequest(provider, model, credential, request);
+  const call = buildRequest(
+    provider,
+    model,
+    credential,
+    reasoningLevel,
+    request,
+  );
   if (call === null) {
     throw new AiNotConfiguredError("invalid_credential", procedure, provider);
   }
@@ -265,12 +273,53 @@ const ANTHROPIC_VERSION = "2023-06-01";
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
+// The reasoning level as the provider's own request fields, or none. Sent only
+// where the model is known to take it: an unknown model gets none, so a new
+// or misspelt model id can never fail on it. Ollama gets none, since whether
+// its OpenAI-compatible endpoint takes reasoning_effort depends on the Ollama
+// version and the model, and a model that cannot think refuses it.
+function reasoningFields(
+  provider: AiProvider,
+  model: string,
+  level: AiReasoningLevel | null,
+): Record<string, unknown> {
+  if (level === null) return {};
+  if (provider === "anthropic") {
+    return ANTHROPIC_EFFORT_MODELS.test(model)
+      ? { output_config: { effort: level } }
+      : {};
+  }
+  if (provider === "openai") {
+    return OPENAI_REASONING_MODELS.test(model)
+      ? { reasoning_effort: level }
+      : {};
+  }
+  // OpenRouter ignores a parameter the routed model does not take.
+  if (provider === "openrouter") return { reasoning: { effort: level } };
+  return {};
+}
+
+// The Claude models whose Messages API takes output_config.effort: Opus 4.5
+// to 4.8, Sonnet 4.6, and every 5.x model, with or without a date suffix.
+// Older ones (Sonnet 4.5, Haiku 4.5) refuse it with a 400.
+const ANTHROPIC_EFFORT_MODELS =
+  /^claude-(?:opus-4-[5-8]|sonnet-4-6|(?:opus|sonnet|haiku|fable|mythos)-5(?:-\d)?)(?:-\d{8})?$/;
+
+// The OpenAI reasoning models whose chat completions take reasoning_effort,
+// with or without a date snapshot. Not o1-mini or o1-preview, which refuse
+// it; not the -chat and -pro variants, which do not take low to high on
+// chat completions.
+const OPENAI_REASONING_MODELS =
+  /^(?:o1|o3|o3-mini|o4-mini|gpt-5(?:\.\d+)?(?:-mini|-nano)?)(?:-\d{4}-\d{2}-\d{2})?$/;
+
 function buildRequest(
   provider: AiProvider,
   model: string,
   credential: string,
+  reasoningLevel: AiReasoningLevel | null,
   { system, user, maxTokens }: CompletionRequest,
 ): ProviderRequest | null {
+  const reasoning = reasoningFields(provider, model, reasoningLevel);
   if (provider === "anthropic") {
     return {
       url: ANTHROPIC_URL,
@@ -283,6 +332,7 @@ function buildRequest(
         max_tokens: maxTokens,
         system,
         messages: [{ role: "user", content: user }],
+        ...reasoning,
       },
       secrets: [],
     };
@@ -297,7 +347,12 @@ function buildRequest(
       headers: { authorization: `Bearer ${credential}` },
       // Not max_tokens: OpenAI's reasoning models refuse it with a 400, and
       // every OpenAI model takes max_completion_tokens. Do not change it back.
-      body: { model, messages, max_completion_tokens: maxTokens },
+      body: {
+        model,
+        messages,
+        max_completion_tokens: maxTokens,
+        ...reasoning,
+      },
       secrets: [],
     };
   }
@@ -305,7 +360,7 @@ function buildRequest(
     return {
       url: OPENROUTER_URL,
       headers: { authorization: `Bearer ${credential}` },
-      body: { model, messages, max_tokens: maxTokens },
+      body: { model, messages, max_tokens: maxTokens, ...reasoning },
       secrets: [],
     };
   }
