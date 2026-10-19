@@ -63,6 +63,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => sessionEvents.removeEventListener("unauthenticated", expire);
   }, []);
 
+  useEffect(() => {
+    const demote = () =>
+      setState((current) =>
+        current.kind === "signedIn"
+          ? { kind: "signedIn", user: { ...current.user, isAdmin: false } }
+          : current,
+      );
+    sessionEvents.addEventListener("forbidden", demote);
+    return () => sessionEvents.removeEventListener("forbidden", demote);
+  }, []);
+
   const session: Session = {
     state,
     retry: () => {
