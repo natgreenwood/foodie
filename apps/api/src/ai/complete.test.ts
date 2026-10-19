@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, vi } from "vitest";
+import { chooseIngredients } from "../import/match-ingredients.js";
 import { dbTest } from "../test/db.js";
 import type { TestTransaction } from "../test/db.js";
 import {
@@ -444,8 +445,8 @@ describe("a 2xx that is not a whole answer", () => {
       "openrouter",
       { error: { code: 502, message: "upstream provider error" } },
       "bad_response",
-      "provider reported an error (502)",
-      "502",
+      "provider reported an error",
+      null,
     ],
     [
       "openrouter",
@@ -568,6 +569,80 @@ describe("a 2xx that is not a whole answer", () => {
       for (const words of providerWords) {
         expect(err.message).not.toContain(words);
       }
+    },
+  );
+
+  // SEC-1: a numeric code that is a fragment of the prompt or the key, which
+  // the scrub of whole secrets cannot catch, so no numeric code is kept.
+  dbTest.for([
+    ["top-level", { error: { code: 314 } }],
+    [
+      "choice-level",
+      {
+        choices: [
+          {
+            message: { content: "" },
+            finish_reason: "error",
+            error: { code: 314 },
+          },
+        ],
+      },
+    ],
+  ] as const)(
+    "keeps a numeric %s error code that is part of the prompt out of the error and the log",
+    async ([, body], { tx }) => {
+      const prompt = "Private reference 314159";
+      await configure(
+        tx,
+        "openrouter",
+        "google/gemini-flash",
+        "sk-example-314159-demo",
+      );
+      respond(200, body);
+
+      const err = (await complete(
+        { db: tx, settingsKey },
+        { ...request, user: prompt },
+      ).catch((e: unknown) => e)) as AiProviderError;
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect(err).toMatchObject({
+        reason: "bad_response",
+        status: 200,
+        code: null,
+        providerMessage: "provider reported an error",
+      });
+      for (const field of [err.message, err.providerMessage, err.code]) {
+        expect(String(field)).not.toContain("314");
+      }
+
+      // One level up: the line holding the digits is in the prompt
+      // chooseIngredients sends, and its warning names no code.
+      fetchMock.mockReset();
+      respond(200, body);
+      const log = { info: vi.fn(), warn: vi.fn() };
+      const { matching } = await chooseIngredients(
+        [
+          {
+            position: 1,
+            ingredientText: prompt,
+            candidates: [
+              {
+                ingredientId: 12,
+                name: "egg",
+                locale: "en-GB",
+                similarity: 0.5,
+              },
+            ],
+          },
+        ],
+        (req) => complete({ db: tx, settingsKey }, req),
+        log,
+      );
+      expect(JSON.stringify(sent().body)).toContain(prompt);
+      expect(matching.status).toBe("ai_failed");
+      expect(log.warn).toHaveBeenCalledTimes(1);
+      expect(log.warn.mock.calls[0]![0]).toMatchObject({ code: null });
+      expect(JSON.stringify(log.warn.mock.calls)).not.toContain("314");
     },
   );
 

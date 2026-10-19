@@ -130,8 +130,7 @@ export class AiProviderError extends Error {
     // For http_error, and for a bad_response the provider reported as an
     // error in a 2xx body, the provider's error code (Anthropic's error.type;
     // the OpenAI-compatible error.code, else error.type) when it is in
-    // PROVIDER_ERROR_CODES, or an error.code that is an HTTP status such as
-    // OpenRouter's 502 in a 2xx body; otherwise null.
+    // PROVIDER_ERROR_CODES; otherwise null.
     readonly code: string | null,
     // For http_error, "HTTP <status>" and the code; otherwise what went
     // wrong, in our words, with the code when there is one. Never the
@@ -525,7 +524,7 @@ function anthropicText(json: unknown): string | null {
 }
 
 // Why a 2xx is not an answer whatever its text says, in our own fixed words;
-// `code` is a provider error code as errorCode or httpStatusCode accepts it.
+// `code` is a provider error code as errorCode accepts it.
 interface Unanswered {
   reason: "truncated" | "bad_response";
   message: string;
@@ -583,11 +582,10 @@ function chatUnanswered(
     return {
       reason: "bad_response",
       message: "provider reported an error",
-      code:
-        httpStatusCode(json) ??
-        errorCode(provider, json) ??
-        httpStatusCode(choice) ??
-        errorCode(provider, choice),
+      // Only a code from PROVIDER_ERROR_CODES. Not a numeric one, such as
+      // OpenRouter repeating an upstream 502: even three digits can be part
+      // of the prompt or the key, where the scrub of whole secrets misses it.
+      code: errorCode(provider, json) ?? errorCode(provider, choice),
     };
   }
   const { refusal } = isRecord(choice.message) ? choice.message : {};
@@ -595,17 +593,6 @@ function chatUnanswered(
   if (choice.finish_reason === "content_filter") return FILTERED;
   if (choice.finish_reason === "length") return TRUNCATED;
   return null;
-}
-
-// An error.code that is an HTTP status, as OpenRouter gives in a 2xx body
-// (e.g. 502), as text. Only 100 to 599, so the most it could carry from the
-// prompt is three digits, where any integer could carry a long number.
-function httpStatusCode(json: unknown): string | null {
-  if (!isRecord(json) || !isRecord(json.error)) return null;
-  const { code } = json.error;
-  return Number.isInteger(code) && Number(code) >= 100 && Number(code) <= 599
-    ? String(code)
-    : null;
 }
 
 // Chat completions: the first choice's message content.
