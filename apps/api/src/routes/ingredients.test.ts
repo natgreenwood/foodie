@@ -170,6 +170,92 @@ describe("GET /ingredients", () => {
     },
   );
 
+  dbTest(
+    "shows an en-GB user the bare en name over en-US and de",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx, { locale: "en-GB" });
+      const id = await newIngredient(tx, [
+        { name: "Aubergine", locale: "de" },
+        { name: "eggplant", locale: "en-US" },
+        { name: "aubergine", locale: "en" },
+      ]);
+
+      const body = page(await request("GET", "/ingredients", me.token));
+
+      expect(body.ingredients).toEqual([
+        expect.objectContaining({ id, name: "aubergine", locale: "en" }),
+      ]);
+    },
+  );
+
+  dbTest(
+    "shows an en-GB user another en-* name over de, by locale code",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx, { locale: "en-GB" });
+      const eggplant = await newIngredient(tx, [
+        { name: "Aubergine", locale: "de" },
+        { name: "eggplant", locale: "en-US" },
+      ]);
+      const capsicum = await newIngredient(tx, [
+        { name: "Paprika", locale: "de" },
+        { name: "bell pepper", locale: "en-US" },
+        { name: "capsicum", locale: "en-AU" },
+      ]);
+
+      const body = page(await request("GET", "/ingredients", me.token));
+
+      expect(body.ingredients).toEqual([
+        expect.objectContaining({
+          id: capsicum,
+          name: "capsicum",
+          locale: "en-AU",
+        }),
+        expect.objectContaining({
+          id: eggplant,
+          name: "eggplant",
+          locale: "en-US",
+        }),
+      ]);
+    },
+  );
+
+  dbTest(
+    "uses the same display name in a search hit and a 409",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx, { locale: "en-GB" });
+      const id = await newIngredient(tx, [
+        { name: "Aubergine", locale: "de" },
+        { name: "eggplant", locale: "en-US" },
+      ]);
+
+      const search = page(
+        await request("GET", "/ingredients?q=auberg", me.token),
+      );
+      const create = await request("POST", "/ingredients", me.token, {
+        names: [{ name: "aubergine", locale: "de" }],
+      });
+
+      expect(search.ingredients).toEqual([
+        expect.objectContaining({
+          id,
+          name: "eggplant",
+          locale: "en-US",
+          match: expect.objectContaining({
+            name: "Aubergine",
+            locale: "de",
+          }) as unknown,
+        }),
+      ]);
+      expect(create.statusCode).toBe(409);
+      expect(create.json()).toMatchObject({
+        ingredient: { id, name: "eggplant" },
+      });
+    },
+  );
+
   dbTest("pages the list", async ({ tx }) => {
     const { request } = start(tx);
     const me = await signedInUser(tx);
@@ -226,6 +312,9 @@ describe("GET /ingredients", () => {
     "userAdded=yes",
     `q=${"a".repeat(101)}`,
     "q=a&q=b",
+    "q=a%00b",
+    "q=%00",
+    "q=cor%00&userAdded=true",
   ])("answers 400 to ?%s", async (query, { tx }) => {
     const { request } = start(tx);
     const me = await signedInUser(tx);

@@ -65,17 +65,27 @@ export function bestNamePerIngredient(
   `;
 }
 
-// The name an ingredient is shown by to someone whose locale is `locale`:
-// its canonical name there, else any canonical name, else any name. A lateral
-// subquery over `i`, with columns name, locale and normalised_name, or no row
-// for an ingredient with no names.
+// The name an ingredient is shown by to someone whose locale is `locale`,
+// by how close its locale is (for en-GB): en-GB itself, then bare en, then
+// another en-* by locale code, then any other locale. Within each, a
+// canonical name goes first, so the last step is any canonical name, then
+// any name. So an en-GB user never sees a German name while an English one
+// exists. A lateral subquery over `i`, with columns name, locale and
+// normalised_name, or no row for an ingredient with no names.
 function displayName(locale: string): SQL {
+  const language = sql`lower(split_part(${locale}, '-', 1))`;
   return sql`
     select n.name, n.locale, n.normalised_name
     from ingredient_name n
     where n.ingredient_id = i.id
-    order by n.is_canonical and n.locale = ${locale} desc, n.is_canonical desc,
-      n.locale, n.id
+    order by
+      case
+        when lower(n.locale) = lower(${locale}) then 0
+        when lower(n.locale) = ${language} then 1
+        when lower(split_part(n.locale, '-', 1)) = ${language} then 2
+        else 3
+      end,
+      n.is_canonical desc, n.locale, n.id
     limit 1
   `;
 }

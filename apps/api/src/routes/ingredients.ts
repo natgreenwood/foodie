@@ -47,9 +47,13 @@ function parseListQuery(
   query: Record<string, unknown>,
 ): Parsed<ListQuery & { q: string }> {
   const { q = "", page = "1", userAdded = "false" } = query;
-  if (typeof q !== "string" || [...q].length > MAX_NAME_CHARS) {
+  // Blank is allowed (it lists); anything else is checked as a name is.
+  if (
+    typeof q !== "string" ||
+    (q.trim() !== "" && !isText(q, MAX_NAME_CHARS))
+  ) {
     return {
-      invalid: `q must be text of at most ${MAX_NAME_CHARS} characters`,
+      invalid: `q must be text of at most ${MAX_NAME_CHARS} characters, without NUL`,
     };
   }
   const pageNumber =
