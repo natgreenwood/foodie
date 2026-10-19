@@ -83,10 +83,12 @@ export function AdminAiPage() {
     return () => controller.abort();
   }, [attempt]);
 
-  function update(changes: Partial<AdminAiSettings>) {
+  // From the settings as they are when the change lands, not as they were
+  // when its request started: saves in other rows may have landed since.
+  function update(change: (settings: AdminAiSettings) => AdminAiSettings) {
     setLoad((current) =>
       current.kind === "loaded"
-        ? { kind: "loaded", settings: { ...current.settings, ...changes } }
+        ? { kind: "loaded", settings: change(current.settings) }
         : current,
     );
   }
@@ -136,12 +138,13 @@ export function AdminAiPage() {
                   configured={load.settings.configured[provider]}
                   isDefault={load.settings.defaultModel.provider === provider}
                   onChange={(configured) =>
-                    update({
+                    update((settings) => ({
+                      ...settings,
                       configured: {
-                        ...load.settings.configured,
+                        ...settings.configured,
                         [provider]: configured,
                       },
-                    })
+                    }))
                   }
                 />
               ))}
@@ -150,7 +153,9 @@ export function AdminAiPage() {
           <DefaultModelForm
             saved={load.settings.defaultModel}
             configured={load.settings.configured}
-            onSaved={(defaultModel) => update({ defaultModel })}
+            onSaved={(defaultModel) =>
+              update((settings) => ({ ...settings, defaultModel }))
+            }
           />
         </>
       )}

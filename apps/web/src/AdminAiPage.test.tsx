@@ -303,6 +303,55 @@ describe("AI settings page", () => {
     ).toBe(false);
   });
 
+  it.each([
+    ["the first", ["anthropic", "openai"]],
+    ["the second", ["openai", "anthropic"]],
+  ] as const)(
+    "keeps both rows configured when two saves overlap and %s finishes first",
+    async (_, order) => {
+      const saves = {
+        anthropic: held(() =>
+          respondWith(200, { provider: "anthropic", configured: true }),
+        ),
+        openai: held(() =>
+          respondWith(200, { provider: "openai", configured: true }),
+        ),
+      };
+      stubApi(stored({ provider: "anthropic", model: "claude-haiku-4-5" }), {
+        "PUT /api/admin/ai/providers/anthropic": saves.anthropic.handler,
+        "PUT /api/admin/ai/providers/openai": saves.openai.handler,
+      });
+      const user = userEvent.setup();
+
+      visit();
+      const anthropic = await row("Anthropic");
+      const openai = await row("OpenAI");
+      await user.click(within(anthropic).getByRole("button", { name: "Set" }));
+      await user.type(
+        within(anthropic).getByLabelText("Anthropic API key"),
+        "sk-ant-1",
+      );
+      await user.click(within(anthropic).getByRole("button", { name: "Save" }));
+      await user.click(within(openai).getByRole("button", { name: "Set" }));
+      await user.type(within(openai).getByLabelText("OpenAI API key"), "sk-1");
+      await user.click(within(openai).getByRole("button", { name: "Save" }));
+      expect(within(anthropic).getByText("Not set")).toBeDefined();
+      expect(within(openai).getByText("Not set")).toBeDefined();
+
+      const rows = { anthropic, openai };
+      const [first, second] = order;
+      saves[first].release();
+      expect(await within(rows[first]).findByText("Configured")).toBeDefined();
+      expect(within(rows[second]).getByText("Not set")).toBeDefined();
+      saves[second].release();
+      expect(await within(rows[second]).findByText("Configured")).toBeDefined();
+
+      expect(within(anthropic).getByText("Configured")).toBeDefined();
+      expect(within(openai).getByText("Configured")).toBeDefined();
+      expect(document.getElementById("ai-default-provider-notice")).toBeNull();
+    },
+  );
+
   it("clears a key only after confirmation", async () => {
     const fetchMock = stubApi(
       stored({
