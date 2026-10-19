@@ -30,11 +30,13 @@ function notFound(reply: FastifyReply) {
   return sendError(reply, 404, "not_found", "ingredient not found");
 }
 
-// Text Postgres can store and a person can read: no NUL, not only
+// Text Postgres can store and a person can read: well-formed Unicode (a
+// lone surrogate would be stored as U+FFFD, NATG-350), no NUL, not only
 // whitespace, at most `max` code points.
 function isText(value: unknown, max: number): value is string {
   return (
     typeof value === "string" &&
+    value.isWellFormed() &&
     !value.includes("\0") &&
     value.trim() !== "" &&
     [...value].length <= max
@@ -43,7 +45,7 @@ function isText(value: unknown, max: number): value is string {
 
 type Parsed<T> = { ok: T } | { invalid: string };
 
-function parseListQuery(
+export function parseListQuery(
   query: Record<string, unknown>,
 ): Parsed<ListQuery & { q: string }> {
   const { q = "", page = "1", userAdded = "false" } = query;
@@ -175,6 +177,7 @@ export const ingredientRoutes: FastifyPluginCallback<AuthDeps> = (
   // already in the catalogue in its locale is 409 with the ingredient that
   // has it, so a retry of a create that succeeded gets 409 naming the
   // ingredient it created.
+  // If that ingredient cannot be found, still 409, without it.
   app.post<{ Body: unknown }>("/ingredients", async (request, reply) => {
     const user = request.user!;
     const parsed = parseCreateBody(request.body, user.locale);
@@ -191,6 +194,18 @@ export const ingredientRoutes: FastifyPluginCallback<AuthDeps> = (
       );
     }
     if ("taken" in outcome) {
+      if (outcome.taken === null) {
+        request.log.warn(
+          { userId: user.id },
+          "ingredient create: name taken, owner not found",
+        );
+        return sendError(
+          reply,
+          409,
+          "name_taken",
+          "a name is already in the catalogue",
+        );
+      }
       const { ingredient, name } = outcome.taken;
       request.log.info(
         { userId: user.id, ingredientId: ingredient.id },

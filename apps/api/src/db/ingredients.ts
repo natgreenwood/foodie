@@ -303,7 +303,9 @@ export interface TakenName {
 
 export type CreateOutcome =
   | { created: IngredientDetail }
-  | { taken: TakenName }
+  // Null when the name that clashed cannot be found: deleted since, or
+  // stored differently from how the lookup compares it. Still a clash.
+  | { taken: TakenName | null }
   // Two of the new names are the same name in the same locale.
   | { repeated: true };
 
@@ -360,7 +362,36 @@ export async function createIngredient(
     if (!(err instanceof NameClash)) throw err;
   }
   const taken = await findTakenName(db, creator, input.names);
-  return taken ? { taken } : { repeated: true };
+  if (taken) return { taken };
+  return (await repeatsItself(db, input.names))
+    ? { repeated: true }
+    : { taken: null };
+}
+
+// The new names as rows (name, locale, position), each sent as an ordinary
+// text parameter, so Postgres sees exactly the text the insert stored: pg
+// sends a lone surrogate as U+FFFD, where a jsonb cast refuses it (NATG-350).
+function requested(names: NewIngredient["names"]): SQL {
+  const column = (pick: (n: NewIngredient["names"][number]) => string) =>
+    sql`array[${sql.join(
+      names.map((n) => sql`${pick(n)}`),
+      sql`, `,
+    )}]::text[]`;
+  return sql`unnest(${column((n) => n.name)}, ${column((n) => n.locale)})
+    with ordinality as r(name, locale, position)`;
+}
+
+// Whether two of the names are one name in one locale once normalised.
+async function repeatsItself(
+  db: Db,
+  names: NewIngredient["names"],
+): Promise<boolean> {
+  const { rows } = await db.execute<{ repeats: boolean }>(sql`
+    select count(*) > count(distinct (r.locale, ${normalised(sql`r.name`)}))
+      as repeats
+    from ${requested(names)}
+  `);
+  return rows[0]?.repeats ?? false;
 }
 
 async function findTakenName(
@@ -375,11 +406,9 @@ async function findTakenName(
     display_name: string | null;
   }>(sql`
     select i.id as ingredient_id, n.name, n.locale, d.name as display_name
-    from jsonb_array_elements(${JSON.stringify(names)}::jsonb)
-      with ordinality as r(value, position)
+    from ${requested(names)}
     join ingredient_name n
-      on n.locale = r.value->>'locale'
-      and n.normalised_name = ${normalised(sql`(r.value->>'name')`)}
+      on n.locale = r.locale and n.normalised_name = ${normalised(sql`r.name`)}
     join ingredient i on i.id = n.ingredient_id
     left join lateral (${displayName(viewer.locale)}) d on true
     order by r.position

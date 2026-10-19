@@ -1,12 +1,13 @@
 import { eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
-import { describe, expect, onTestFinished } from "vitest";
+import { describe, expect, onTestFinished, test } from "vitest";
 import { buildApp } from "../app.js";
 import { createSession } from "../auth/accounts.js";
 import { PAGE_SIZE } from "../db/ingredients.js";
 import { ingredient, ingredientName, user } from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE } from "./auth.js";
+import { parseListQuery } from "./ingredients.js";
 
 const unused = () => Promise.reject(new Error("not used by these tests"));
 
@@ -551,6 +552,73 @@ describe("GET /ingredients/:id", () => {
         error: "not_found",
         message: "ingredient not found",
       });
+    },
+  );
+});
+
+// Text that is not well-formed Unicode (NATG-350). Postgres would store each
+// as U+FFFD, so two different inputs would become one name.
+const illFormed = [
+  ["a lone high surrogate", "cor\ud800"],
+  ["a lone low surrogate", "cor\udc00"],
+  ["a reversed surrogate pair", "cor\udc00\ud800"],
+] as const;
+
+describe("ill-formed Unicode", () => {
+  dbTest.for(illFormed)(
+    "POST answers 400 to %s in a name, writing nothing",
+    async ([, text], { tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+      const before = await tx.select().from(ingredient);
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await request("POST", "/ingredients", me.token, {
+          names: [{ name: text }],
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({ error: "invalid_request" });
+      }
+      expect(await tx.select().from(ingredient)).toEqual(before);
+    },
+  );
+
+  dbTest.for(illFormed)(
+    "POST answers 400 to %s in the category",
+    async ([, text], { tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+
+      const res = await request("POST", "/ingredients", me.token, {
+        names: [{ name: "coriander" }],
+        category: text,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: "invalid_request" });
+    },
+  );
+
+  // A query string is percent-encoded UTF-8, which cannot carry a lone
+  // surrogate: Fastify leaves an undecodable escape as it is. So q is checked
+  // where it is parsed, and over HTTP the escapes are just text.
+  test.for(illFormed)("q refuses %s", ([, text]) => {
+    expect(parseListQuery({ q: text })).toEqual({
+      invalid: expect.stringContaining("q must be text") as string,
+    });
+  });
+
+  dbTest(
+    "GET treats percent-escaped surrogate bytes in q as text",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+
+      const body = page(
+        await request("GET", "/ingredients?q=%ED%A0%80", me.token),
+      );
+
+      expect(body.ingredients).toEqual([]);
     },
   );
 });
