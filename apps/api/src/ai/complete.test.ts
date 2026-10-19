@@ -9,11 +9,13 @@ import {
   AiProviderError,
   complete,
   MAX_RESPONSE_BYTES,
+  REASONING_TOKEN_ALLOWANCE,
 } from "./complete.js";
 import {
   setModelSelection,
   setProviderCredential,
   type AiProvider,
+  type AiReasoningLevel,
 } from "./settings.js";
 
 const settingsKey = randomBytes(32);
@@ -198,6 +200,7 @@ describe("reasoning level", () => {
     tx: TestTransaction,
     provider: AiProvider,
     model: string,
+    reasoningLevel: AiReasoningLevel | null = "high",
   ) {
     await setProviderCredential(
       tx,
@@ -209,8 +212,13 @@ describe("reasoning level", () => {
       procedure: "default",
       provider,
       model,
-      reasoningLevel: "high",
+      reasoningLevel,
     });
+  }
+
+  // The output limit a request was sent with, whatever the provider calls it.
+  function sentLimit(body: Record<string, unknown>) {
+    return body.max_completion_tokens ?? body.max_tokens;
   }
 
   dbTest.for([
@@ -223,6 +231,16 @@ describe("reasoning level", () => {
     ["openai", "gpt-5-mini", { reasoning_effort: "high" }],
     ["openai", "o4-mini-2025-04-16", { reasoning_effort: "high" }],
     ["openrouter", "openai/gpt-5-mini", { reasoning: { effort: "high" } }],
+    [
+      "openrouter",
+      "anthropic/claude-haiku-5.5",
+      { reasoning: { effort: "high" } },
+    ],
+    [
+      "openrouter",
+      "anthropic/claude-opus-4.5",
+      { reasoning: { effort: "high" } },
+    ],
   ] as const)(
     "is sent to %s %s as the provider's own parameter",
     async ([provider, model, fields], { tx }) => {
@@ -242,7 +260,11 @@ describe("reasoning level", () => {
     ["openai", "o1-mini"],
     ["openai", "gpt-5-chat-latest"],
     ["openrouter", "openai/gpt-4.1-mini"],
-    ["openrouter", "anthropic/claude-haiku-5.5"],
+    ["openrouter", "anthropic/claude-sonnet-4.5"],
+    ["openrouter", "anthropic/claude-3.7-sonnet:thinking"],
+    ["openrouter", "anthropic/claude-haiku-5.5:beta"],
+    ["openrouter", "anthropic/claude-opus.4.5"],
+    ["openrouter", "~anthropic/claude-sonnet-latest"],
     ["openrouter", "google/gemini-flash"],
     ["ollama", "llama3.1:8b"],
   ] as const)(
@@ -257,6 +279,116 @@ describe("reasoning level", () => {
       expect(body).not.toHaveProperty("output_config");
       expect(body).not.toHaveProperty("reasoning_effort");
       expect(body).not.toHaveProperty("reasoning");
+      expect(sentLimit(body)).toBe(request.maxTokens);
+    },
+  );
+
+  const levels = ["low", "medium", "high"] as const;
+  const allowlisted = [
+    ["anthropic", "claude-haiku-5-5"],
+    ["openai", "gpt-5-mini"],
+    ["openrouter", "openai/gpt-5-mini"],
+    ["openrouter", "anthropic/claude-sonnet-4.6"],
+  ] as const;
+
+  dbTest.for(
+    allowlisted.flatMap(([provider, model]) =>
+      levels.map((level) => [provider, model, level] as const),
+    ),
+  )(
+    "raises the limit for %s %s at %s by the reasoning allowance",
+    async ([provider, model, level], { tx }) => {
+      await configureAt(tx, provider, model, level);
+      respond(200, provider === "anthropic" ? anthropicAnswer : chatAnswer);
+
+      await complete({ db: tx, settingsKey }, request);
+      const body = sent().body as Record<string, unknown>;
+      expect(sentLimit(body)).toBe(
+        request.maxTokens + REASONING_TOKEN_ALLOWANCE,
+      );
+    },
+  );
+
+  // OpenRouter's budget for an Anthropic model, per its reasoning tokens docs.
+  const openRouterShare = { low: 0.2, medium: 0.5, high: 0.8 } as const;
+  function openRouterBudget(maxTokens: number, level: AiReasoningLevel) {
+    return Math.max(
+      Math.min(maxTokens * openRouterShare[level], 128_000),
+      1024,
+    );
+  }
+
+  dbTest.for(
+    [16, 124, 6_000, 20_000, 40_000].flatMap((answer) =>
+      levels.map((level) => [answer, level] as const),
+    ),
+  )(
+    "leaves a %s-token answer room after OpenRouter's Anthropic thinking budget at %s",
+    async ([answer, level], { tx }) => {
+      await configureAt(tx, "openrouter", "anthropic/claude-haiku-5.5", level);
+      respond(200, chatAnswer);
+
+      await complete(
+        { db: tx, settingsKey },
+        { ...request, maxTokens: answer },
+      );
+      const limit = (sent().body as { max_tokens: number }).max_tokens;
+      expect(Number.isInteger(limit)).toBe(true);
+      expect(limit).toBeGreaterThanOrEqual(answer + REASONING_TOKEN_ALLOWANCE);
+      expect(limit - openRouterBudget(limit, level)).toBeGreaterThanOrEqual(
+        answer,
+      );
+    },
+  );
+
+  // Byte for byte, so even a reordered key would fail.
+  dbTest.for([
+    [
+      "anthropic",
+      "claude-haiku-5-5",
+      {
+        model: "claude-haiku-5-5",
+        max_tokens: request.maxTokens,
+        system: request.system,
+        messages: [{ role: "user", content: request.user }],
+      },
+    ],
+    [
+      "openai",
+      "gpt-5-mini",
+      {
+        model: "gpt-5-mini",
+        messages: chatMessages,
+        max_completion_tokens: request.maxTokens,
+      },
+    ],
+    [
+      "openrouter",
+      "openai/gpt-5-mini",
+      {
+        model: "openai/gpt-5-mini",
+        messages: chatMessages,
+        max_tokens: request.maxTokens,
+      },
+    ],
+    [
+      "openrouter",
+      "anthropic/claude-haiku-5.5",
+      {
+        model: "anthropic/claude-haiku-5.5",
+        messages: chatMessages,
+        max_tokens: request.maxTokens,
+      },
+    ],
+  ] as const)(
+    "leaves the %s %s request unchanged with no level",
+    async ([provider, model, expected], { tx }) => {
+      await configureAt(tx, provider, model, null);
+      respond(200, provider === "anthropic" ? anthropicAnswer : chatAnswer);
+
+      await complete({ db: tx, settingsKey }, request);
+      const [, init] = fetchMock.mock.calls[0]!;
+      expect(init?.body).toBe(JSON.stringify(expected));
     },
   );
 });
