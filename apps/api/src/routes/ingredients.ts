@@ -109,14 +109,21 @@ function parseCreateBody(
         invalid: `a name must be text of 1 to ${MAX_NAME_CHARS} characters`,
       };
     }
+    // The profile locale is checked as a sent one is: one stored before
+    // the length cap could be over it.
     const locale =
       entry.locale === undefined
-        ? defaultLocale
+        ? canonicalLocale(defaultLocale)
         : typeof entry.locale === "string"
           ? canonicalLocale(entry.locale)
           : null;
     if (locale === null) {
-      return { invalid: "locale must be a BCP-47 language tag" };
+      return {
+        invalid:
+          entry.locale === undefined
+            ? "your profile locale is not a usable BCP-47 language tag: send a locale with each name, or change it"
+            : "locale must be a BCP-47 language tag",
+      };
     }
     parsed.push({ name: entry.name.trim(), locale });
   }

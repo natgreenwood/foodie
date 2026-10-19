@@ -820,6 +820,73 @@ describe("POST /ingredients", () => {
     expect(res.json()).toMatchObject({ error: "invalid_request" });
   });
 
+  // Valid private-use tags (SEC-1): "en-x-" and six 8-letter subtags is 58.
+  const sixSubtags = Array.from({ length: 6 }, () => "aaaaaaaa").join("-");
+  const tag64 = `en-x-${sixSubtags}-bbbbb`;
+  const tag65 = `en-x-${sixSubtags}-bbbbbb`;
+
+  dbTest("accepts a 64-character locale and refuses 65", async ({ tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    expect([tag64.length, tag65.length]).toEqual([64, 65]);
+
+    const ok = await request("POST", "/ingredients", me.token, {
+      names: [{ name: "sumac", locale: tag64 }],
+    });
+    const tooLong = await request("POST", "/ingredients", me.token, {
+      names: [{ name: "sumac", locale: tag65 }],
+    });
+
+    expect(ok.statusCode).toBe(201);
+    expect(ok.json()).toMatchObject({ names: [{ locale: tag64 }] });
+    expect(tooLong.statusCode).toBe(400);
+    expect(tooLong.json()).toEqual({
+      error: "invalid_request",
+      message: "locale must be a BCP-47 language tag",
+    });
+  });
+
+  dbTest(
+    "answers 400 to a long private-use locale, writing nothing",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+      const subtags = Array.from({ length: 1200 }, (_, i) =>
+        i.toString(36).padStart(8, "0"),
+      );
+      const before = await tx.select().from(ingredient);
+
+      const res = await request("POST", "/ingredients", me.token, {
+        names: [{ name: "sumac", locale: `en-x-${subtags.join("-")}` }],
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: "invalid_request" });
+      expect(await tx.select().from(ingredient)).toEqual(before);
+    },
+  );
+
+  dbTest(
+    "answers 400 when the stored profile locale it defaults to is too long",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx, { locale: tag65 });
+      const before = await tx.select().from(ingredient);
+
+      const res = await request("POST", "/ingredients", me.token, {
+        names: [{ name: "sumac" }],
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({
+        error: "invalid_request",
+        message:
+          "your profile locale is not a usable BCP-47 language tag: send a locale with each name, or change it",
+      });
+      expect(await tx.select().from(ingredient)).toEqual(before);
+    },
+  );
+
   dbTest("names the bad locale rule in the 400", async ({ tx }) => {
     const { request } = start(tx);
     const me = await signedInUser(tx);
