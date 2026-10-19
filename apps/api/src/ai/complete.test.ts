@@ -475,6 +475,30 @@ describe("a 2xx that is not a whole answer", () => {
     ],
     [
       "anthropic",
+      {
+        content: [{ type: "text", text: "2 eggs, 10" }],
+        stop_reason: "model_context_window_exceeded",
+      },
+      "truncated",
+      "answer cut off at the token limit",
+      null,
+    ],
+    [
+      "openai",
+      {
+        choices: [
+          {
+            message: { content: "2 eggs, 10" },
+            finish_reason: "content_filter",
+          },
+        ],
+      },
+      "bad_response",
+      "answer filtered by the provider",
+      null,
+    ],
+    [
+      "anthropic",
       { content: [{ type: "text", text: " \n\t" }], stop_reason: "end_turn" },
       "bad_response",
       "empty text in the response",

@@ -107,11 +107,12 @@ export class AiNotConfiguredError extends Error {
 // - timeout: no full response within the timeout.
 // - http_error: a non-2xx status.
 // - truncated: a 2xx whose answer stopped at the token limit (Anthropic
-//   stop_reason "max_tokens", chat finish_reason "length"), whatever text it
-//   has. A cut-off answer is never returned: callers need all of it.
+//   stop_reason "max_tokens" or "model_context_window_exceeded", chat
+//   finish_reason "length"), whatever text it has. A cut-off answer is never returned: callers need all of it.
 // - bad_response: any other 2xx that is not an answer: a body that is not
 //   the expected JSON or is too large, no text or only whitespace, a refusal,
-//   or an error the provider reports in the body.
+//   an answer the provider filtered, or an error the provider reports in the
+//   body.
 export type ProviderFailureReason =
   "unreachable" | "timeout" | "http_error" | "truncated" | "bad_response";
 
@@ -541,18 +542,30 @@ const REFUSED: Unanswered = {
   message: "model refused",
   code: null,
 };
+const FILTERED: Unanswered = {
+  reason: "bad_response",
+  message: "answer filtered by the provider",
+  code: null,
+};
 
-// Messages API: the stop_reason of a refusal or a cut-off answer.
+// Messages API: the stop_reason of a refusal or a cut-off answer, whether
+// at max_tokens or at the end of the model's context window.
 function anthropicUnanswered(json: unknown): Unanswered | null {
   if (!isRecord(json)) return null;
   if (json.stop_reason === "refusal") return REFUSED;
-  if (json.stop_reason === "max_tokens") return TRUNCATED;
+  if (
+    json.stop_reason === "max_tokens" ||
+    json.stop_reason === "model_context_window_exceeded"
+  ) {
+    return TRUNCATED;
+  }
   return null;
 }
 
 // Chat completions: an error in the body, as OpenRouter sends when the
 // upstream fails after its 200 (top-level, or on the choice with
-// finish_reason "error"); a refusal; or a cut-off answer.
+// finish_reason "error"); a refusal; an answer the provider's content
+// filter stopped; or a cut-off answer.
 function chatUnanswered(
   provider: AiProvider,
   json: unknown,
@@ -579,6 +592,7 @@ function chatUnanswered(
   }
   const { refusal } = isRecord(choice.message) ? choice.message : {};
   if (typeof refusal === "string" && refusal !== "") return REFUSED;
+  if (choice.finish_reason === "content_filter") return FILTERED;
   if (choice.finish_reason === "length") return TRUNCATED;
   return null;
 }
