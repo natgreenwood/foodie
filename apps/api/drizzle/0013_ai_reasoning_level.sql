@@ -1,0 +1,2 @@
+ALTER TABLE "ai_model_selection" ADD COLUMN "reasoning_level" text;--> statement-breakpoint
+ALTER TABLE "ai_model_selection" ADD CONSTRAINT "ai_model_selection_reasoning_level_known" CHECK ("ai_model_selection"."reasoning_level" IN ('low', 'medium', 'high'));

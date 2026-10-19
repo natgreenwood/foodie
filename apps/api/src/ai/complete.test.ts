@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, expect, vi } from "vitest";
+import { afterEach, describe, expect, vi } from "vitest";
 import { dbTest } from "../test/db.js";
 import type { TestTransaction } from "../test/db.js";
 import {
@@ -66,6 +66,7 @@ function sent() {
 const chatAnswer = {
   choices: [{ message: { role: "assistant", content: "eggs, flour" } }],
 };
+const anthropicAnswer = { content: [{ type: "text", text: "eggs, flour" }] };
 
 dbTest("calls Anthropic's Messages API", async ({ tx }) => {
   await configure(tx, "anthropic", "claude-haiku-5-5");
@@ -191,6 +192,74 @@ for (const baseUrl of ["http://ollama:11434/v1", "http://ollama:11434/v1/"]) {
     },
   );
 }
+
+describe("reasoning level", () => {
+  async function configureAt(
+    tx: TestTransaction,
+    provider: AiProvider,
+    model: string,
+  ) {
+    await setProviderCredential(
+      tx,
+      settingsKey,
+      provider,
+      provider === "ollama" ? "http://ollama:11434" : API_KEY,
+    );
+    await setModelSelection(tx, {
+      procedure: "default",
+      provider,
+      model,
+      reasoningLevel: "high",
+    });
+  }
+
+  dbTest.for([
+    ["anthropic", "claude-haiku-5-5", { output_config: { effort: "high" } }],
+    [
+      "anthropic",
+      "claude-opus-4-5-20251101",
+      { output_config: { effort: "high" } },
+    ],
+    ["openai", "gpt-5-mini", { reasoning_effort: "high" }],
+    ["openai", "o4-mini-2025-04-16", { reasoning_effort: "high" }],
+    ["openrouter", "openai/gpt-5-mini", { reasoning: { effort: "high" } }],
+  ] as const)(
+    "is sent to %s %s as the provider's own parameter",
+    async ([provider, model, fields], { tx }) => {
+      await configureAt(tx, provider, model);
+      respond(200, provider === "anthropic" ? anthropicAnswer : chatAnswer);
+
+      await complete({ db: tx, settingsKey }, request);
+      expect(sent().body).toMatchObject({ model, ...fields });
+    },
+  );
+
+  dbTest.for([
+    ["anthropic", "claude-haiku-4-5"],
+    ["anthropic", "claude-sonnet-4-5-20250929"],
+    ["anthropic", "claude-some-future-model"],
+    ["openai", "gpt-4.1-mini"],
+    ["openai", "o1-mini"],
+    ["openai", "gpt-5-chat-latest"],
+    ["openrouter", "openai/gpt-4.1-mini"],
+    ["openrouter", "anthropic/claude-haiku-5.5"],
+    ["openrouter", "google/gemini-flash"],
+    ["ollama", "llama3.1:8b"],
+  ] as const)(
+    "is left out for %s %s, which may not take it",
+    async ([provider, model], { tx }) => {
+      await configureAt(tx, provider, model);
+      respond(200, provider === "anthropic" ? anthropicAnswer : chatAnswer);
+
+      await complete({ db: tx, settingsKey }, request);
+      const body = sent().body as Record<string, unknown>;
+      expect(body.model).toBe(model);
+      expect(body).not.toHaveProperty("output_config");
+      expect(body).not.toHaveProperty("reasoning_effort");
+      expect(body).not.toHaveProperty("reasoning");
+    },
+  );
+});
 
 dbTest("refuses when no provider is selected", async ({ tx }) => {
   await setProviderCredential(tx, settingsKey, "openai", API_KEY);
