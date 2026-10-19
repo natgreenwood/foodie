@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { adminPages, AdminBreadcrumb, AdminIndex, NoPermission } from "./Admin";
 import { signOut, type Profile } from "./auth";
 import { HealthStatus } from "./HealthStatus";
 import { ImportPreview } from "./ImportPreview";
@@ -9,15 +10,21 @@ import { SessionProvider, useSession } from "./session";
 import { SignIn } from "./SignIn";
 
 // "signedIn" pages send a visitor to sign-in; "signedOut" pages send a
-// signed-in user on to where they were going.
+// signed-in user on to where they were going. "admin" pages send a visitor
+// to sign-in too, and show a signed-in non-admin that they have no
+// permission, at the same address.
 const routes: Record<
   string,
-  { title: string; access: "signedIn" | "signedOut" }
+  { title: string; access: "signedIn" | "signedOut" | "admin" }
 > = {
   "/": { title: "Import", access: "signedIn" },
   "/profile": { title: "Profile", access: "signedIn" },
   "/sign-in": { title: "Sign in", access: "signedOut" },
   "/register": { title: "Register", access: "signedOut" },
+  "/admin": { title: "Admin", access: "admin" },
+  ...Object.fromEntries(
+    adminPages.map(({ path, title }) => [path, { title, access: "admin" }]),
+  ),
 };
 
 // Where sign-in returns to: ?next when it resolves to a page on this site,
@@ -87,7 +94,7 @@ function Pages() {
   if (route?.access === "signedOut" && user) {
     return <Redirect to={returnPath(search)} />;
   }
-  if (route?.access === "signedIn" && !user) {
+  if ((route?.access === "signedIn" || route?.access === "admin") && !user) {
     return (
       <Redirect
         to={
@@ -98,6 +105,15 @@ function Pages() {
       />
     );
   }
+
+  if (route?.access === "admin" && !user?.isAdmin) {
+    return (
+      <Layout title="No permission" user={user}>
+        <NoPermission />
+      </Layout>
+    );
+  }
+  const adminPage = adminPages.find((page) => page.path === pathname);
 
   return (
     <Layout title={route?.title ?? "Page not found"} user={user}>
@@ -116,6 +132,13 @@ function Pages() {
         />
       )}
       {pathname === "/register" && <Register />}
+      {pathname === "/admin" && <AdminIndex />}
+      {adminPage && (
+        <>
+          <AdminBreadcrumb title={adminPage.title} />
+          <adminPage.Page />
+        </>
+      )}
       {!route && (
         <section aria-labelledby="not-found-heading">
           <h2 id="not-found-heading">Page not found</h2>
@@ -166,6 +189,7 @@ function Layout({
 
 function SignedInNav({ user }: { user: Profile }) {
   const session = useSession();
+  const { pathname } = useLocation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -178,6 +202,20 @@ function SignedInNav({ user }: { user: Profile }) {
         <li>
           <Link to="/profile">Profile</Link>
         </li>
+        {user.isAdmin && (
+          <li>
+            <Link
+              to="/admin"
+              aria-current={
+                pathname === "/admin" || pathname.startsWith("/admin/")
+                  ? "page"
+                  : undefined
+              }
+            >
+              Admin
+            </Link>
+          </li>
+        )}
         <li>
           <span className="signed-in-as">
             Signed in as {user.displayName ?? user.email}

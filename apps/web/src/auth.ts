@@ -28,6 +28,12 @@ export function reportUnauthenticated() {
   sessionEvents.dispatchEvent(new Event("unauthenticated"));
 }
 
+// Fired when an admin route answers 403: the user is no longer an admin.
+// The session provider listens and drops their admin access.
+export function reportForbidden() {
+  sessionEvents.dispatchEvent(new Event("forbidden"));
+}
+
 function isProfile(body: unknown): body is Profile {
   if (typeof body !== "object" || body === null) return false;
   const { id, email, displayName, locale, isAdmin } = body as Record<

@@ -350,7 +350,8 @@ main:focus {
   overflow-wrap: anywhere;
 }
 
-.identity > button {
+.identity > button,
+.identity > a {
   justify-self: start;
 }
 
@@ -359,14 +360,68 @@ main:focus {
   outline: none;
 }
 
-.identities .notice p {
+.identities .notice p,
+.ai-settings .notice p {
   margin: 0 0 0.5rem;
 }
 
-.identities .actions {
+.identities .actions,
+.ai-settings .actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+.breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  list-style: none;
+  font-size: 0.875rem;
+}
+
+.breadcrumb li + li::before {
+  content: "/" / "";
+  margin-right: 0.25rem;
+}
+
+.breadcrumb [aria-current="page"] {
+  color: #59636e;
+}
+
+/* "Configured" or "Not set": the word carries the meaning, the icon only
+   repeats it. */
+.credential-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: 0.25rem;
+  font-size: 0.875rem;
+  color: #59636e;
+}
+
+.credential-status[data-configured="true"] {
+  color: #1a7f37;
+}
+
+.ai-settings .notice p:last-child {
+  margin-bottom: 0;
+}
+
+.ai-settings .account-form .actions {
+  margin-top: 0.75rem;
+}
+
+.ai-settings .account-form .actions button {
+  margin-top: 0;
+}
+
+.ai-default-model {
+  margin-top: 1rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #d0d7de;
 }
 
 @media (max-width: 30rem) {
