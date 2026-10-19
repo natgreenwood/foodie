@@ -446,6 +446,138 @@ describe("App", () => {
   });
 });
 
+describe("Admin area", () => {
+  const admin = { ...sam, isAdmin: true };
+  const aiSettings = {
+    providers: [
+      { provider: "anthropic", configured: false },
+      { provider: "openai", configured: false },
+      { provider: "openrouter", configured: false },
+      { provider: "ollama", configured: false },
+    ],
+    models: [
+      {
+        procedure: "default",
+        provider: null,
+        model: null,
+        reasoningLevel: null,
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("offers an admin the Admin link, the index and the AI settings page", async () => {
+    stubApi({
+      "GET /api/me": () => respondWith(200, admin),
+      "GET /api/health": health,
+      "GET /api/admin/ai": () => respondWith(200, aiSettings),
+    });
+    const user = userEvent.setup();
+
+    visit("/");
+    const nav = await screen.findByRole("navigation", { name: "Account" });
+    const adminLink = within(nav).getByRole("link", { name: "Admin" });
+    expect(adminLink.getAttribute("aria-current")).toBeNull();
+    await user.click(adminLink);
+
+    expect(await screen.findByRole("heading", { name: "Admin" })).toBeDefined();
+    expect(adminLink.getAttribute("aria-current")).toBe("page");
+    await user.click(screen.getByRole("link", { name: "AI settings" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "AI settings" }),
+    ).toBeDefined();
+    expect(window.location.pathname).toBe("/admin/ai");
+    await waitFor(() => expect(document.title).toBe("AI settings · Foodie"));
+    const breadcrumb = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(
+      within(breadcrumb).getByRole("link", { name: "Admin" }),
+    ).toBeDefined();
+    expect(
+      within(breadcrumb).getByText("AI settings").getAttribute("aria-current"),
+    ).toBe("page");
+    expect(adminLink.getAttribute("aria-current")).toBe("page");
+  });
+
+  it.each(["/admin", "/admin/ai"])(
+    "shows a signed-in non-admin no permission at %s, without asking the api",
+    async (path) => {
+      const fetchMock = stubApi({ "GET /api/me": () => respondWith(200, sam) });
+
+      visit(path);
+
+      expect(
+        await screen.findByRole("heading", {
+          name: "You don't have permission to see this page",
+        }),
+      ).toBeDefined();
+      expect(window.location.pathname).toBe(path);
+      await waitFor(() =>
+        expect(document.title).toBe("No permission · Foodie"),
+      );
+      const nav = screen.getByRole("navigation", { name: "Account" });
+      expect(within(nav).queryByRole("link", { name: "Admin" })).toBeNull();
+      expect(
+        fetchMock.mock.calls.some(([input]) => input.startsWith("/api/admin")),
+      ).toBe(false);
+    },
+  );
+
+  it("sends a visitor to sign-in and back to the admin page they asked for", async () => {
+    let signedIn = false;
+    stubApi({
+      "GET /api/me": () =>
+        signedIn ? respondWith(200, admin) : respondWith(401, unauthenticated),
+      "POST /api/auth/login": () => {
+        signedIn = true;
+        return respondWith(200, admin);
+      },
+      "GET /api/admin/ai": () => respondWith(200, aiSettings),
+    });
+
+    visit("/admin/ai");
+
+    expect(
+      await screen.findByRole("heading", { name: "Sign in" }),
+    ).toBeDefined();
+    expect(address()).toBe("/sign-in?next=%2Fadmin%2Fai");
+    await signInAs("sam@example.com", "correct horse battery");
+
+    expect(
+      await screen.findByRole("heading", { name: "AI settings" }),
+    ).toBeDefined();
+    expect(address()).toBe("/admin/ai");
+  });
+
+  it("shows no permission when the api says the user is no longer an admin", async () => {
+    stubApi({
+      "GET /api/me": () => respondWith(200, admin),
+      "GET /api/admin/ai": () =>
+        respondWith(403, { error: "forbidden", message: "admin only" }),
+    });
+
+    visit("/admin/ai");
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "You don't have permission to see this page",
+      }),
+    ).toBeDefined();
+    expect(screen.queryByRole("alert")).toBeNull();
+    const nav = screen.getByRole("navigation", { name: "Account" });
+    expect(within(nav).queryByRole("link", { name: "Admin" })).toBeNull();
+  });
+});
+
 describe("OIDC sign-in", () => {
   const signedOut = () => respondWith(401, unauthenticated);
 
