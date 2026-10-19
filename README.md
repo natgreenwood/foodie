@@ -159,6 +159,11 @@ Routes (the web app reaches them under `/api`, e.g. `/api/auth/login`):
 - `GET /recipes/:id`, `DELETE /recipes/:id`: one of the signed-in user's
   recipes. Another user's recipe answers 404 `not_found`, the same as one
   that does not exist. Delete answers 204, and 404 if repeated.
+- `GET /measurements`: every unit of measure, as `{ measurements: [...] }`,
+  each with its `id` (the `measurementId` a recipe line takes), `key` (null
+  for a unit a user created), `type` and `names` in every locale. Units are
+  ordered by type, then by the first of their canonical names across
+  locales; sort by the names for one locale to show that locale.
 
 Recipes are private to the account that owns them, and deleting an account
 deletes its recipes. Recipes that existed before accounts were given to the
