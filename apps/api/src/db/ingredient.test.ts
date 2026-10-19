@@ -18,6 +18,8 @@ async function newIngredient(tx: TestTransaction): Promise<number> {
   return row.id;
 }
 
+// Tests whose names the seeded en-GB and en-US catalogue (0013) already
+// holds use x-test locales, so they do not collide with it.
 describe("ingredient_name", () => {
   dbTest(
     "rejects a name that matches another in the same locale after normalisation",
@@ -25,14 +27,14 @@ describe("ingredient_name", () => {
       const id = await newIngredient(tx);
       await tx
         .insert(ingredientName)
-        .values({ ingredientId: id, name: "coriander", locale: "en-GB" });
+        .values({ ingredientId: id, name: "coriander", locale: "x-test" });
 
       for (const name of ["Coriander", " coriander "]) {
         await expect(
           tx.transaction((sp) =>
             sp
               .insert(ingredientName)
-              .values({ ingredientId: id, name, locale: "en-GB" }),
+              .values({ ingredientId: id, name, locale: "x-test" }),
           ),
         ).rejects.toMatchObject({
           cause: { constraint: "ingredient_name_locale_name_key" },
@@ -62,13 +64,13 @@ describe("ingredient_name", () => {
         {
           ingredientId: id,
           name: "coriander",
-          locale: "en-GB",
+          locale: "x-test-gb",
           isCanonical: true,
         },
         {
           ingredientId: id,
           name: "cilantro",
-          locale: "en-US",
+          locale: "x-test-us",
           isCanonical: true,
         },
       ]);
@@ -78,7 +80,7 @@ describe("ingredient_name", () => {
           sp.insert(ingredientName).values({
             ingredientId: id,
             name: "coriander leaf",
-            locale: "en-GB",
+            locale: "x-test-gb",
             isCanonical: true,
           }),
         ),
@@ -146,8 +148,8 @@ describe("ingredient_name", () => {
   dbTest("is removed with its ingredient", async ({ tx }) => {
     const id = await newIngredient(tx);
     await tx.insert(ingredientName).values([
-      { ingredientId: id, name: "coriander", locale: "en-GB" },
-      { ingredientId: id, name: "cilantro", locale: "en-US" },
+      { ingredientId: id, name: "coriander", locale: "x-test-gb" },
+      { ingredientId: id, name: "cilantro", locale: "x-test-us" },
     ]);
 
     await tx.delete(ingredient).where(eq(ingredient.id, id));
