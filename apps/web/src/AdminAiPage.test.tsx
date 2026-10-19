@@ -506,9 +506,9 @@ describe("AI settings page", () => {
       "ai-default-provider-notice",
     );
     expect(screen.queryByRole("alert")).toBeNull();
-    await user.click(
-      screen.getByRole("link", { name: "Set the OpenAI API key" }),
-    );
+    const link = screen.getByRole("link", { name: "Set the OpenAI API key" });
+    expect(link.getAttribute("href")).toBe("#ai-openai");
+    await user.click(link);
     const openai = await row("OpenAI");
     expect(document.activeElement).toBe(
       within(openai).getByRole("button", { name: "Set" }),
@@ -520,6 +520,56 @@ describe("AI settings page", () => {
     await within(openai).findByText("Configured");
     expect(document.getElementById("ai-default-provider-notice")).toBeNull();
     expect(providerSelect.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("ignores a provider value the page did not offer", async () => {
+    const fetchMock = stubApi(
+      stored({
+        configured: {
+          anthropic: true,
+          openai: false,
+          openrouter: false,
+          ollama: false,
+        },
+        provider: "anthropic",
+        model: "claude-haiku-4-5",
+      }),
+    );
+    const user = userEvent.setup();
+
+    visit();
+    const providerSelect =
+      await screen.findByLabelText<HTMLSelectElement>("Provider");
+    // As if the page's own options had been tampered with.
+    const injected = document.createElement("option");
+    injected.value = "javascript:alert(1)";
+    injected.textContent = "Injected";
+    providerSelect.append(injected);
+    await user.selectOptions(providerSelect, "Injected");
+
+    expect(providerSelect.value).toBe("anthropic");
+    expect(
+      screen.getByText(
+        "Exactly as Anthropic names it, for example claude-haiku-4-5.",
+      ),
+    ).toBeDefined();
+    expect(document.getElementById("ai-default-provider-notice")).toBeNull();
+    expect(document.querySelector('a[href^="javascript"]')).toBeNull();
+
+    await user.click(
+      within(screen.getByRole("region", { name: "Default model" })).getByRole(
+        "button",
+        { name: "Save" },
+      ),
+    );
+    expect(await screen.findByText("Default model saved.")).toBeDefined();
+    expect(bodiesOf(fetchMock, "PUT /api/admin/ai/models/default")).toEqual([
+      {
+        provider: "anthropic",
+        model: "claude-haiku-4-5",
+        reasoningLevel: null,
+      },
+    ]);
   });
 
   describe("a failed save leaves everything as it was", () => {

@@ -3,6 +3,7 @@ import {
   AI_PROVIDERS,
   clearProviderCredential,
   fetchAdminAi,
+  isAiProvider,
   setDefaultModel,
   setProviderCredential,
   type AdminAiSettings,
@@ -19,6 +20,15 @@ const providerNames: Record<AiProvider, string> = {
   openai: "OpenAI",
   openrouter: "OpenRouter",
   ollama: "Ollama",
+};
+
+// Each row's in-page address, from a fixed table so no value read from the
+// page ever becomes part of a link.
+const rowAnchors: Record<AiProvider, string> = {
+  anthropic: "#ai-anthropic",
+  openai: "#ai-openai",
+  openrouter: "#ai-openrouter",
+  ollama: "#ai-ollama",
 };
 
 const providerDescriptions: Record<AiProvider, string> = {
@@ -512,7 +522,9 @@ function DefaultModelForm({
           disabled={saving}
           value={provider}
           onChange={(event) => {
-            setProvider(event.target.value as AiProvider);
+            const { value } = event.target;
+            if (!isAiProvider(value)) return;
+            setProvider(value);
             edited();
           }}
         >
@@ -535,7 +547,7 @@ function DefaultModelForm({
             </p>
             <p>
               <a
-                href={`#ai-${provider}`}
+                href={rowAnchors[provider]}
                 onClick={(event) => {
                   const target =
                     document.getElementById(`ai-${provider}-set`) ??

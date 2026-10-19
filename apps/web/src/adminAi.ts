@@ -32,7 +32,7 @@ export interface AdminAiSettings {
   defaultModel: DefaultModel;
 }
 
-function isProvider(value: unknown): value is AiProvider {
+export function isAiProvider(value: unknown): value is AiProvider {
   return (AI_PROVIDERS as readonly unknown[]).includes(value);
 }
 
@@ -44,7 +44,7 @@ function isDefaultModel(entry: unknown): entry is DefaultModel {
   if (typeof entry !== "object" || entry === null) return false;
   const { provider, model, reasoningLevel } = entry as Record<string, unknown>;
   return (
-    (provider === null || isProvider(provider)) &&
+    (provider === null || isAiProvider(provider)) &&
     (model === null || typeof model === "string") &&
     (reasoningLevel === null || isLevel(reasoningLevel))
   );
