@@ -278,10 +278,10 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // or misspelt model id can never fail on it. Ollama gets none, since whether
 // its OpenAI-compatible endpoint takes reasoning_effort depends on the Ollama
 // version and the model, and a model that cannot think refuses it.
-// OpenRouter gets it only for the OpenAI models it passes through: its docs do
-// not promise to ignore it on a model without reasoning, an effort can switch
-// reasoning on, and for Anthropic models it sets a thinking budget of at least
-// 1024 tokens, more than a recipe import's whole maxTokens.
+// OpenRouter gets it only for the OpenAI and Anthropic models it passes
+// through whose ids are on those providers' allowlists: its docs do not
+// promise to ignore it on a model without reasoning, and an effort can switch
+// reasoning on.
 function reasoningFields(
   provider: AiProvider,
   model: string,
@@ -299,12 +299,81 @@ function reasoningFields(
       : {};
   }
   if (provider === "openrouter") {
-    return model.startsWith(OPENROUTER_OPENAI_PREFIX) &&
-      OPENAI_REASONING_MODELS.test(model.slice(OPENROUTER_OPENAI_PREFIX.length))
+    return openRouterReasoningFamily(model) !== null
       ? { reasoning: { effort: level } }
       : {};
   }
   return {};
+}
+
+// Which allowlist an OpenRouter id is on, by the provider it passes through
+// to; null for any other id. OpenRouter writes Claude versions with dots
+// (anthropic/claude-sonnet-4.6) where Anthropic uses hyphens, so a dot
+// between two digits becomes a hyphen before the match. Any other dot, a
+// :variant suffix or an alias stays as it is and so matches nothing.
+function openRouterReasoningFamily(
+  model: string,
+): "openai" | "anthropic" | null {
+  if (
+    model.startsWith(OPENROUTER_OPENAI_PREFIX) &&
+    OPENAI_REASONING_MODELS.test(model.slice(OPENROUTER_OPENAI_PREFIX.length))
+  ) {
+    return "openai";
+  }
+  if (
+    model.startsWith(OPENROUTER_ANTHROPIC_PREFIX) &&
+    ANTHROPIC_EFFORT_MODELS.test(
+      model
+        .slice(OPENROUTER_ANTHROPIC_PREFIX.length)
+        .replace(/(?<=\d)\.(?=\d)/g, "-"),
+    )
+  ) {
+    return "anthropic";
+  }
+  return null;
+}
+
+// Output tokens added to the caller's maxTokens whenever a reasoning field is
+// sent. Every provider counts reasoning against the same limit as the answer
+// (Anthropic's max_tokens, OpenAI's max_completion_tokens, OpenRouter's
+// max_tokens), so without it reasoning can use the whole limit and leave the
+// answer empty. OpenAI's reasoning guide recommends reserving at least 25,000
+// tokens for reasoning and output; neither Anthropic's nor OpenRouter's docs
+// give a figure, only "leave room". One value for every level: no provider
+// documents a figure per level, and a limit is a ceiling, not a charge.
+export const REASONING_TOKEN_ALLOWANCE = 25_000;
+
+// OpenRouter's thinking budget for an Anthropic model at each effort, as its
+// share of max_tokens: budget_tokens = max(min(max_tokens * share, 128000),
+// 1024), per its reasoning tokens docs.
+const OPENROUTER_ANTHROPIC_EFFORT_SHARE: Record<AiReasoningLevel, number> = {
+  low: 0.2,
+  medium: 0.5,
+  high: 0.8,
+};
+
+// The limit to send for an answer of `answer` tokens. Unchanged unless a
+// reasoning field goes with it. On OpenRouter's Anthropic models the thinking
+// budget grows with the limit, so the limit is also raised until what is left
+// after the budget still holds the answer; the allowance alone already
+// clears the 1024-token minimum budget.
+function maxTokensFor(
+  provider: AiProvider,
+  model: string,
+  level: AiReasoningLevel | null,
+  reasoning: Record<string, unknown>,
+  answer: number,
+): number {
+  if (level === null || Object.keys(reasoning).length === 0) return answer;
+  const total = answer + REASONING_TOKEN_ALLOWANCE;
+  if (
+    provider === "openrouter" &&
+    openRouterReasoningFamily(model) === "anthropic"
+  ) {
+    const share = OPENROUTER_ANTHROPIC_EFFORT_SHARE[level];
+    return Math.max(total, Math.ceil(answer / (1 - share)));
+  }
+  return total;
 }
 
 // The Claude models whose Messages API takes output_config.effort: Opus 4.5
@@ -323,6 +392,9 @@ const OPENAI_REASONING_MODELS =
 // OpenRouter's ids for OpenAI's own models, e.g. openai/gpt-5-mini.
 const OPENROUTER_OPENAI_PREFIX = "openai/";
 
+// OpenRouter's ids for Anthropic's models, e.g. anthropic/claude-haiku-5.5.
+const OPENROUTER_ANTHROPIC_PREFIX = "anthropic/";
+
 function buildRequest(
   provider: AiProvider,
   model: string,
@@ -331,6 +403,13 @@ function buildRequest(
   { system, user, maxTokens }: CompletionRequest,
 ): ProviderRequest | null {
   const reasoning = reasoningFields(provider, model, reasoningLevel);
+  const limit = maxTokensFor(
+    provider,
+    model,
+    reasoningLevel,
+    reasoning,
+    maxTokens,
+  );
   if (provider === "anthropic") {
     return {
       url: ANTHROPIC_URL,
@@ -340,7 +419,7 @@ function buildRequest(
       },
       body: {
         model,
-        max_tokens: maxTokens,
+        max_tokens: limit,
         system,
         messages: [{ role: "user", content: user }],
         ...reasoning,
@@ -361,7 +440,7 @@ function buildRequest(
       body: {
         model,
         messages,
-        max_completion_tokens: maxTokens,
+        max_completion_tokens: limit,
         ...reasoning,
       },
       secrets: [],
@@ -371,7 +450,7 @@ function buildRequest(
     return {
       url: OPENROUTER_URL,
       headers: { authorization: `Bearer ${credential}` },
-      body: { model, messages, max_tokens: maxTokens, ...reasoning },
+      body: { model, messages, max_tokens: limit, ...reasoning },
       secrets: [],
     };
   }
