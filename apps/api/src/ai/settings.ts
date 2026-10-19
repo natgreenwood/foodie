@@ -19,10 +19,16 @@ export type AiProvider = (typeof AI_PROVIDERS)[number];
 export const AI_PROCEDURES = ["default"] as const;
 export type AiProcedure = (typeof AI_PROCEDURES)[number];
 
+// How hard the model reasons, for the providers and models that take it
+// (src/ai/complete.ts). Null leaves it to the provider's default.
+export const AI_REASONING_LEVELS = ["low", "medium", "high"] as const;
+export type AiReasoningLevel = (typeof AI_REASONING_LEVELS)[number];
+
 export interface ModelSelection {
   procedure: string;
   provider: AiProvider;
   model: string;
+  reasoningLevel: AiReasoningLevel | null;
 }
 
 export function isAiProvider(value: string): value is AiProvider {
@@ -31,6 +37,10 @@ export function isAiProvider(value: string): value is AiProvider {
 
 export function isAiProcedure(value: string): value is AiProcedure {
   return (AI_PROCEDURES as readonly string[]).includes(value);
+}
+
+export function isAiReasoningLevel(value: unknown): value is AiReasoningLevel {
+  return (AI_REASONING_LEVELS as readonly unknown[]).includes(value);
 }
 
 // Authenticated with the ciphertext, so a provider's stored credential does
@@ -108,19 +118,26 @@ export async function listModelSelections(db: Db): Promise<ModelSelection[]> {
       procedure: aiModelSelection.procedure,
       provider: aiModelSelection.provider,
       model: aiModelSelection.model,
+      reasoningLevel: aiModelSelection.reasoningLevel,
     })
     .from(aiModelSelection)
     .orderBy(aiModelSelection.procedure);
-  // The table's check constraint holds provider to AI_PROVIDERS.
+  // The table's check constraints hold provider to AI_PROVIDERS and
+  // reasoning_level to AI_REASONING_LEVELS.
   return rows as ModelSelection[];
 }
 
-// Sets the procedure's provider and model, replacing any earlier choice.
+// Sets the procedure's provider and model, replacing any earlier choice, and
+// returns the selection as stored. A reasoningLevel left out keeps the stored
+// one (null for a new row); null clears it. Repeating it is harmless.
 export async function setModelSelection(
   db: Db,
-  selection: ModelSelection,
-): Promise<void> {
-  await db
+  selection: Omit<ModelSelection, "reasoningLevel"> & {
+    reasoningLevel?: AiReasoningLevel | null | undefined;
+  },
+): Promise<ModelSelection> {
+  const { reasoningLevel } = selection;
+  const [row] = await db
     .insert(aiModelSelection)
     .values(selection)
     .onConflictDoUpdate({
@@ -128,7 +145,15 @@ export async function setModelSelection(
       set: {
         provider: selection.provider,
         model: selection.model,
+        ...(reasoningLevel === undefined ? {} : { reasoningLevel }),
         updatedAt: sql`now()`,
       },
+    })
+    .returning({
+      procedure: aiModelSelection.procedure,
+      provider: aiModelSelection.provider,
+      model: aiModelSelection.model,
+      reasoningLevel: aiModelSelection.reasoningLevel,
     });
+  return row as ModelSelection;
 }

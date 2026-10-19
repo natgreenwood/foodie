@@ -116,9 +116,34 @@ dbTest("keeps one model selection per procedure", async ({ tx }) => {
   });
 
   expect(await listModelSelections(tx)).toEqual([
-    { procedure: "default", provider: "anthropic", model: "claude-haiku-5-5" },
-    { procedure: "recipe_import", provider: "ollama", model: "llama3.1:8b" },
+    {
+      procedure: "default",
+      provider: "anthropic",
+      model: "claude-haiku-5-5",
+      reasoningLevel: null,
+    },
+    {
+      procedure: "recipe_import",
+      provider: "ollama",
+      model: "llama3.1:8b",
+      reasoningLevel: null,
+    },
   ]);
+});
+
+dbTest("refuses an unknown reasoning level", async ({ tx }) => {
+  await expect(
+    tx.transaction((sp) =>
+      sp.insert(aiModelSelection).values({
+        procedure: "default",
+        provider: "openai",
+        model: "gpt-5-mini",
+        reasoningLevel: "max",
+      }),
+    ),
+  ).rejects.toMatchObject({
+    cause: { constraint: "ai_model_selection_reasoning_level_known" },
+  });
 });
 
 dbTest("refuses an unknown provider in either table", async ({ tx }) => {

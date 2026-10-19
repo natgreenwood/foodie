@@ -440,13 +440,15 @@ export const aiProviderSetting = pgTable(
 // The provider and model each AI procedure uses, one row per procedure.
 // `default` is what a procedure without its own row falls back to; adding a
 // procedure is a row, not a migration. Per-procedure settings such as a
-// reasoning level or usage quota (NATG-241) are later columns here.
+// usage quota (NATG-241) are later columns here. `reasoning_level` is null
+// when the admin has not chosen one, and the provider's default applies.
 export const aiModelSelection = pgTable(
   "ai_model_selection",
   {
     procedure: text("procedure").primaryKey(),
     provider: text("provider").notNull(),
     model: text("model").notNull(),
+    reasoningLevel: text("reasoning_level"),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -458,5 +460,9 @@ export const aiModelSelection = pgTable(
       sql`btrim(${t.procedure}) <> ''`,
     ),
     check("ai_model_selection_model_not_blank", sql`btrim(${t.model}) <> ''`),
+    check(
+      "ai_model_selection_reasoning_level_known",
+      sql`${t.reasoningLevel} IN ('low', 'medium', 'high')`,
+    ),
   ],
 );
