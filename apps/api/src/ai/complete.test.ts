@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, vi } from "vitest";
+import { chooseIngredients } from "../import/match-ingredients.js";
 import { dbTest } from "../test/db.js";
 import type { TestTransaction } from "../test/db.js";
 import {
@@ -631,6 +632,352 @@ dbTest("reports a 2xx without text as a bad response", async ({ tx }) => {
     reason: "bad_response",
     status: 200,
   });
+});
+
+describe("a 2xx that is not a whole answer", () => {
+  const models = {
+    anthropic: "claude-haiku-5-5",
+    openai: "gpt-5-mini",
+    openrouter: "google/gemini-flash",
+    ollama: "llama3.1:8b",
+  } as const;
+
+  // The provider's own words in these bodies, none of which may be quoted.
+  const providerWords = [
+    "I can't help",
+    "upstream provider error",
+    "upstream died",
+    "Policy says no",
+  ];
+
+  // [provider, 2xx body, reason, providerMessage, code]. The first nine are
+  // the rows of NATG-330's table, in order.
+  dbTest.for([
+    [
+      "anthropic",
+      { content: [] },
+      "bad_response",
+      "no text in the response",
+      null,
+    ],
+    [
+      "anthropic",
+      { content: [{ type: "text", text: "" }] },
+      "bad_response",
+      "empty text in the response",
+      null,
+    ],
+    [
+      "anthropic",
+      {
+        content: [{ type: "text", text: "2 eggs, 10" }],
+        stop_reason: "max_tokens",
+      },
+      "truncated",
+      "answer cut off at the token limit",
+      null,
+    ],
+    [
+      "openai",
+      { choices: [] },
+      "bad_response",
+      "no text in the response",
+      null,
+    ],
+    [
+      "openai",
+      { choices: [{ message: { content: "" }, finish_reason: "length" }] },
+      "truncated",
+      "answer cut off at the token limit",
+      null,
+    ],
+    [
+      "openai",
+      {
+        choices: [
+          { message: { content: "2 eggs, 10" }, finish_reason: "length" },
+        ],
+      },
+      "truncated",
+      "answer cut off at the token limit",
+      null,
+    ],
+    [
+      "openai",
+      {
+        choices: [
+          {
+            message: { content: null, refusal: "I can't help" },
+            finish_reason: "stop",
+          },
+        ],
+      },
+      "bad_response",
+      "model refused",
+      null,
+    ],
+    [
+      "openrouter",
+      { error: { code: 502, message: "upstream provider error" } },
+      "bad_response",
+      "provider reported an error",
+      null,
+    ],
+    [
+      "openrouter",
+      {
+        choices: [
+          {
+            message: { content: "" },
+            finish_reason: "error",
+            error: { message: "upstream died" },
+          },
+        ],
+      },
+      "bad_response",
+      "provider reported an error",
+      null,
+    ],
+    // The decisions beyond the table.
+    [
+      "anthropic",
+      {
+        content: [{ type: "text", text: "Policy says no" }],
+        stop_reason: "refusal",
+      },
+      "bad_response",
+      "model refused",
+      null,
+    ],
+    [
+      "anthropic",
+      {
+        content: [{ type: "text", text: "2 eggs, 10" }],
+        stop_reason: "model_context_window_exceeded",
+      },
+      "truncated",
+      "answer cut off at the token limit",
+      null,
+    ],
+    [
+      "openai",
+      {
+        choices: [
+          {
+            message: { content: "2 eggs, 10" },
+            finish_reason: "content_filter",
+          },
+        ],
+      },
+      "bad_response",
+      "answer filtered by the provider",
+      null,
+    ],
+    [
+      "anthropic",
+      { content: [{ type: "text", text: " \n\t" }], stop_reason: "end_turn" },
+      "bad_response",
+      "empty text in the response",
+      null,
+    ],
+    [
+      "ollama",
+      { choices: [{ message: { content: "  \n" }, finish_reason: "stop" }] },
+      "bad_response",
+      "empty text in the response",
+      null,
+    ],
+    [
+      "openrouter",
+      {
+        choices: [
+          {
+            message: { content: "eggs" },
+            finish_reason: "error",
+            error: { code: "server_error", message: "upstream died" },
+          },
+        ],
+      },
+      "bad_response",
+      "provider reported an error (server_error)",
+      "server_error",
+    ],
+    [
+      "openrouter",
+      { error: { code: 2100, message: "upstream provider error" } },
+      "bad_response",
+      "provider reported an error",
+      null,
+    ],
+    [
+      "openrouter",
+      { error: "upstream provider error" },
+      "bad_response",
+      "provider reported an error",
+      null,
+    ],
+  ] as const)(
+    "rejects %s %j as %s",
+    async ([provider, body, reason, providerMessage, code], { tx }) => {
+      const model = models[provider];
+      await configure(
+        tx,
+        provider,
+        model,
+        provider === "ollama" ? "http://ollama:11434" : API_KEY,
+      );
+      respond(200, body);
+
+      const err = (await complete({ db: tx, settingsKey }, request).catch(
+        (e: unknown) => e,
+      )) as AiProviderError;
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect(err).toMatchObject({
+        provider,
+        model,
+        reason,
+        status: 200,
+        code,
+        providerMessage,
+        message: `${provider} ${model}: ${reason}, status 200: ${providerMessage}`,
+      });
+      for (const words of providerWords) {
+        expect(err.message).not.toContain(words);
+      }
+    },
+  );
+
+  // SEC-1: a numeric code that is a fragment of the prompt or the key, which
+  // the scrub of whole secrets cannot catch, so no numeric code is kept.
+  dbTest.for([
+    ["top-level", { error: { code: 314 } }],
+    [
+      "choice-level",
+      {
+        choices: [
+          {
+            message: { content: "" },
+            finish_reason: "error",
+            error: { code: 314 },
+          },
+        ],
+      },
+    ],
+  ] as const)(
+    "keeps a numeric %s error code that is part of the prompt out of the error and the log",
+    async ([, body], { tx }) => {
+      const prompt = "Private reference 314159";
+      await configure(
+        tx,
+        "openrouter",
+        "google/gemini-flash",
+        "sk-example-314159-demo",
+      );
+      respond(200, body);
+
+      const err = (await complete(
+        { db: tx, settingsKey },
+        { ...request, user: prompt },
+      ).catch((e: unknown) => e)) as AiProviderError;
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect(err).toMatchObject({
+        reason: "bad_response",
+        status: 200,
+        code: null,
+        providerMessage: "provider reported an error",
+      });
+      for (const field of [err.message, err.providerMessage, err.code]) {
+        expect(String(field)).not.toContain("314");
+      }
+
+      // One level up: the line holding the digits is in the prompt
+      // chooseIngredients sends, and its warning names no code.
+      fetchMock.mockReset();
+      respond(200, body);
+      const log = { info: vi.fn(), warn: vi.fn() };
+      const { matching } = await chooseIngredients(
+        [
+          {
+            position: 1,
+            ingredientText: prompt,
+            candidates: [
+              {
+                ingredientId: 12,
+                name: "egg",
+                locale: "en-GB",
+                similarity: 0.5,
+              },
+            ],
+          },
+        ],
+        (req) => complete({ db: tx, settingsKey }, req),
+        log,
+      );
+      expect(JSON.stringify(sent().body)).toContain(prompt);
+      expect(matching.status).toBe("ai_failed");
+      expect(log.warn).toHaveBeenCalledTimes(1);
+      expect(log.warn.mock.calls[0]![0]).toMatchObject({ code: null });
+      expect(JSON.stringify(log.warn.mock.calls)).not.toContain("314");
+    },
+  );
+
+  dbTest(
+    "keeps a reported error's code that holds the prompt out",
+    async ({ tx }) => {
+      await configure(tx, "openrouter", "google/gemini-flash");
+      // A code from the set, with a prompt that is exactly that code.
+      respond(200, { error: { code: "server_error" } });
+
+      await expect(
+        complete({ db: tx, settingsKey }, { ...request, user: "server_error" }),
+      ).rejects.toMatchObject({
+        reason: "bad_response",
+        code: null,
+        providerMessage: "provider reported an error",
+      });
+    },
+  );
+
+  dbTest.for([
+    [
+      "anthropic",
+      {
+        content: [{ type: "text", text: "eggs, flour" }],
+        stop_reason: "end_turn",
+      },
+    ],
+    [
+      "openai",
+      {
+        choices: [
+          {
+            message: { content: "eggs, flour", refusal: null },
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ],
+    [
+      "openrouter",
+      {
+        choices: [
+          { message: { content: "eggs, flour" }, finish_reason: "stop" },
+        ],
+        error: null,
+      },
+    ],
+  ] as const)(
+    "still returns a whole answer from %s",
+    async ([provider, body], { tx }) => {
+      const model = models[provider];
+      await configure(tx, provider, model);
+      respond(200, body);
+
+      await expect(complete({ db: tx, settingsKey }, request)).resolves.toEqual(
+        { text: "eggs, flour", provider, model },
+      );
+    },
+  );
 });
 
 dbTest("refuses a response past MAX_RESPONSE_BYTES", async ({ tx }) => {

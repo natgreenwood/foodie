@@ -629,6 +629,13 @@ describe("PATCH /me", () => {
       "locale must be a BCP-47 language tag",
     ],
     [
+      "a locale over 64 characters",
+      {
+        locale: `en-x-${Array.from({ length: 6 }, () => "aaaaaaaa").join("-")}-bbbbbb`,
+      },
+      "locale must be a BCP-47 language tag",
+    ],
+    [
       "a too-long display name",
       { displayName: "x".repeat(101) },
       "displayName must be at most 100 characters",

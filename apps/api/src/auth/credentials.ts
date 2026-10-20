@@ -45,12 +45,19 @@ export function displayNameProblem(value: unknown): string | null {
   return null;
 }
 
+// Real tags are under 35 characters (RFC 5646 section 4.4.1), but
+// private-use subtags make a valid tag any length, and a long one breaks the
+// btree index it is stored under (SEC-1). 64 still allows a private-use
+// subtag or two. Tags are ASCII, so this counts characters.
+export const LOCALE_MAX_LENGTH = 64;
+
 // The canonical form of a BCP-47 tag ("en-gb" -> "en-GB"), or null if the
-// value is not one.
+// value is not one or either form is over LOCALE_MAX_LENGTH.
 export function canonicalLocale(value: string): string | null {
+  if (value.length > LOCALE_MAX_LENGTH) return null;
   try {
     const [tag] = Intl.getCanonicalLocales(value);
-    return tag ?? null;
+    return tag !== undefined && tag.length <= LOCALE_MAX_LENGTH ? tag : null;
   } catch {
     return null;
   }

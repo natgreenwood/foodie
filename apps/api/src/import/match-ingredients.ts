@@ -8,6 +8,10 @@ import {
   type Completion,
   type CompletionRequest,
 } from "../ai/complete.js";
+import {
+  bestNamePerIngredient,
+  setNameScoreThreshold,
+} from "../db/ingredients.js";
 import { normalised } from "../db/schema.js";
 import type { DraftIngredient } from "./extract/extract.js";
 import { localeForHost, type PageLocale } from "./locale.js";
@@ -92,14 +96,8 @@ export async function findCandidates(
 ): Promise<IngredientCandidate[][]> {
   const result = texts.map((): IngredientCandidate[] => []);
   if (texts.length === 0) return result;
-  // `%` is what the GIN index serves; it compares against
-  // pg_trgm.similarity_threshold, set here for this transaction only, so a
-  // different server default cannot drop candidates. The explicit
-  // similarity() check makes the bound strictly "above".
   const rows = await db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select set_config('pg_trgm.similarity_threshold', ${String(SIMILARITY_THRESHOLD)}, true)`,
-    );
+    await setNameScoreThreshold(tx, "similarity", SIMILARITY_THRESHOLD);
     const { rows } = await tx.execute<{
       position: number;
       ingredient_id: number | string;
@@ -118,14 +116,7 @@ export async function findCandidates(
             best.ingredient_id
         ) as rank
         from (
-          select distinct on (n.ingredient_id) n.ingredient_id, n.name,
-            n.locale, similarity(n.normalised_name, q.text) as similarity,
-            n.locale = ${locale} as same_locale
-          from ingredient_name n
-          where n.normalised_name % q.text
-            and similarity(n.normalised_name, q.text) > ${SIMILARITY_THRESHOLD}
-          order by n.ingredient_id, similarity(n.normalised_name, q.text) desc,
-            n.locale = ${locale} desc, n.id
+          ${bestNamePerIngredient(sql`q.text`, locale, "similarity", SIMILARITY_THRESHOLD)}
         ) best
         order by rank
         limit ${MAX_CANDIDATES}
