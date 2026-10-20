@@ -7,7 +7,10 @@ import type { TestTransaction } from "../test/db.js";
 import {
   AiNotConfiguredError,
   AiProviderError,
+  AiRequestTooLargeError,
   complete,
+  MAX_OUTPUT_TOKENS,
+  MAX_PROMPT_CHARS,
   MAX_RESPONSE_BYTES,
   REASONING_TOKEN_ALLOWANCE,
 } from "./complete.js";
@@ -319,7 +322,7 @@ describe("reasoning level", () => {
   }
 
   dbTest.for(
-    [16, 124, 6_000, 20_000, 40_000].flatMap((answer) =>
+    [16, 124, 6_000, 6_300].flatMap((answer) =>
       levels.map((level) => [answer, level] as const),
     ),
   )(
@@ -389,6 +392,146 @@ describe("reasoning level", () => {
       await complete({ db: tx, settingsKey }, request);
       const [, init] = fetchMock.mock.calls[0]!;
       expect(init?.body).toBe(JSON.stringify(expected));
+    },
+  );
+});
+
+describe("size limits", () => {
+  async function configureAt(
+    tx: TestTransaction,
+    provider: AiProvider,
+    model: string,
+    reasoningLevel: AiReasoningLevel | null,
+  ) {
+    await setProviderCredential(
+      tx,
+      settingsKey,
+      provider,
+      provider === "ollama" ? "http://ollama:11434" : API_KEY,
+    );
+    await setModelSelection(tx, {
+      procedure: "default",
+      provider,
+      model,
+      reasoningLevel,
+    });
+  }
+
+  // A request whose system + user is `chars` characters long.
+  function promptOf(chars: number) {
+    return { ...request, user: "x".repeat(chars - request.system.length) };
+  }
+
+  dbTest("sends a prompt of exactly MAX_PROMPT_CHARS", async ({ tx }) => {
+    await configure(tx, "openai", "gpt-5-mini");
+    respond(200, chatAnswer);
+
+    await complete({ db: tx, settingsKey }, promptOf(MAX_PROMPT_CHARS));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  dbTest(
+    "refuses a prompt one character over MAX_PROMPT_CHARS without calling the provider",
+    async ({ tx }) => {
+      await configure(tx, "openai", "gpt-5-mini");
+
+      const err = await complete(
+        { db: tx, settingsKey },
+        promptOf(MAX_PROMPT_CHARS + 1),
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AiRequestTooLargeError);
+      expect(err).toMatchObject({
+        limit: "prompt_chars",
+        max: MAX_PROMPT_CHARS,
+        actual: MAX_PROMPT_CHARS + 1,
+        procedure: "default",
+        provider: "openai",
+        model: "gpt-5-mini",
+      });
+      expect((err as Error).message).toBe(
+        "prompt of 200001 characters for default on openai gpt-5-mini is over the 200000-character limit",
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  // The largest answer each can ask for, the limit it is sent with, and one
+  // token more goes over MAX_OUTPUT_TOKENS.
+  const withReasoning = MAX_OUTPUT_TOKENS - REASONING_TOKEN_ALLOWANCE;
+  dbTest.for([
+    ["openai", "gpt-4.1-mini", null, MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS],
+    ["ollama", "llama3.1:8b", "high", MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS],
+    ["anthropic", "claude-haiku-5-5", "high", withReasoning, MAX_OUTPUT_TOKENS],
+    ["openai", "gpt-5-mini", "high", withReasoning, MAX_OUTPUT_TOKENS],
+    [
+      "openrouter",
+      "anthropic/claude-haiku-5.5",
+      "medium",
+      withReasoning,
+      MAX_OUTPUT_TOKENS,
+    ],
+    // Thinking takes 80% of the limit. 6,400 / 0.2 would be exactly 32,000,
+    // but maxTokensFor() rounds 6,400 / (1 - 0.8) up to 32,001.
+    ["openrouter", "anthropic/claude-haiku-5.5", "high", 6_399, 31_996],
+  ] as const)(
+    "sends %s %s at %s a %s-token answer, and refuses one more",
+    async ([provider, model, level, answer, sentLimit], { tx }) => {
+      await configureAt(tx, provider, model, level);
+      respond(200, provider === "anthropic" ? anthropicAnswer : chatAnswer);
+
+      await complete(
+        { db: tx, settingsKey },
+        { ...request, maxTokens: answer },
+      );
+      const body = sent().body as Record<string, unknown>;
+      expect(body.max_completion_tokens ?? body.max_tokens).toBe(sentLimit);
+      fetchMock.mockReset();
+
+      const err = await complete(
+        { db: tx, settingsKey },
+        { ...request, maxTokens: answer + 1 },
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AiRequestTooLargeError);
+      expect(err).toMatchObject({
+        limit: "output_tokens",
+        max: MAX_OUTPUT_TOKENS,
+        procedure: "default",
+        provider,
+        model,
+      });
+      expect((err as AiRequestTooLargeError).actual).toBeGreaterThan(
+        MAX_OUTPUT_TOKENS,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  dbTest("refuses an output limit that is not a number", async ({ tx }) => {
+    await configure(tx, "openai", "gpt-4.1-mini");
+
+    const err = await complete(
+      { db: tx, settingsKey },
+      { ...request, maxTokens: Number.NaN },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AiRequestTooLargeError);
+    expect(err).toMatchObject({ limit: "output_tokens" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  dbTest(
+    "names the output limit as sent after the reasoning scaling",
+    async ({ tx }) => {
+      await configureAt(tx, "openrouter", "anthropic/claude-haiku-5.5", "high");
+
+      const err = await complete(
+        { db: tx, settingsKey },
+        { ...request, maxTokens: 6_401 },
+      ).catch((e: unknown) => e);
+      expect(err).toMatchObject({ actual: 32_006 });
+      expect((err as Error).message).toBe(
+        "output limit of 32006 tokens for default on openrouter anthropic/claude-haiku-5.5 is over the 32000-token limit",
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
     },
   );
 });
