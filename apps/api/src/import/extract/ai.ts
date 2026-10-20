@@ -60,7 +60,11 @@ export async function extractRecipeWithAi(
   }
 
   const completion = await deps.complete(extractionPrompt(text));
-  const answer = parseAnswer(completion.text);
+  // Postgres text cannot hold NUL, so an answer with one would fail the
+  // insert. It is taken out before the answer is read too, so the stored
+  // answer reads as this one did. Nothing is lost: a NUL is never in the page.
+  const rawOutput = completion.text.replaceAll("\u0000", "");
+  const answer = parseAnswer(rawOutput);
   // Line by line, so a line break in the page stays one (NATG-359).
   const haystack = text.split("\n").map(normalise).join("\n");
   let outcome: AiExtractionOutcome;
@@ -86,7 +90,7 @@ export async function extractRecipeWithAi(
       provider: completion.provider,
       model: completion.model,
       pageText: text,
-      rawOutput: completion.text,
+      rawOutput,
       outcome,
     })
     .returning({ id: aiExtraction.id });

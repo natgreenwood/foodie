@@ -171,7 +171,9 @@ the extraction budget is not handed on; it is still `no_recipe_found`.
    match as structured data's, with `extraction: "ai"`.
 
 Every answer is recorded in `ai_extraction`: the URL, provider, model, the
-page text exactly as sent, the model's raw output and the `outcome`
+page text exactly as sent, the model's raw output (with any NUL characters
+removed, as `fetchPage` does for HTML: Postgres `text` cannot hold them; the
+answer is read with them removed too) and the `outcome`
 (`accepted`, `ungrounded`, `no_recipe` or `unreadable`). Rows are kept
 permanently; nothing prunes them. Nothing is recorded when no completion
 was made.

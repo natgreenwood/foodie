@@ -696,6 +696,35 @@ describe("extractRecipeWithAi", () => {
     },
   );
 
+  // Postgres text cannot hold NUL, so it is taken out of the stored answer
+  // rather than failing the insert with a 500.
+  dbTest.for([
+    [
+      "after the JSON",
+      `${JSON.stringify(FAITHFUL)}\u0000`,
+      "accepted",
+      JSON.stringify(FAITHFUL),
+    ],
+    [
+      "inside a step",
+      // A raw NUL in a JSON string would not parse; once out, it does.
+      JSON.stringify(FAITHFUL).replace("Heat the oven", "Heat the oven\u0000"),
+      "accepted",
+      JSON.stringify(FAITHFUL),
+    ],
+  ] as const)(
+    "reads and records an answer with a NUL %s, without it",
+    async ([, answer, outcome, stored], { tx }) => {
+      expect(answer).toContain("\u0000");
+      const result = await run(tx, answering(answer));
+
+      expect(result?.extraction).toBe("ai");
+      expect(await records(tx)).toEqual([
+        expect.objectContaining({ outcome, rawOutput: stored }),
+      ]);
+    },
+  );
+
   dbTest(
     "makes no completion and records nothing for a page with no text",
     async ({ tx }) => {
