@@ -118,10 +118,15 @@ the page to `extractRecipeWithAi` in `extract/ai.ts` (NATG-248). A page past
 the extraction budget is not handed on; it is still `no_recipe_found`.
 
 1. The page's visible text is taken: `head`, `script`, `style` and the like
-   removed, one line per block element, whitespace collapsed, blank lines
-   dropped, and cut at a line to 40,000 characters (`MAX_PAGE_TEXT_CHARS`).
-   A page with no text (an app that renders in the browser) makes no
-   completion and is `no_recipe_found`.
+   removed, and so is every element the markup hides, with all inside it:
+   the `hidden` attribute, `aria-hidden="true"`, or an inline style of
+   `display: none` or `visibility: hidden` (NATG-360). Then one line per
+   block element, whitespace collapsed, blank lines dropped, and cut at a
+   line to 40,000 characters (`MAX_PAGE_TEXT_CHARS`). That one text is both
+   what the model is sent and what its answer is checked against. An element
+   hidden only by a class and a stylesheet is still read: telling would mean
+   evaluating the CSS. A page with no text (an app that renders in the
+   browser) makes no completion and is `no_recipe_found`.
 2. One completion through `complete()` with procedure `default`, so the
    model the admin chose for it. The prompt tells the model to copy the
    title, ingredient lines and steps character for character and never to
@@ -131,9 +136,16 @@ the extraction budget is not handed on; it is still `no_recipe_found`.
    page text. Both sides go through `normalise` first: NFKC (NBSP and other
    fixed-width spaces, ligatures, full-width letters), curly quotes to
    straight, whitespace collapsed. Nothing else is forgiven: case, dashes,
-   spelling and numbers must match, and a line that starts or ends with a
-   letter or digit must do so at a word boundary in the page, so "25 g" is
-   not found in "225 g". One line not found and the whole answer is dropped.
+   spelling and numbers must match. A line that starts or ends with a
+   letter or digit must do so at a word boundary in the page, and no line
+   may start or end next to a digit, `.`, `,`, `/`, a fraction character, a
+   hyphen or an en dash (NATG-359), so "25 g" is not found in "225 g", nor
+   "1 g" in "0.1 g", "2 cup" in "1/2 cup" or "2 eggs" in "1-2 eggs". That
+   also refuses a copy that stops short of a comma or full stop on the page
+   ("55 g butter" from "55 g butter, cubed"). Steps must be found in the
+   page's order, each after the end of the one before; two adjacent steps
+   given as one are still found. Ingredient lines may come in any order.
+   One line not found and the whole answer is dropped.
    A title not in the page is replaced by the page's `<title>`; servings,
    times and tags are left empty for the cook.
 4. A used answer's lines go through the same line parser and ingredient

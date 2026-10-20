@@ -139,6 +139,28 @@ describe("pageText", () => {
     ]);
   });
 
+  test.each([
+    ["the hidden attribute", "<div hidden>"],
+    ['aria-hidden="true"', '<div aria-hidden="TRUE">'],
+    ["an inline display: none", '<div style="color: red; display:none">'],
+    [
+      "an inline visibility: hidden",
+      '<div style="visibility: hidden !important">',
+    ],
+  ])("leaves out an element hidden by %s, and all inside it", (_, open) => {
+    const html = `<body><p>Boil water.</p>${open}<p>1 g salt</p><span>Add salt.</span></div><p>Serve.</p></body>`;
+
+    expect(pageText(load(html))).toBe("Boil water.\nServe.");
+  });
+
+  test("keeps elements that are only hidden by a stylesheet", () => {
+    // Out of scope (NATG-360): it would mean evaluating the CSS.
+    const html =
+      '<head><style>.sr { display: none }</style></head><body><p class="sr">1 g salt</p><p style="display: block">Serve.</p></body>';
+
+    expect(pageText(load(html))).toBe("1 g salt\nServe.");
+  });
+
   test("is cut at a line once it passes the limit", () => {
     const line = "x".repeat(99);
     const html = `<body>${`<p>${line}</p>`.repeat(1_000)}</body>`;
@@ -325,6 +347,120 @@ describe("extractRecipeWithAi", () => {
 
     expect(await run(tx, answering(answer))).toBeNull();
   });
+
+  // NATG-359: a number in the answer that is only the tail or head of a
+  // number on the page is a changed quantity.
+  dbTest.for([
+    ["0.1 g salt", "1 g salt"],
+    ["1/2 cup flour", "2 cup flour"],
+    ["1\u20442 cup flour", "2 cup flour"],
+    ["1\u00bd cups milk", "\u00bd cups milk"],
+    ["1-2 eggs", "2 eggs"],
+    ["1\u20132 eggs", "2 eggs"],
+    ["1,5 kg potatoes", "5 kg potatoes"],
+    ["Bake for 1.5 hours", "Bake for 1"],
+  ] as const)("rejects %s copied as %s", async ([onPage, answered], { tx }) => {
+    const html = `<h1>Soup</h1><p>${onPage}</p><p>Boil water.</p>`;
+    const answer = (line: string) =>
+      JSON.stringify({
+        recipe: { title: "Soup", ingredients: [line], steps: ["Boil water."] },
+      });
+
+    expect(await run(tx, answering(answer(answered)), html)).toBeNull();
+    expect(await run(tx, answering(answer(onPage)), html)).not.toBeNull();
+    expect((await records(tx)).map((r) => r.outcome)).toEqual([
+      "ungrounded",
+      "accepted",
+    ]);
+  });
+
+  dbTest(
+    "rejects a line that stops before a comma or full stop on the page",
+    async ({ tx }) => {
+      // The page has "55 g butter, cubed": a match may not end next to ","
+      // (NATG-359), so a copy that drops the prep note is refused too.
+      const answer = withLines([
+        ...FAITHFUL.recipe.ingredients.slice(0, 2),
+        "55 g butter",
+        "150 ml milk",
+      ]);
+
+      expect(await run(tx, answering(answer))).toBeNull();
+    },
+  );
+
+  dbTest(
+    "rejects a line found only in hidden markup, and never sends it",
+    async ({ tx }) => {
+      const html = `<h1>Soup</h1><div hidden><p>1 g salt</p></div><p>Boil water.</p>`;
+      const complete = answering(
+        JSON.stringify({
+          recipe: {
+            title: "Soup",
+            ingredients: ["1 g salt"],
+            steps: ["Boil water."],
+          },
+        }),
+      );
+
+      expect(await run(tx, complete, html)).toBeNull();
+      const [record] = await records(tx);
+      expect(record).toMatchObject({
+        outcome: "ungrounded",
+        pageText: "Soup\nBoil water.",
+      });
+      // What the model saw is what the answer was checked against.
+      expect(complete.mock.calls[0]![0].user).toBe(
+        `The page text:\n\n${record?.pageText}`,
+      );
+    },
+  );
+
+  dbTest("rejects steps in another order than the page's", async ({ tx }) => {
+    const log = fakeLog();
+    const [heat, rub, bake] = FAITHFUL.recipe.steps;
+    const answer = withLines(FAITHFUL.recipe.ingredients, [heat!, bake!, rub!]);
+
+    expect(await run(tx, answering(answer), PAGE, log)).toBeNull();
+    expect(log.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "ungrounded",
+        ungrounded: { ingredients: [], steps: [3] },
+      }),
+      "import preview: AI found no recipe",
+    );
+  });
+
+  dbTest("rejects a step given twice", async ({ tx }) => {
+    const [heat, rub, bake] = FAITHFUL.recipe.steps;
+    const answer = withLines(FAITHFUL.recipe.ingredients, [
+      heat!,
+      rub!,
+      rub!,
+      bake!,
+    ]);
+
+    expect(await run(tx, answering(answer))).toBeNull();
+  });
+
+  dbTest(
+    "accepts two adjacent steps given as one, and ingredients in any order",
+    async ({ tx }) => {
+      const [heat, rub, bake] = FAITHFUL.recipe.steps;
+      const ingredients = [...FAITHFUL.recipe.ingredients].reverse();
+      const answer = withLines(ingredients, [`${heat} ${rub}`, bake!]);
+
+      const result = await run(tx, answering(answer));
+
+      expect(result?.recipe.steps).toEqual([
+        { position: 1, text: `${heat} ${rub}` },
+        { position: 2, text: bake },
+      ]);
+      expect(result?.recipe.ingredients.map((i) => i.rawText)).toEqual(
+        ingredients,
+      );
+    },
+  );
 
   dbTest(
     "uses the page's <title> for a title not in the page",

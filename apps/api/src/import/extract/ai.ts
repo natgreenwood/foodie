@@ -69,8 +69,8 @@ export async function extractRecipeWithAi(
     outcome = answer;
   } else {
     ungrounded = {
-      ingredients: notFound(haystack, answer.ingredients),
-      steps: notFound(haystack, answer.steps),
+      ingredients: notFound(haystack, answer.ingredients, { inOrder: false }),
+      steps: notFound(haystack, answer.steps, { inOrder: true }),
     };
     outcome =
       ungrounded.ingredients.length > 0 || ungrounded.steps.length > 0
@@ -113,7 +113,8 @@ export async function extractRecipeWithAi(
       // A title not in the page is not an invention worth refusing the
       // recipe over; the page's <title> stands in, as for structured data.
       title:
-        title !== "" && notFound(haystack, [title]).length === 0
+        title !== "" &&
+        notFound(haystack, [title], { inOrder: false }).length === 0
           ? title
           : singleLine(pageTitle),
       servings: null,
@@ -148,15 +149,27 @@ export function extractionPrompt(text: string): CompletionRequest {
 // Elements whose text a reader never sees.
 const UNSEEN = "head, script, style, noscript, template, svg, iframe, object";
 
+// Elements the page's own markup hides, with everything inside them
+// (NATG-360): the hidden attribute, aria-hidden="true", and an inline style
+// of display: none or visibility: hidden. An element hidden by a class and
+// a stylesheet is still read: telling would mean evaluating the CSS.
+const HIDDEN = '[hidden], [aria-hidden="true" i]';
+const HIDDEN_STYLE =
+  /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i;
+
 // Elements that start a new line of text.
 const BLOCK =
   "address, article, aside, blockquote, br, dd, div, dl, dt, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hr, li, main, nav, ol, p, pre, section, table, td, th, tr, ul";
 
 // The page as a reader sees its text: one line per block, whitespace in
 // each collapsed, blank lines dropped, cut at a line to MAX_PAGE_TEXT_CHARS.
-// Changes `$`.
+// The one text both sent to the model and checked against. Changes `$`.
 export function pageText($: ReturnType<typeof load>): string {
   $(UNSEEN).remove();
+  $(HIDDEN).remove();
+  $("[style]")
+    .filter((_, el) => HIDDEN_STYLE.test($(el).attr("style") ?? ""))
+    .remove();
   $(BLOCK).after("\n");
   const text = $.root()
     .text()
@@ -186,21 +199,44 @@ export function normalise(text: string): string {
 }
 
 // The 1-based positions of the lines not in `haystack` (already normalised).
-// A line must sit on word boundaries where it starts or ends with a letter
-// or digit, so "1 cup flour" is not found inside "11 cup flour".
-function notFound(haystack: string, lines: readonly string[]): number[] {
+// With `inOrder`, each line must also be found after the end of where the
+// one before it was found (NATG-248 ruling): a method in another order is
+// another recipe, though two adjacent steps given as one are still a copy.
+// Ingredient lines are found in any order, since lists repeat on a page.
+function notFound(
+  haystack: string,
+  lines: readonly string[],
+  { inOrder }: { inOrder: boolean },
+): number[] {
   const missing: number[] = [];
+  let from = 0;
   lines.forEach((line, i) => {
-    const needle = normalise(line);
-    const before = /^[\p{L}\p{N}]/u.test(needle) ? "(?<![\\p{L}\\p{N}])" : "";
-    const after = /[\p{L}\p{N}]$/u.test(needle) ? "(?![\\p{L}\\p{N}])" : "";
-    const pattern = new RegExp(
-      `${before}${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}${after}`,
-      "u",
-    );
-    if (!pattern.test(haystack)) missing.push(i + 1);
+    const pattern = linePattern(normalise(line));
+    pattern.lastIndex = from;
+    const match = pattern.exec(haystack);
+    if (match === null) missing.push(i + 1);
+    else if (inOrder) from = match.index + match[0].length;
   });
   return missing;
+}
+
+// What may not sit right before or after a found line: a digit or anything
+// that continues a number (NATG-359). Otherwise "1 g salt" is found in
+// "0.1 g salt", "2 cup flour" in "1/2 cup flour" and "2 eggs" in "1-2 eggs".
+// \p{N} takes in the vulgar fractions (½); \u2044 is the fraction slash NFKC
+// writes them with; \u2010-\u2013 are the hyphens and the en dash of a range.
+const NUMBER_NEIGHBOUR = "\\p{N}.,/\\u2044\\-\\u2010-\\u2013";
+
+// `needle` as a pattern for exec from a lastIndex. A line that starts or ends
+// with a letter or digit must also do so at a word boundary, so "salt" is
+// not found in "basalt".
+function linePattern(needle: string): RegExp {
+  const before = /^[\p{L}\p{N}]/u.test(needle) ? "\\p{L}" : "";
+  const after = /[\p{L}\p{N}]$/u.test(needle) ? "\\p{L}" : "";
+  return new RegExp(
+    `(?<![${NUMBER_NEIGHBOUR}${before}])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![${NUMBER_NEIGHBOUR}${after}])`,
+    "gu",
+  );
 }
 
 interface Answer {
