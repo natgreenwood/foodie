@@ -310,6 +310,41 @@ export const pageFetch = pgTable("page_fetch", {
   fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
 });
 
+// Every completion the import asked to read a recipe from a page with no
+// structured data (NATG-248): what was sent, who answered and what they
+// said, whether the answer was used or not. Kept permanently, unlike
+// page_fetch, which is a cache; so not keyed on or linked to it. A row is
+// written only when the model answered.
+export const aiExtraction = pgTable(
+  "ai_extraction",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    // The page's final URL, as the preview returns it.
+    sourceUrl: text("source_url").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    // The page's visible text exactly as the model was sent it.
+    pageText: text("page_text").notNull(),
+    rawOutput: text("raw_output").notNull(),
+    // - accepted: every ingredient line and step is in the page text.
+    // - ungrounded: at least one is not; nothing was returned.
+    // - no_recipe: the model said the page has none.
+    // - unreadable: the answer was not the JSON asked for.
+    outcome: text("outcome").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check(
+      "ai_extraction_outcome_known",
+      sql`${t.outcome} IN ('accepted', 'ungrounded', 'no_recipe', 'unreadable')`,
+    ),
+  ],
+);
+
 // One account. Email is the sign-in identifier, unique ignoring case; it is
 // stored as entered (trimmed) and always looked up through lower(email).
 // password_hash is an argon2id hash, null for an account that can only sign
