@@ -111,6 +111,52 @@ host, URL and each line of output in the issue. `http 403 challenged` then
 `impit 200 ok` is the result the fallback depends on; `impit 403 challenged`
 from the deployment host means it needs the parked headless Chromium story.
 
+## Reading a page with no structured data (AI)
+
+When `extractRecipe` finds neither JSON-LD nor microdata, the preview hands
+the page to `extractRecipeWithAi` in `extract/ai.ts` (NATG-248). A page past
+the extraction budget is not handed on; it is still `no_recipe_found`.
+
+1. The page's visible text is taken: `head`, `script`, `style` and the like
+   removed, one line per block element, whitespace collapsed, blank lines
+   dropped, and cut at a line to 40,000 characters (`MAX_PAGE_TEXT_CHARS`).
+   A page with no text (an app that renders in the browser) makes no
+   completion and is `no_recipe_found`.
+2. One completion through `complete()` with procedure `default`, so the
+   model the admin chose for it. The prompt tells the model to copy the
+   title, ingredient lines and steps character for character and never to
+   invent, complete, reword or convert anything, and to answer
+   `{"recipe": null}` when there is no recipe.
+3. The answer is used only if every ingredient line and every step is in the
+   page text. Both sides go through `normalise` first: NFKC (NBSP and other
+   fixed-width spaces, ligatures, full-width letters), curly quotes to
+   straight, whitespace collapsed. Nothing else is forgiven: case, dashes,
+   spelling and numbers must match, and a line that starts or ends with a
+   letter or digit must do so at a word boundary in the page, so "25 g" is
+   not found in "225 g". One line not found and the whole answer is dropped.
+   A title not in the page is replaced by the page's `<title>`; servings,
+   times and tags are left empty for the cook.
+4. A used answer's lines go through the same line parser and ingredient
+   match as structured data's, with `extraction: "ai"`.
+
+Every answer is recorded in `ai_extraction`: the URL, provider, model, the
+page text exactly as sent, the model's raw output and the `outcome`
+(`accepted`, `ungrounded`, `no_recipe` or `unreadable`). Rows are kept
+permanently; nothing prunes them. Nothing is recorded when no completion
+was made.
+
+| What happened                         | Preview answer          |
+| ------------------------------------- | ----------------------- |
+| Answer used                           | 200, `extraction: "ai"` |
+| No text, no recipe, or answer dropped | 404 `no_recipe_found`   |
+| No model chosen or no credential      | 503 `ai_not_configured` |
+| Provider failed (`AiProviderError`)   | 502 `ai_failed`         |
+| Anything else, recording included     | 500 `internal_error`    |
+
+Each answer is logged with its `aiExtractionId` and `outcome`, and for a
+dropped one the positions of the lines not found, never their text. A retry
+makes, pays for and records another completion.
+
 ## Reversing the page_fetch migration (manual)
 
 Drizzle has no down migrations. To undo `drizzle/0005_page_fetch.sql`, while
@@ -145,3 +191,21 @@ Dropping the column drops its unique index with it. `1792184379834` is the
 `when` of `0006_measurement_key` in `drizzle/meta/_journal.json`. The
 measurement lookup selects the column, so deploy code from before the
 migration first or every import preview fails.
+
+## Reversing the ai_extraction migration (manual)
+
+To undo `drizzle/0014_ai_extraction.sql`, while it is still the latest
+migration applied, run against the database:
+
+```sql
+begin;
+drop table ai_extraction;
+delete from drizzle.__drizzle_migrations where created_at = 1792456346645;
+commit;
+```
+
+`1792456346645` is the `when` of `0014_ai_extraction` in
+`drizzle/meta/_journal.json`. The table holds the only copy of every AI
+reading, so export it first if it may be wanted. Deploy code from before the
+migration first: this code writes to the table on every AI reading, and
+without it those previews fail with 500.

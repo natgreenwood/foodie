@@ -49,6 +49,7 @@ beforeAll(async () => {
     fetchPage: unused,
     loadUnits: unused,
     matchIngredients: unused,
+    extractWithAi: unused,
     db,
     secureCookies: false,
     settingsKey: Buffer.alloc(32),

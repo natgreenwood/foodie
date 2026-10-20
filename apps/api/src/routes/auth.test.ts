@@ -35,6 +35,7 @@ function start(
       fetchPage: unused,
       loadUnits: unused,
       matchIngredients: unused,
+      extractWithAi: unused,
       db: tx,
       secureCookies,
       settingsKey: Buffer.alloc(32),

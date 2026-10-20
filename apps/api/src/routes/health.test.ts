@@ -10,6 +10,7 @@ const importDeps: ImportDeps = {
   fetchPage: unused,
   loadUnits: unused,
   matchIngredients: unused,
+  extractWithAi: unused,
 };
 const authDeps: AdminAiDeps = {
   db: {} as AdminAiDeps["db"],
