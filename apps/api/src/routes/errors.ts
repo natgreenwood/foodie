@@ -61,7 +61,9 @@ const FASTIFY_4XX_MESSAGES: Record<string, string> = {
 // anywhere in the cause chain: Drizzle puts query parameters (a password hash
 // or an email) in its message, Postgres quotes the offending value in some of
 // its own, and a fetch or AI SDK error can carry a URL or a model's text. So
-// only errorForLog's name and code, and where it was thrown.
+// only errorForLog's name and code. No stack frames either: once a message has
+// changed after its stack was captured, nothing in the stack's text tells a
+// line of the old message that looks like a frame from a real one (NATG-367).
 export function apiErrorHandler(module: string) {
   return (err: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
     const route = `${request.method} ${request.routeOptions.url ?? pathForLog(request.url)}`;
@@ -100,40 +102,9 @@ export function apiErrorHandler(module: string) {
       );
     }
     request.log.error(
-      { route, module, ...errorForLog(err), frames: stackFrames(err) },
+      { route, module, ...errorForLog(err) },
       `${module}: request failed`,
     );
     return sendError(reply, 500, "internal_error", "something went wrong");
   };
-}
-
-const MAX_FRAMES = 5;
-
-// The first few `at …` lines of an error's stack, without the header V8 puts
-// before them: that is `name: message`, and the message may run over several
-// lines, any of which could itself look like a frame. A stack that does not
-// start with that header (the message or name changed after it was captured)
-// gives no frames rather than a guess.
-function stackFrames(err: unknown): string[] {
-  if (!(err instanceof Error) || typeof err.stack !== "string") return [];
-  const header = String(err);
-  if (!err.stack.startsWith(`${header}\n`)) return [];
-  return err.stack
-    .slice(header.length + 1)
-    .split("\n")
-    .slice(0, MAX_FRAMES)
-    .map((line) => withoutAlias(line.trim()))
-    .filter((line) => line.startsWith("at "));
-}
-
-// V8 writes the property a function was called through as `[as key]`, before
-// the `(location)` that ends the frame. A computed key can be request data,
-// and can hold `]`, so everything from `[as ` up to that last ` (` goes.
-function withoutAlias(frame: string): string {
-  const alias = frame.indexOf(" [as ");
-  if (alias === -1) return frame;
-  const location = frame.lastIndexOf(" (");
-  return (
-    frame.slice(0, alias) + (location > alias ? frame.slice(location) : "")
-  );
 }

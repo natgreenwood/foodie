@@ -87,7 +87,36 @@ describe("apiErrorHandler", () => {
     expect(serialised).not.toContain("invalid input syntax");
   });
 
-  it("logs where an error was thrown, but not its message", async () => {
+  // NATG-367: a message shortened after its stack was captured leaves its old
+  // lines in the stack, where one shaped like a frame could not be told from
+  // a real one.
+  it("logs nothing of a message that changed after it was thrown", async () => {
+    const { app, logLines } = start();
+    const marker = "PRIVATE-MESSAGE-6a8d";
+    app.get("/recipes/shortened", () => {
+      try {
+        throw new Error(`prefix\n    at ${marker} (file:///fake.js:1:1)`);
+      } catch (error) {
+        void (error as Error).stack;
+        (error as Error).message = "prefix";
+        throw error;
+      }
+    });
+
+    const res = await app.inject({ method: "GET", url: "/recipes/shortened" });
+
+    expect(res.statusCode).toBe(500);
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        msg: "recipes: request failed",
+        errorName: "Error",
+        code: null,
+      }),
+    );
+    expect(JSON.stringify(logLines)).not.toContain(marker);
+  });
+
+  it("logs an error's name, but not its message or stack", async () => {
     const { app, logLines } = start();
     app.get("/recipes/typo", () => {
       const missing: { title?: { trim(): string } } = {};
@@ -98,11 +127,10 @@ describe("apiErrorHandler", () => {
 
     const failure = logLines.find((l) => l.msg === "recipes: request failed");
     expect(failure).toMatchObject({ errorName: "TypeError", code: null });
-    const frames = failure?.frames as string[];
-    expect(frames.length).toBeGreaterThan(0);
-    expect(frames.length).toBeLessThanOrEqual(5);
-    expect(frames[0]).toMatch(/^at .*errors\.test\.ts:\d+:\d+\)?$/);
-    expect(JSON.stringify(logLines)).not.toContain("reading 'trim'");
+    expect(failure).not.toHaveProperty("frames");
+    const serialised = JSON.stringify(logLines);
+    expect(serialised).not.toContain("reading 'trim'");
+    expect(serialised).not.toContain("errors.test.ts");
   });
 
   it("logs no property name a function was called through", async () => {
@@ -118,7 +146,7 @@ describe("apiErrorHandler", () => {
     await app.inject({ method: "GET", url: "/recipes/kind/kind-7e2b" });
 
     const failure = logLines.find((l) => l.msg === "recipes: request failed");
-    expect((failure?.frames as string[]).length).toBeGreaterThan(0);
+    expect(failure).toBeDefined();
     expect(JSON.stringify(failure)).not.toContain("kind-7e2b");
   });
 
