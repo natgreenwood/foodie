@@ -543,6 +543,11 @@ describe("auth routes when a request fails", () => {
         errorName: "Error",
       }),
     );
+    // Enough of where it failed to find it: the route's own code.
+    const failure = logLines.find((l) => l.msg === "auth: request failed");
+    expect(failure?.frames).toContainEqual(
+      expect.stringMatching(/^apps\/api\/src\/routes\/auth\.ts:\d+:\d+$/),
+    );
     expect(JSON.stringify(logLines)).not.toContain("Failed query");
     expect(JSON.stringify(logLines)).not.toContain("params: a@b.c");
   });

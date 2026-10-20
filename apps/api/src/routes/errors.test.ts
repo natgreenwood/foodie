@@ -1,8 +1,13 @@
 import { Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { DrizzleQueryError } from "drizzle-orm";
 import Fastify from "fastify";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { apiErrorHandler } from "./errors.js";
+
+// What a logged frame may be: a location under the repository root, or in
+// Node itself.
+const FRAME = /^(?:(?:apps|node_modules)\/[\w@+./-]+|node:[\w/-]+):\d+:\d+$/;
 
 // A one-route app whose handler throws, with its log lines collected.
 function start() {
@@ -101,25 +106,104 @@ describe("apiErrorHandler", () => {
     const frames = failure?.frames as string[];
     expect(frames.length).toBeGreaterThan(0);
     expect(frames.length).toBeLessThanOrEqual(5);
-    expect(frames[0]).toMatch(/^at .*errors\.test\.ts:\d+:\d+\)?$/);
+    expect(frames[0]).toMatch(
+      /^apps\/api\/src\/routes\/errors\.test\.ts:\d+:\d+$/,
+    );
+    for (const frame of frames) expect(frame).toMatch(FRAME);
     expect(JSON.stringify(logLines)).not.toContain("reading 'trim'");
   });
 
-  it("logs no property name a function was called through", async () => {
+  // A function's name, or the property it was called through, can be a key
+  // that came from the request.
+  it.each([
+    [
+      "called through a computed property",
+      (kind: string) => {
+        const handlers: Record<string, () => never> = {};
+        handlers[kind] = function () {
+          throw new Error("unexpected kind");
+        };
+        return handlers[kind]();
+      },
+    ],
+    [
+      "named by a computed key",
+      (kind: string) => {
+        const handlers: Record<string, () => never> = {
+          [kind]: function () {
+            throw new Error("unexpected kind");
+          },
+        };
+        return handlers[kind]!();
+      },
+    ],
+  ])("logs no name of a function %s", async (_, call) => {
     const { app, logLines } = start();
-    const handlers: Record<string, () => never> = {};
-    app.get<{ Params: { kind: string } }>("/recipes/kind/:kind", (request) => {
-      handlers[request.params.kind] = function () {
-        throw new Error("unexpected kind");
-      };
-      return handlers[request.params.kind]!();
-    });
+    app.get<{ Params: { kind: string } }>("/recipes/kind/:kind", (request) =>
+      call(request.params.kind),
+    );
 
     await app.inject({ method: "GET", url: "/recipes/kind/kind-7e2b" });
 
     const failure = logLines.find((l) => l.msg === "recipes: request failed");
     expect((failure?.frames as string[]).length).toBeGreaterThan(0);
     expect(JSON.stringify(failure)).not.toContain("kind-7e2b");
+  });
+
+  // NATG-367: a catch that shortens a multi-line message after the stack was
+  // captured leaves the rest of the old message where frames are read.
+  it("logs nothing of a message cut short after its stack was captured", async () => {
+    const { app, logLines } = start();
+    app.get("/recipes/shortened", () => {
+      try {
+        throw new Error(
+          "prefix\n    at PRIVATE-MESSAGE-6a8d (file:///fake.js:1:1)",
+        );
+      } catch (error) {
+        void (error as Error).stack;
+        (error as Error).message = "prefix";
+        throw error;
+      }
+    });
+
+    const res = await app.inject({ method: "GET", url: "/recipes/shortened" });
+
+    expect(res.statusCode).toBe(500);
+    const failure = logLines.find((l) => l.msg === "recipes: request failed");
+    const frames = failure?.frames as string[];
+    expect(frames.length).toBeGreaterThan(0);
+    for (const frame of frames) expect(frame).toMatch(FRAME);
+    expect(JSON.stringify(logLines)).not.toContain("PRIVATE-MESSAGE-6a8d");
+  });
+
+  it("logs no frame outside the repository, or not shaped as a location", async () => {
+    const { app, logLines } = start();
+    const root = fileURLToPath(new URL("../../../../", import.meta.url));
+    const foreign = [
+      "at outside (/opt/elsewhere-4d1c/lib.js:3:4)",
+      "at outside (file:///opt/elsewhere-4d1c/lib.js:3:4)",
+      `at escape (${root}apps/../../elsewhere-4d1c/lib.js:3:4)`,
+      `at spaced (${root}apps/elsewhere-4d1c x.js:3:4)`,
+      `at unlocated (${root}apps/elsewhere-4d1c.js)`,
+      "at node:elsewhere-4d1c x:1:1",
+    ];
+    app.get("/recipes/foreign", () => {
+      const err = new Error("boom");
+      err.stack = err.stack!.replace(
+        "\n",
+        `\n${foreign.map((line) => `    ${line}`).join("\n")}\n`,
+      );
+      throw err;
+    });
+
+    await app.inject({ method: "GET", url: "/recipes/foreign" });
+
+    const failure = logLines.find((l) => l.msg === "recipes: request failed");
+    const frames = failure?.frames as string[];
+    expect(frames[0]).toMatch(
+      /^apps\/api\/src\/routes\/errors\.test\.ts:\d+:\d+$/,
+    );
+    expect(JSON.stringify(failure)).not.toContain("elsewhere-4d1c");
   });
 
   it("answers an unparseable body with 400 invalid_request", async () => {

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
 import { clientKey } from "../auth/client-key.js";
 import { errorForLog } from "../db/errors.js";
@@ -61,7 +62,7 @@ const FASTIFY_4XX_MESSAGES: Record<string, string> = {
 // anywhere in the cause chain: Drizzle puts query parameters (a password hash
 // or an email) in its message, Postgres quotes the offending value in some of
 // its own, and a fetch or AI SDK error can carry a URL or a model's text. So
-// only errorForLog's name and code, and where it was thrown.
+// only errorForLog's name and code, and where it was thrown as file locations.
 export function apiErrorHandler(module: string) {
   return (err: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
     const route = `${request.method} ${request.routeOptions.url ?? pathForLog(request.url)}`;
@@ -109,11 +110,25 @@ export function apiErrorHandler(module: string) {
 
 const MAX_FRAMES = 5;
 
-// The first few `at …` lines of an error's stack, without the header V8 puts
-// before them: that is `name: message`, and the message may run over several
-// lines, any of which could itself look like a frame. A stack that does not
-// start with that header (the message or name changed after it was captured)
-// gives no frames rather than a guess.
+// The repository root, four directories above this file: it is
+// apps/api/src/routes/errors.ts in development and tests, and
+// apps/api/dist/routes/errors.js in the container. Our code and every
+// installed package sit under it, so a frame anywhere else is not one of ours.
+const ROOT_URL = new URL("../../../../", import.meta.url).href;
+const ROOT_PATH = fileURLToPath(ROOT_URL);
+
+const LOCATION = /^(.+):(\d+):(\d+)$/;
+const ROOT_RELATIVE = /^[\w@+.-]+(?:\/[\w@+.-]+)*$/;
+const NODE_INTERNAL = /^node:[a-z_]+(?:\/[\w-]+)*:\d+:\d+$/;
+
+// Where an error was thrown, as up to MAX_FRAMES locations (NATG-367): a
+// path relative to the repository root, or a node: internal, each with line
+// and column. Function names are left out, since a function can be named
+// after a computed key that came from a request. Only the stack after its
+// header is read, and a stack that does not start with the error's current
+// header gives none. A message can still hold lines shaped like frames, if
+// it was cut short after the stack was captured, but only a well-formed
+// location under the root can pass as one.
 function stackFrames(err: unknown): string[] {
   if (!(err instanceof Error) || typeof err.stack !== "string") return [];
   const header = String(err);
@@ -121,19 +136,34 @@ function stackFrames(err: unknown): string[] {
   return err.stack
     .slice(header.length + 1)
     .split("\n")
-    .slice(0, MAX_FRAMES)
-    .map((line) => withoutAlias(line.trim()))
-    .filter((line) => line.startsWith("at "));
+    .map(frameLocation)
+    .filter((location) => location !== null)
+    .slice(0, MAX_FRAMES);
 }
 
-// V8 writes the property a function was called through as `[as key]`, before
-// the `(location)` that ends the frame. A computed key can be request data,
-// and can hold `]`, so everything from `[as ` up to that last ` (` goes.
-function withoutAlias(frame: string): string {
-  const alias = frame.indexOf(" [as ");
-  if (alias === -1) return frame;
-  const location = frame.lastIndexOf(" (");
-  return (
-    frame.slice(0, alias) + (location > alias ? frame.slice(location) : "")
-  );
+// A V8 frame is `at <name> (<location>)`, or `at <location>` for a call with
+// no name.
+function frameLocation(line: string): string | null {
+  const frame = line.trim();
+  if (!frame.startsWith("at ")) return null;
+  const location = frame.endsWith(")")
+    ? frame.slice(frame.lastIndexOf("(") + 1, -1)
+    : frame.slice("at ".length).replace(/^async /, "");
+  if (NODE_INTERNAL.test(location)) return location;
+  const match = LOCATION.exec(location);
+  if (match === null) return null;
+  const [, file = "", lineNumber, column] = match;
+  const relative = file.startsWith(ROOT_URL)
+    ? file.slice(ROOT_URL.length)
+    : file.startsWith(ROOT_PATH)
+      ? file.slice(ROOT_PATH.length)
+      : null;
+  if (
+    relative === null ||
+    !ROOT_RELATIVE.test(relative) ||
+    relative.split("/").some((segment) => /^\.+$/.test(segment))
+  ) {
+    return null;
+  }
+  return `${relative}:${lineNumber}:${column}`;
 }
