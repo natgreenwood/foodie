@@ -1,6 +1,6 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
 import { clientKey } from "../auth/client-key.js";
-import { describeError } from "../db/errors.js";
+import { errorForLog } from "../db/errors.js";
 
 // The error codes the signed-in api (auth, profile, recipes, admin) answers with,
 // as { error, message }. The import preview has its own shape.
@@ -57,9 +57,13 @@ const FASTIFY_4XX_MESSAGES: Record<string, string> = {
 
 // An error handler for one plugin: an unparseable body answers in the
 // contract's shape, and anything unexpected is logged as one line that names
-// the module and the route. Drizzle puts query parameters (a password hash or
-// an email) in the error message after the first line, and describeError
-// keeps only the first.
+// the module and the route (NATG-365). That line carries no error message from
+// anywhere in the cause chain: Drizzle puts query parameters (a password hash
+// or an email) in its message, Postgres quotes the offending value in some of
+// its own, and a fetch or AI SDK error can carry a URL or a model's text. So
+// only errorForLog's name and code. No stack frames either: once a message has
+// changed after its stack was captured, nothing in the stack's text tells a
+// line of the old message that looks like a frame from a real one (NATG-367).
 export function apiErrorHandler(module: string) {
   return (err: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
     const route = `${request.method} ${request.routeOptions.url ?? pathForLog(request.url)}`;
@@ -98,7 +102,7 @@ export function apiErrorHandler(module: string) {
       );
     }
     request.log.error(
-      { route, error: describeError(err) },
+      { route, module, ...errorForLog(err) },
       `${module}: request failed`,
     );
     return sendError(reply, 500, "internal_error", "something went wrong");
