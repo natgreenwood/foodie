@@ -18,7 +18,7 @@ async function newIngredient(tx: TestTransaction): Promise<number> {
   return row.id;
 }
 
-// Tests whose names the seeded en-GB and en-US catalogue (0013) already
+// Tests whose names the seeded en-GB and en-US catalogue (0015) already
 // holds use x-test locales, so they do not collide with it.
 describe("ingredient_name", () => {
   dbTest(

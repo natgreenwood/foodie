@@ -5,11 +5,24 @@ import { buildApp } from "../app.js";
 import { createSession } from "../auth/accounts.js";
 import { PAGE_SIZE } from "../db/ingredients.js";
 import { ingredient, ingredientName, user } from "../db/schema.js";
-import { dbTest, type TestTransaction } from "../test/db.js";
+import { dbTest as sharedDbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE } from "./auth.js";
 import { parseListQuery } from "./ingredients.js";
 
 const unused = () => Promise.reject(new Error("not used by these tests"));
+
+// These tests list, search and create against a catalogue they build, so
+// each starts from an empty one. The seeded catalogue (0015) is deleted
+// inside the test's transaction, and the rollback restores it.
+const dbTest = sharedDbTest.extend<{ $test: { emptyCatalogue: void } }>({
+  emptyCatalogue: [
+    async ({ tx }, use) => {
+      await tx.delete(ingredient);
+      await use();
+    },
+    { auto: true },
+  ],
+});
 
 function start(tx: TestTransaction) {
   const app = buildApp({
