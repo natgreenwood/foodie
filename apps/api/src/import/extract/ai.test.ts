@@ -147,10 +147,29 @@ describe("pageText", () => {
       "an inline visibility: hidden",
       '<div style="visibility: hidden !important">',
     ],
+    ["display: none behind a CSS comment", '<div style="display:/**/none">'],
+    [
+      "visibility: hidden behind a CSS comment",
+      '<div style="visibility:/**/hidden">',
+    ],
+    [
+      "display: none in any case, spacing and comments",
+      '<div style="color: red; DISPLAY /* a */ : /* b */ None ! important">',
+    ],
   ])("leaves out an element hidden by %s, and all inside it", (_, open) => {
     const html = `<body><p>Boil water.</p>${open}<p>1 g salt</p><span>Add salt.</span></div><p>Serve.</p></body>`;
 
     expect(pageText(load(html))).toBe("Boil water.\nServe.");
+  });
+
+  test("breaks lines only where a block ends, not at a source line break", () => {
+    // A browser shows the line break and tab inside the <li> as spaces.
+    const html =
+      "<ul><li>1\n  <span>1/2</span>\tcups flour</li><li>salt<br>pepper</li></ul><p>Serves 4</p><p>2 eggs</p>";
+
+    expect(pageText(load(html))).toBe(
+      "1 1/2 cups flour\nsalt\npepper\nServes 4\n2 eggs",
+    );
   });
 
   test("keeps elements that are only hidden by a stylesheet", () => {
@@ -360,6 +379,10 @@ describe("extractRecipeWithAi", () => {
     ["1,5 kg potatoes", "5 kg potatoes"],
     ["add .5 tsp salt", "5 tsp salt"],
     ["Bake for 1.5 hours", "Bake for 1"],
+    ["1 1/2 cups flour", "1/2 cups flour"],
+    ["1 \u00bd cups flour", "\u00bd cups flour"],
+    ["Bake for 1 1/2 hours", "Bake for 1"],
+    ["1\t1/2 cups flour", "1/2 cups flour"],
   ] as const)("rejects %s copied as %s", async ([onPage, answered], { tx }) => {
     const html = `<h1>Soup</h1><p>${onPage}</p><p>Boil water.</p>`;
     const answer = (line: string) =>
@@ -394,6 +417,54 @@ describe("extractRecipeWithAi", () => {
 
       expect(result?.recipe.steps[0]?.text).toBe("Heat the oven to 220C");
       expect(result?.recipe.ingredients[2]?.rawText).toBe("55 g butter");
+    },
+  );
+
+  dbTest(
+    "finds a line that starts with a number after a number on the line before",
+    async ({ tx }) => {
+      const html =
+        "<h1>Soup</h1><p>Serves 4</p><p>2 eggs</p><p>1\n1/2 cups flour</p><p>Boil water.</p>";
+      const answer = (ingredients: string[]) =>
+        JSON.stringify({
+          recipe: { title: "Soup", ingredients, steps: ["Boil water."] },
+        });
+
+      expect(await run(tx, answering(answer(["2 eggs"])), html)).not.toBeNull();
+      // A line break in the HTML source is a space on the page.
+      expect(
+        await run(tx, answering(answer(["1/2 cups flour"])), html),
+      ).toBeNull();
+    },
+  );
+
+  // NATG-360's remaining reproductions: a CSS comment inside the inline style.
+  dbTest.for([
+    [
+      "an ingredient",
+      '<h1>Soup</h1><p style="display:/**/none">1 g salt</p><p>Boil water.</p>',
+      "Soup\nBoil water.",
+    ],
+    [
+      "a step",
+      '<h1>Soup</h1><p>1 g salt</p><p style="visibility:/**/hidden">Boil water.</p>',
+      "Soup\n1 g salt",
+    ],
+  ] as const)(
+    "rejects %s hidden by an inline style with a comment in it",
+    async ([, html, sent], { tx }) => {
+      const answer = JSON.stringify({
+        recipe: {
+          title: "Soup",
+          ingredients: ["1 g salt"],
+          steps: ["Boil water."],
+        },
+      });
+
+      expect(await run(tx, answering(answer), html)).toBeNull();
+      expect(await records(tx)).toEqual([
+        expect.objectContaining({ outcome: "ungrounded", pageText: sent }),
+      ]);
     },
   );
 

@@ -61,7 +61,8 @@ export async function extractRecipeWithAi(
 
   const completion = await deps.complete(extractionPrompt(text));
   const answer = parseAnswer(completion.text);
-  const haystack = normalise(text);
+  // Line by line, so a line break in the page stays one (NATG-359).
+  const haystack = text.split("\n").map(normalise).join("\n");
   let outcome: AiExtractionOutcome;
   // Positions, 1-based, of the lines not in the page; never their text.
   let ungrounded: { ingredients: number[]; steps: number[] } | null = null;
@@ -151,30 +152,45 @@ const UNSEEN = "head, script, style, noscript, template, svg, iframe, object";
 
 // Elements the page's own markup hides, with everything inside them
 // (NATG-360): the hidden attribute, aria-hidden="true", and an inline style
-// of display: none or visibility: hidden. An element hidden by a class and
-// a stylesheet is still read: telling would mean evaluating the CSS.
+// of display: none or visibility: hidden, in any case and spacing, with or
+// without !important, once /* */ comments are taken out. Still read, and
+// out of scope (NATG-360 ruling): an element hidden by a class and a
+// stylesheet, which would mean evaluating the CSS, and any other inline way
+// of hiding, such as opacity: 0, a zero size, off-screen positioning or
+// clip. The check stops the model inventing text; a page that means to
+// mislead can as well show a false recipe in plain view.
 const HIDDEN = '[hidden], [aria-hidden="true" i]';
+const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
 const HIDDEN_STYLE =
-  /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i;
+  /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!\s*important\s*)?(?:;|$)/i;
 
 // Elements that start a new line of text.
 const BLOCK =
   "address, article, aside, blockquote, br, dd, div, dl, dt, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hr, li, main, nav, ol, p, pre, section, table, td, th, tr, ul";
 
-// The page as a reader sees its text: one line per block, whitespace in
-// each collapsed, blank lines dropped, cut at a line to MAX_PAGE_TEXT_CHARS.
-// The one text both sent to the model and checked against. Changes `$`.
+// Marks where a block ends, in place of a line break until the source's own
+// whitespace is collapsed. A private-use character no page means as text.
+const LINE_END = "\ue000";
+
+// The page as a reader sees its text: a line break only where a block
+// element ends, never for a line break in the HTML source, which a browser
+// shows as a space; whitespace in each line collapsed, blank lines dropped,
+// cut at a line to MAX_PAGE_TEXT_CHARS. The one text both sent to the model
+// and checked against. Changes `$`.
 export function pageText($: ReturnType<typeof load>): string {
   $(UNSEEN).remove();
   $(HIDDEN).remove();
   $("[style]")
-    .filter((_, el) => HIDDEN_STYLE.test($(el).attr("style") ?? ""))
+    .filter((_, el) =>
+      HIDDEN_STYLE.test(($(el).attr("style") ?? "").replace(CSS_COMMENT, "")),
+    )
     .remove();
-  $(BLOCK).after("\n");
+  $(BLOCK).after(LINE_END);
   const text = $.root()
     .text()
-    .split("\n")
-    .map((line) => line.replace(/\s+/g, " ").trim())
+    .replace(/\s+/g, " ")
+    .split(LINE_END)
+    .map((line) => line.trim())
     .filter((line) => line !== "")
     .join("\n");
   if (text.length <= MAX_PAGE_TEXT_CHARS) return text;
@@ -182,7 +198,7 @@ export function pageText($: ReturnType<typeof load>): string {
   return text.slice(0, cut > 0 ? cut : MAX_PAGE_TEXT_CHARS);
 }
 
-// What the comparison sees of a text, on both sides. NFKC folds
+// What the comparison sees of a line, on both sides. NFKC folds
 // compatibility characters (NBSP and the other fixed-width spaces,
 // ligatures, full-width letters, ½) to their plain forms; curly quotes have
 // no such mapping and are folded by hand, since a model writing ' for ’ has
@@ -232,17 +248,32 @@ function notFound(
 const NUMBER_NEIGHBOUR = "\\p{N}/\\u2044\\-\\u2010-\\u2013";
 const DECIMAL_AFTER = "(?![.,]\\p{N})";
 
-// `needle` as a pattern for exec from a lastIndex. A line that starts or ends
-// with a letter or digit must also do so at a word boundary, so "salt" is
-// not found in "basalt".
+// Nor may a line that starts with a number follow a number and spaces on
+// the same page line, so "1/2 cups" is not found in "1 1/2 cups"; nor one
+// that ends with a number be followed by spaces and a number, so "Bake for
+// 1" is not found in "Bake for 1 1/2 hours". A line break ends this: "2
+// eggs" is still found on the line after "Serves 4".
+const NUMBER_SPACE_BEFORE = "(?<!\\p{N} +)";
+const NUMBER_SPACE_AFTER = "(?! +\\p{N})";
+
+// `needle` as a pattern for exec from a lastIndex, over text whose lines are
+// normalised. A space in the needle matches a space or a line break, so two
+// adjacent steps given as one are found. A line that starts or ends with a
+// letter or digit must also do so at a word boundary, so "salt" is not
+// found in "basalt".
 function linePattern(needle: string): RegExp {
   const before = /^[\p{L}\p{N}]/u.test(needle) ? "\\p{L}" : "";
   const decimalBefore = /^\p{N}/u.test(needle)
     ? "(?<![.,])"
     : "(?<!\\p{N}[.,])";
   const after = /[\p{L}\p{N}]$/u.test(needle) ? "\\p{L}" : "";
+  const numberBefore = /^\p{N}/u.test(needle) ? NUMBER_SPACE_BEFORE : "";
+  const numberAfter = /\p{N}$/u.test(needle) ? NUMBER_SPACE_AFTER : "";
+  const body = needle
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/ /g, "[ \\n]");
   return new RegExp(
-    `(?<![${NUMBER_NEIGHBOUR}${before}])${decimalBefore}${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}${DECIMAL_AFTER}(?![${NUMBER_NEIGHBOUR}${after}])`,
+    `(?<![${NUMBER_NEIGHBOUR}${before}])${decimalBefore}${numberBefore}${body}${numberAfter}${DECIMAL_AFTER}(?![${NUMBER_NEIGHBOUR}${after}])`,
     "gu",
   );
 }

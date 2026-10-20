@@ -120,12 +120,18 @@ the extraction budget is not handed on; it is still `no_recipe_found`.
 1. The page's visible text is taken: `head`, `script`, `style` and the like
    removed, and so is every element the markup hides, with all inside it:
    the `hidden` attribute, `aria-hidden="true"`, or an inline style of
-   `display: none` or `visibility: hidden` (NATG-360). Then one line per
-   block element, whitespace collapsed, blank lines dropped, and cut at a
-   line to 40,000 characters (`MAX_PAGE_TEXT_CHARS`). That one text is both
-   what the model is sent and what its answer is checked against. An element
-   hidden only by a class and a stylesheet is still read: telling would mean
-   evaluating the CSS. A page with no text (an app that renders in the
+   `display: none` or `visibility: hidden` in any case or spacing, with or
+   without `!important`, once `/* */` comments are taken out (NATG-360).
+   A line break comes only where a block element ends; a line break in the
+   HTML source is a space, as a browser shows it. Whitespace in each line is
+   collapsed, blank lines dropped, and the text cut at a line to 40,000
+   characters (`MAX_PAGE_TEXT_CHARS`). That one text is both what the model
+   is sent and what its answer is checked against. Out of scope (NATG-360
+   ruling): an element hidden by a class and a stylesheet, which would mean
+   evaluating the CSS, and other inline hiding such as `opacity: 0`, a zero
+   size, off-screen positioning or `clip`. The check stops the model
+   inventing text; a page that means to mislead can as well show a false
+   recipe in plain view. A page with no text (an app that renders in the
    browser) makes no completion and is `no_recipe_found`.
 2. One completion through `complete()` with procedure `default`, so the
    model the admin chose for it. The prompt tells the model to copy the
@@ -143,7 +149,13 @@ the extraction budget is not handed on; it is still `no_recipe_found`.
    (NATG-359), so "25 g" is not found in "225 g", nor "1 g" in "0.1 g",
    "5 kg" in "1,5 kg", "2 cup" in "1/2 cup" or "2 eggs" in "1-2 eggs". A
    line that starts with a digit may not start right after a `.` or `,`
-   either, so "5 tsp" is not found in ".5 tsp". A copy that stops short of
+   either, so "5 tsp" is not found in ".5 tsp". A line that starts with a
+   number may not follow a number and spaces on the same page line, and
+   one that ends with a number may not be followed by spaces and a number:
+   "1/2 cups" is not found in "1 1/2 cups", nor "Bake for 1" in "Bake for
+   1 1/2 hours". A line break ends that rule, so "2 eggs" is found on the
+   line after "Serves 4"; elsewhere a space in a line matches a line break
+   on the page. A copy that stops short of
    a comma or full stop is still found ("55 g butter" from "55 g butter,
    cubed", or a step without its last full stop). Steps must be found in the
    page's order, each after the end of the one before; two adjacent steps
