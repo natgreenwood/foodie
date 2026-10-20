@@ -9,8 +9,9 @@ import { isType, type SchemaNode } from "./schema-node.js";
 
 // The recipe a page declares in structured data, as the preview returns it
 // (NATG-245). JSON-LD first, then microdata; no AI. Nothing here is stored.
+// A page with neither is read by ai.ts instead (NATG-248), as "ai".
 
-export type Extraction = "json-ld" | "microdata";
+export type Extraction = "json-ld" | "microdata" | "ai";
 export type ExtractWarning = "multiple_recipes_found";
 
 export interface DraftIngredient {
@@ -117,13 +118,15 @@ function draft(
 // rather than handed whole to the line parser (SEC-2 on NATG-245).
 export const MAX_LINE_CHARS = 1_000;
 
-function capLength(text: string): string {
+export function capLength(text: string): string {
   return text.length > MAX_LINE_CHARS
     ? text.slice(0, MAX_LINE_CHARS).trimEnd()
     : text;
 }
 
-function ingredients(
+// Also builds the lines ai.ts reads from page text, so both get the same
+// section headers and line parsing.
+export function ingredients(
   entries: readonly string[],
   ctx: ExtractContext,
 ): DraftIngredient[] {
