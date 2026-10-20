@@ -4,6 +4,7 @@ import type { Db } from "../auth/accounts.js";
 import {
   AiNotConfiguredError,
   AiProviderError,
+  AiRequestTooLargeError,
   type Completion,
   type CompletionRequest,
 } from "../ai/complete.js";
@@ -161,8 +162,8 @@ export const AI_FAILED_MESSAGE =
 // completion. A line with no candidates is not sent, and with none at all
 // there is no call. A reply that names no id, or one outside the line's
 // candidates, leaves the line unmatched; the second is logged. AI that is
-// not configured or fails leaves every line unmatched and says so in
-// `matching`; any other error is thrown.
+// not configured, fails, or refuses the prompt as too large leaves every line
+// unmatched and says so in `matching`; any other error is thrown.
 export async function chooseIngredients(
   lines: readonly CandidateLine[],
   complete: MatchDeps["complete"],
@@ -203,6 +204,24 @@ export async function chooseIngredients(
           code: err.code,
         },
         "import preview: ingredients not matched, AI provider failed",
+      );
+      return {
+        chosen,
+        matching: { status: "ai_failed", message: AI_FAILED_MESSAGE },
+      };
+    }
+    // Too many lines for one prompt: left for manual matching, as a failure.
+    if (err instanceof AiRequestTooLargeError) {
+      log.warn(
+        {
+          procedure: err.procedure,
+          provider: err.provider,
+          model: err.model,
+          limit: err.limit,
+          max: err.max,
+          actual: err.actual,
+        },
+        "import preview: ingredients not matched, AI request too large",
       );
       return {
         chosen,
