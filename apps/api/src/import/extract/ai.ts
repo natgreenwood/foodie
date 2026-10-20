@@ -164,17 +164,27 @@ const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
 const HIDDEN_STYLE =
   /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!\s*important\s*)?(?:;|$)/i;
 
-// Elements that start a new line of text.
+// Elements that start a new line of text. Not table cells: a browser shows
+// the cells of a row on one line, a tab apart, so "1" and "1/2 cup flour" in
+// two cells are one line, "1 1/2 cup flour" (NATG-359).
 const BLOCK =
-  "address, article, aside, blockquote, br, dd, div, dl, dt, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hr, li, main, nav, ol, p, pre, section, table, td, th, tr, ul";
+  "address, article, aside, blockquote, br, dd, div, dl, dt, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hr, li, main, nav, ol, p, pre, section, table, tr, ul";
+const CELL = "td, th";
+
+// Elements whose own line breaks a browser keeps (NATG-363): <pre>, and an
+// inline white-space of pre, pre-wrap or pre-line. Spaces are collapsed
+// all the same, which the comparison does anyway.
+const PRESERVED_STYLE =
+  /(?:^|;)\s*white-space\s*:\s*pre(?:-wrap|-line)?\s*(?:!\s*important\s*)?(?:;|$)/i;
 
 // Marks where a block ends, in place of a line break until the source's own
 // whitespace is collapsed. A private-use character no page means as text.
 const LINE_END = "\ue000";
 
 // The page as a reader sees its text: a line break only where a block
-// element ends, never for a line break in the HTML source, which a browser
-// shows as a space; whitespace in each line collapsed, blank lines dropped,
+// element ends or inside a preformatted one, never for a line break in the
+// other HTML source, which a browser shows as a space; the cells of a table
+// row on one line; whitespace in each line collapsed, blank lines dropped,
 // cut at a line to MAX_PAGE_TEXT_CHARS. The one text both sent to the model
 // and checked against. Changes `$`.
 export function pageText($: ReturnType<typeof load>): string {
@@ -185,6 +195,24 @@ export function pageText($: ReturnType<typeof load>): string {
       HIDDEN_STYLE.test(($(el).attr("style") ?? "").replace(CSS_COMMENT, "")),
     )
     .remove();
+  $("pre, [style]")
+    .filter(
+      (_, el) =>
+        el.tagName === "pre" ||
+        PRESERVED_STYLE.test(
+          ($(el).attr("style") ?? "").replace(CSS_COMMENT, ""),
+        ),
+    )
+    .find("*")
+    .addBack()
+    .contents()
+    .each((_, node) => {
+      // 3 is a text node, as in the DOM.
+      if (node.nodeType === 3) {
+        node.data = node.data.replace(/\r\n?|\n/g, LINE_END);
+      }
+    });
+  $(CELL).after("\t");
   $(BLOCK).after(LINE_END);
   const text = $.root()
     .text()

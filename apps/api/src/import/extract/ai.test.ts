@@ -172,6 +172,30 @@ describe("pageText", () => {
     );
   });
 
+  test("puts a table row's cells on one line", () => {
+    const html =
+      "<table><tr><th>Amount</th><th>Ingredient</th></tr><tr><td>1</td><td>1/2 cup flour</td></tr><tr><td>2 eggs</td></tr></table><p>Mix.</p>";
+
+    expect(pageText(load(html))).toBe(
+      "Amount Ingredient\n1 1/2 cup flour\n2 eggs\nMix.",
+    );
+  });
+
+  test.each([
+    ["<pre>", "<pre>", "</pre>"],
+    ["white-space: pre", '<div style="white-space: pre">', "</div>"],
+    ["white-space: pre-wrap", '<div style="white-space:pre-wrap">', "</div>"],
+    [
+      "white-space: pre-line",
+      '<div style="WHITE-SPACE: /* x */ pre-line !important">',
+      "</div>",
+    ],
+  ])("keeps the line breaks inside %s", (_, open, close) => {
+    const html = `<h1>Soup</h1>${open}Serves 4\n  <b>2 eggs</b>\r\nsalt${close}<p>Mix.</p>`;
+
+    expect(pageText(load(html))).toBe("Soup\nServes 4\n2 eggs\nsalt\nMix.");
+  });
+
   test("keeps elements that are only hidden by a stylesheet", () => {
     // Out of scope (NATG-360): it would mean evaluating the CSS.
     const html =
@@ -435,6 +459,79 @@ describe("extractRecipeWithAi", () => {
       expect(
         await run(tx, answering(answer(["1/2 cups flour"])), html),
       ).toBeNull();
+    },
+  );
+
+  dbTest(
+    "rejects a whole number dropped from the cell before it in a table row",
+    async ({ tx }) => {
+      // NATG-359's table reproduction: the cells show as "1\t1/2 cup flour".
+      const html =
+        "<h1>Soup</h1><table><tr><td>1</td><td>1/2 cup flour</td></tr></table><p>Mix together.</p>";
+      const answer = (line: string) =>
+        JSON.stringify({
+          recipe: {
+            title: "Soup",
+            ingredients: [line],
+            steps: ["Mix together."],
+          },
+        });
+
+      expect(
+        await run(tx, answering(answer("1/2 cup flour")), html),
+      ).toBeNull();
+      const faithful = await run(
+        tx,
+        answering(answer("1 1/2 cup flour")),
+        html,
+      );
+      expect(faithful?.recipe.ingredients[0]?.quantity).toBe("1.5");
+    },
+  );
+
+  dbTest(
+    "finds each line of a table with one ingredient a row",
+    async ({ tx }) => {
+      const html =
+        "<h1>Soup</h1><table><tr><td>1 1/2 cup flour</td></tr><tr><td>2 eggs</td></tr></table><p>Mix together.</p>";
+      const answer = (ingredients: string[]) =>
+        JSON.stringify({
+          recipe: { title: "Soup", ingredients, steps: ["Mix together."] },
+        });
+
+      expect(
+        await run(tx, answering(answer(["1 1/2 cup flour", "2 eggs"])), html),
+      ).not.toBeNull();
+      expect(
+        await run(tx, answering(answer(["1/2 cup flour", "2 eggs"])), html),
+      ).toBeNull();
+    },
+  );
+
+  // NATG-363's reproductions: a <pre> keeps its line breaks, so a number at
+  // the end of one line does not run into the next.
+  dbTest.for([
+    [
+      "an ingredient",
+      "<h1>Soup</h1><pre>Serves 4\n2 eggs</pre><p>Mix together.</p>",
+      ["2 eggs"],
+      ["Mix together."],
+    ],
+    [
+      "method lines",
+      "<h1>Soup</h1><p>2 eggs</p><pre>Bake at 180\n10 minutes more if needed.</pre>",
+      ["2 eggs"],
+      ["Bake at 180", "10 minutes more if needed."],
+    ],
+  ] as const)(
+    "accepts %s copied from the lines of a <pre>",
+    async ([, html, ingredients, steps], { tx }) => {
+      const answer = JSON.stringify({
+        recipe: { title: "Soup", ingredients, steps },
+      });
+
+      expect(await run(tx, answering(answer), html)).not.toBeNull();
+      expect((await records(tx)).map((r) => r.outcome)).toEqual(["accepted"]);
     },
   );
 

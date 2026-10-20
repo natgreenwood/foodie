@@ -122,8 +122,12 @@ the extraction budget is not handed on; it is still `no_recipe_found`.
    the `hidden` attribute, `aria-hidden="true"`, or an inline style of
    `display: none` or `visibility: hidden` in any case or spacing, with or
    without `!important`, once `/* */` comments are taken out (NATG-360).
-   A line break comes only where a block element ends; a line break in the
-   HTML source is a space, as a browser shows it. Whitespace in each line is
+   A line break comes only where a block element ends, or where the source
+   has one inside a `<pre>` or an element with an inline `white-space` of
+   `pre`, `pre-wrap` or `pre-line` (NATG-363); any other line break in the
+   HTML source is a space, as a browser shows it. The cells of a table row
+   share one line, as a browser shows them, so `1` | `1/2 cup flour` reads
+   "1 1/2 cup flour" (NATG-359). Whitespace in each line is
    collapsed, blank lines dropped, and the text cut at a line to 40,000
    characters (`MAX_PAGE_TEXT_CHARS`). That one text is both what the model
    is sent and what its answer is checked against. Out of scope (NATG-360
