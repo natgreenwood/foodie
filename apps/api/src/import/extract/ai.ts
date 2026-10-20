@@ -225,16 +225,24 @@ function notFound(
 // "0.1 g salt", "2 cup flour" in "1/2 cup flour" and "2 eggs" in "1-2 eggs".
 // \p{N} takes in the vulgar fractions (½); \u2044 is the fraction slash NFKC
 // writes them with; \u2010-\u2013 are the hyphens and the en dash of a range.
-const NUMBER_NEIGHBOUR = "\\p{N}.,/\\u2044\\-\\u2010-\\u2013";
+// A "." or "," continues a number only with a digit on its far side, so
+// "1,5 kg" blocks "5 kg" but "butter, cubed" still holds "butter" and a step
+// may drop its last full stop. Nor may a line that starts with a digit
+// start right after one, so "5 tsp" is not found in ".5 tsp".
+const NUMBER_NEIGHBOUR = "\\p{N}/\\u2044\\-\\u2010-\\u2013";
+const DECIMAL_AFTER = "(?![.,]\\p{N})";
 
 // `needle` as a pattern for exec from a lastIndex. A line that starts or ends
 // with a letter or digit must also do so at a word boundary, so "salt" is
 // not found in "basalt".
 function linePattern(needle: string): RegExp {
   const before = /^[\p{L}\p{N}]/u.test(needle) ? "\\p{L}" : "";
+  const decimalBefore = /^\p{N}/u.test(needle)
+    ? "(?<![.,])"
+    : "(?<!\\p{N}[.,])";
   const after = /[\p{L}\p{N}]$/u.test(needle) ? "\\p{L}" : "";
   return new RegExp(
-    `(?<![${NUMBER_NEIGHBOUR}${before}])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![${NUMBER_NEIGHBOUR}${after}])`,
+    `(?<![${NUMBER_NEIGHBOUR}${before}])${decimalBefore}${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}${DECIMAL_AFTER}(?![${NUMBER_NEIGHBOUR}${after}])`,
     "gu",
   );
 }

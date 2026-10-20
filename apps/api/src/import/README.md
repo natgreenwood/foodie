@@ -138,11 +138,14 @@ the extraction budget is not handed on; it is still `no_recipe_found`.
    straight, whitespace collapsed. Nothing else is forgiven: case, dashes,
    spelling and numbers must match. A line that starts or ends with a
    letter or digit must do so at a word boundary in the page, and no line
-   may start or end next to a digit, `.`, `,`, `/`, a fraction character, a
-   hyphen or an en dash (NATG-359), so "25 g" is not found in "225 g", nor
-   "1 g" in "0.1 g", "2 cup" in "1/2 cup" or "2 eggs" in "1-2 eggs". That
-   also refuses a copy that stops short of a comma or full stop on the page
-   ("55 g butter" from "55 g butter, cubed"). Steps must be found in the
+   may start or end next to a digit, `/`, a fraction character, a hyphen or
+   an en dash, nor next to a `.` or `,` with a digit on its far side
+   (NATG-359), so "25 g" is not found in "225 g", nor "1 g" in "0.1 g",
+   "5 kg" in "1,5 kg", "2 cup" in "1/2 cup" or "2 eggs" in "1-2 eggs". A
+   line that starts with a digit may not start right after a `.` or `,`
+   either, so "5 tsp" is not found in ".5 tsp". A copy that stops short of
+   a comma or full stop is still found ("55 g butter" from "55 g butter,
+   cubed", or a step without its last full stop). Steps must be found in the
    page's order, each after the end of the one before; two adjacent steps
    given as one are still found. Ingredient lines may come in any order.
    One line not found and the whole answer is dropped.

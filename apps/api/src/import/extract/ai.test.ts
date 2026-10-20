@@ -358,6 +358,7 @@ describe("extractRecipeWithAi", () => {
     ["1-2 eggs", "2 eggs"],
     ["1\u20132 eggs", "2 eggs"],
     ["1,5 kg potatoes", "5 kg potatoes"],
+    ["add .5 tsp salt", "5 tsp salt"],
     ["Bake for 1.5 hours", "Bake for 1"],
   ] as const)("rejects %s copied as %s", async ([onPage, answered], { tx }) => {
     const html = `<h1>Soup</h1><p>${onPage}</p><p>Boil water.</p>`;
@@ -375,17 +376,24 @@ describe("extractRecipeWithAi", () => {
   });
 
   dbTest(
-    "rejects a line that stops before a comma or full stop on the page",
+    "accepts a line that stops before a comma or full stop on the page",
     async ({ tx }) => {
-      // The page has "55 g butter, cubed": a match may not end next to ","
-      // (NATG-359), so a copy that drops the prep note is refused too.
-      const answer = withLines([
-        ...FAITHFUL.recipe.ingredients.slice(0, 2),
-        "55 g butter",
-        "150 ml milk",
-      ]);
+      // The page has "55 g butter, cubed" and "Heat the oven to 220C.": a
+      // "." or "," blocks a match only beside a digit (NATG-359).
+      const [heat, ...rest] = FAITHFUL.recipe.steps;
+      const answer = withLines(
+        [
+          ...FAITHFUL.recipe.ingredients.slice(0, 2),
+          "55 g butter",
+          "150 ml milk",
+        ],
+        [heat!.replace(/\.$/, ""), ...rest],
+      );
 
-      expect(await run(tx, answering(answer))).toBeNull();
+      const result = await run(tx, answering(answer));
+
+      expect(result?.recipe.steps[0]?.text).toBe("Heat the oven to 220C");
+      expect(result?.recipe.ingredients[2]?.rawText).toBe("55 g butter");
     },
   );
 
