@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { Writable } from "node:stream";
 import type { FastifyInstance } from "fastify";
@@ -21,6 +21,7 @@ import {
   type FetchedPage,
   type FetchFailureReason,
 } from "../import/fetch.js";
+import { extractRecipeWithAi } from "../import/extract/ai.js";
 import { extractRecipe, MAX_LINE_CHARS } from "../import/extract/extract.js";
 import { AI_NOT_CONFIGURED_MESSAGE } from "../import/match-ingredients.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
@@ -587,6 +588,64 @@ describe("POST /imports/preview", () => {
         }),
       ]);
       expect(await tx.select().from(aiExtraction)).toEqual([]);
+    },
+  );
+
+  dbTest(
+    "logs no page text or model output when recording the AI reading fails",
+    async ({ tx }) => {
+      // SEC-2: a failed insert's error carries its parameters and the
+      // failing row. CHECK (false) makes Postgres refuse the row; the
+      // constraint goes with the test's transaction.
+      await tx.execute(
+        sql`alter table ai_extraction add constraint sec2_refuse_all check (false) not valid`,
+      );
+      const html =
+        "<html><body><h1>Soup</h1><p>PAGE-MARKER-4c1d</p></body></html>";
+      start(() => Promise.resolve(page(html)), undefined, {
+        extractWithAi: (fetched, ctx) =>
+          extractRecipeWithAi(
+            {
+              db: tx,
+              complete: () =>
+                Promise.resolve({
+                  text: '{"recipe": null, "why": "OUTPUT-MARKER-8e2b"}',
+                  provider: "anthropic",
+                  model: "claude-haiku-5-5",
+                }),
+            },
+            fetched,
+            ctx,
+          ),
+      });
+
+      const res = await preview({ url: URL_ });
+
+      expect(res.statusCode).toBe(500);
+      expect(res.json()).toEqual({
+        error: "internal_error",
+        message: "the page could not be read",
+        url: URL_,
+      });
+      const logged = JSON.stringify(logLines);
+      for (const marker of ["PAGE-MARKER-4c1d", "OUTPUT-MARKER-8e2b"]) {
+        expect(res.body).not.toContain(marker);
+        expect(logged).not.toContain(marker);
+      }
+      expect(previewLog()).toEqual([
+        {
+          level: 50,
+          time: expect.any(Number) as number,
+          pid: expect.any(Number) as number,
+          hostname: expect.any(String) as string,
+          reqId: expect.any(String) as string,
+          url: URL_,
+          operation: "ai_extraction",
+          errorName: "DrizzleQueryError",
+          code: "23514",
+          msg: "import preview: AI extraction error",
+        },
+      ]);
     },
   );
 

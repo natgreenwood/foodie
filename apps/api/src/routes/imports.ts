@@ -11,6 +11,7 @@ import {
   complete,
 } from "../ai/complete.js";
 import type { Database } from "../db/client.js";
+import { errorForLog } from "../db/errors.js";
 import {
   createOwnedRecipe,
   type NewRecipe,
@@ -244,7 +245,11 @@ export const importRoutes: FastifyPluginCallback<
             reason: err.reason,
           });
         }
-        request.log.error({ err }, "import preview: fetch error");
+        // Never `err` itself: fetchPage's own query carries the page (SEC-2).
+        request.log.error(
+          { operation: "fetch", ...errorForLog(err) },
+          "import preview: fetch error",
+        );
         return sendError(
           reply,
           500,
@@ -284,7 +289,7 @@ export const importRoutes: FastifyPluginCallback<
           );
         }
         request.log.error(
-          { err, url: page.finalUrl },
+          { url: page.finalUrl, operation: "extract", ...errorForLog(err) },
           "import preview: extraction error",
         );
         return sendError(
@@ -341,8 +346,14 @@ export const importRoutes: FastifyPluginCallback<
               page.finalUrl,
             );
           }
+          // A failed ai_extraction insert carries the page text and the
+          // model's output as query parameters, so only errorForLog's fields.
           request.log.error(
-            { err, url: page.finalUrl },
+            {
+              url: page.finalUrl,
+              operation: "ai_extraction",
+              ...errorForLog(err),
+            },
             "import preview: AI extraction error",
           );
           return sendError(
@@ -364,8 +375,13 @@ export const importRoutes: FastifyPluginCallback<
             log: request.log,
           });
         } catch (err) {
+          // The candidate query carries the ingredient lines.
           request.log.error(
-            { err, url: page.finalUrl },
+            {
+              url: page.finalUrl,
+              operation: "match_ingredients",
+              ...errorForLog(err),
+            },
             "import preview: ingredient match error",
           );
           return sendError(
