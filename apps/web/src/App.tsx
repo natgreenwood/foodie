@@ -4,6 +4,7 @@ import { signOut, type Profile } from "./auth";
 import { HealthStatus } from "./HealthStatus";
 import { ImportPreview } from "./ImportPreview";
 import { ProfilePage } from "./ProfilePage";
+import { RecipePage, recipeIdFrom } from "./RecipePage";
 import { Register } from "./Register";
 import { Link, Redirect, useLocation } from "./router";
 import { SessionProvider, useSession } from "./session";
@@ -26,6 +27,16 @@ const routes: Record<
     adminPages.map(({ path, title }) => [path, { title, access: "admin" }]),
   ),
 };
+
+// Every /recipes/:id page.
+const recipeRoute = { title: "Recipe", access: "signedIn" } as const;
+
+function routeFor(pathname: string) {
+  return (
+    routes[pathname] ??
+    (recipeIdFrom(pathname) !== null ? recipeRoute : undefined)
+  );
+}
 
 // Where sign-in returns to: ?next when it resolves to a page on this site,
 // so the link cannot send anyone elsewhere, and home otherwise. The parsed
@@ -63,7 +74,8 @@ export function App() {
 function Pages() {
   const { state, retry } = useSession();
   const { pathname, search } = useLocation();
-  const route = routes[pathname];
+  const route = routeFor(pathname);
+  const recipeId = recipeIdFrom(pathname);
 
   if (state.kind === "loading") {
     return (
@@ -117,11 +129,14 @@ function Pages() {
 
   return (
     <Layout title={route?.title ?? "Page not found"} user={user}>
-      {pathname === "/" && (
+      {pathname === "/" && user && (
         <>
-          <ImportPreview />
+          <ImportPreview locale={user.locale} />
           <HealthStatus />
         </>
+      )}
+      {recipeId !== null && user && (
+        <RecipePage key={recipeId} id={recipeId} locale={user.locale} />
       )}
       {pathname === "/profile" && user && (
         <ProfilePage key={user.id} user={user} />

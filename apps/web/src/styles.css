@@ -18,6 +18,8 @@
   line-height: 1.5;
   color: #1f2328;
   background: #ffffff;
+  /* The badge background, also the active listbox option's. */
+  --surface-badge: #ddf4ff;
 }
 
 body {
@@ -131,7 +133,7 @@ td {
   margin: 0 0.25rem 0.25rem 0;
   padding: 0 0.5rem;
   border-radius: 1rem;
-  background: #ddf4ff;
+  background: var(--surface-badge);
   font-size: 0.875rem;
   white-space: nowrap;
 }
@@ -427,5 +429,335 @@ main:focus {
 @media (max-width: 30rem) {
   .sso button {
     justify-self: stretch;
+  }
+}
+
+/* Read by screen readers, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The import review (NATG-340) */
+
+.field label {
+  display: block;
+  font-weight: 600;
+}
+
+.field input,
+.field select,
+.combobox input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 2.625rem;
+  font: inherit;
+  padding: 0.5rem;
+}
+
+.field-error {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+  color: #cf222e;
+}
+
+h5.section {
+  margin: 1rem 0 0.5rem;
+  font-size: 1rem;
+  font-weight: normal;
+  font-style: italic;
+}
+
+.review-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-line {
+  padding: 1rem 0;
+  border-bottom: 1px solid #d0d7de;
+  scroll-margin-top: 1rem;
+}
+
+.review-line[data-tone="warn"],
+.review-line[data-tone="bad"] {
+  margin: 0.5rem 0;
+  padding: 1rem;
+  border-bottom: none;
+  border-left: 0.375rem solid var(--tone);
+  background: #f6f8fa;
+}
+
+.review-line[data-tone="warn"] {
+  --tone: #9a6700;
+}
+
+.review-line[data-tone="bad"] {
+  --tone: #cf222e;
+}
+
+.line-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+}
+
+.line-head p {
+  margin: 0;
+}
+
+.line-source {
+  display: grid;
+}
+
+.line-raw {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.line-status {
+  flex: none;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #1a7f37;
+}
+
+.line-status[data-tone="warn"] {
+  color: #9a6700;
+}
+
+.line-status[data-tone="bad"] {
+  color: #cf222e;
+}
+
+.line-status-icon {
+  margin-right: 0.25rem;
+}
+
+.line-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.quantity-field {
+  flex: 0 0 5.5rem;
+}
+
+.unit-field {
+  flex: 0 0 11rem;
+  min-width: 0;
+}
+
+.ingredient-field {
+  flex: 1 1 13.75rem;
+  min-width: 13.75rem;
+}
+
+.unit-field select[data-needs] {
+  border: 2px solid #9a6700;
+}
+
+.line-hints {
+  margin: 0.5rem 0 0;
+  font-size: 0.875rem;
+}
+
+.line-hints p {
+  margin: 0.25rem 0 0;
+}
+
+.review-line .line-notes {
+  margin: 0.5rem 0 0;
+}
+
+.review-line > .hint {
+  margin-top: 0.5rem;
+}
+
+.combobox {
+  position: relative;
+}
+
+.listbox {
+  position: absolute;
+  z-index: 1;
+  top: 100%;
+  left: 0;
+  right: 0;
+  max-height: 20rem;
+  margin: 0.25rem 0 0;
+  padding: 0.25rem 0;
+  overflow-y: auto;
+  border: 1px solid #d0d7de;
+  background: #ffffff;
+  box-shadow: 0 4px 12px rgb(31 35 40 / 15%);
+  list-style: none;
+}
+
+.listbox ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.group-label {
+  display: block;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  color: #59636e;
+}
+
+.listbox [role="option"] {
+  display: grid;
+  align-content: center;
+  min-height: 2.75rem;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+}
+
+.listbox [role="option"][aria-selected="true"] {
+  background: var(--surface-badge);
+  box-shadow: inset 3px 0 0 #0969da;
+}
+
+.option-detail {
+  font-size: 0.75rem;
+  color: #59636e;
+}
+
+.listbox-status {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  color: #59636e;
+}
+
+.listbox-separator {
+  margin: 0.25rem 0;
+  border-top: 1px solid #d0d7de;
+}
+
+.listbox .create-option {
+  display: block;
+  color: #0969da;
+}
+
+.save-section {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #d0d7de;
+  scroll-margin-top: 1rem;
+}
+
+.save-section:focus {
+  outline: none;
+}
+
+.unresolved-list {
+  padding-left: 0;
+  list-style: none;
+}
+
+.save-section .hint {
+  margin-top: 0.5rem;
+}
+
+.ingredient-form {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid #d0d7de;
+  background: #ffffff;
+}
+
+.ingredient-form > :first-child {
+  margin-top: 0;
+}
+
+.ingredient-form fieldset {
+  margin: 0 0 1rem;
+  padding: 0;
+  border: none;
+}
+
+.ingredient-form legend {
+  padding: 0;
+  font-weight: 600;
+}
+
+.name-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.name-field {
+  flex: 1 1 12rem;
+}
+
+.name-row > .field:not(.name-field) {
+  flex: 1 0 8rem;
+}
+
+.remove-name {
+  align-self: flex-end;
+  min-width: 2.625rem;
+  min-height: 2.625rem;
+  padding: 0;
+}
+
+.use-existing {
+  margin-top: 0.5rem;
+}
+
+.ingredient-form .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+/* The recipe page */
+
+.recipe-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recipe-lines li {
+  display: grid;
+  grid-template-columns: 7rem 1fr;
+  gap: 1rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #d0d7de;
+}
+
+.recipe-lines .amount {
+  font-weight: 600;
+}
+
+@media (max-width: 30rem) {
+  .line-head {
+    flex-direction: column;
+  }
+
+  .ingredient-field {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+
+  .recipe-lines li {
+    grid-template-columns: 5rem 1fr;
   }
 }

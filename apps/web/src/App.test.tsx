@@ -56,9 +56,11 @@ const oidcOn = oidcAs("Household SSO");
 
 type Handler = (init?: RequestInit) => Promise<Response>;
 
-// OIDC is off unless a test says otherwise.
+// OIDC is off unless a test says otherwise. The import page asks for the
+// units when it opens.
 const defaultRoutes: Record<string, Handler> = {
   "GET /api/auth/oidc/config": oidcOff,
+  "GET /api/measurements": () => respondWith(200, { measurements: [] }),
 };
 
 // Answers each "METHOD /path" from `routes`; anything else fails the test.
@@ -443,6 +445,44 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "Page not found" }),
     ).toBeDefined();
     await waitFor(() => expect(document.title).toBe("Page not found · Foodie"));
+  });
+
+  it("shows a recipe at /recipes/:id", async () => {
+    stubApi({
+      "GET /api/me": () => respondWith(200, sam),
+      "GET /api/recipes/12": () =>
+        respondWith(200, {
+          id: 12,
+          title: "Chicken adobo",
+          sourceUrl: null,
+          servings: null,
+          prepMinutes: null,
+          cookMinutes: null,
+          createdAt: "2026-10-19T09:12:04Z",
+          updatedAt: "2026-10-19T09:12:04Z",
+          ingredients: [],
+          steps: [],
+          tags: [],
+        }),
+    });
+
+    visit("/recipes/12");
+
+    expect(
+      await screen.findByRole("heading", { name: "Chicken adobo" }),
+    ).toBeDefined();
+    await waitFor(() => expect(document.title).toBe("Recipe · Foodie"));
+  });
+
+  it("sends a visitor to a recipe through sign-in", async () => {
+    stubApi({ "GET /api/me": () => respondWith(401, unauthenticated) });
+
+    visit("/recipes/12");
+
+    expect(
+      await screen.findByRole("heading", { name: "Sign in" }),
+    ).toBeDefined();
+    expect(address()).toBe("/sign-in?next=%2Frecipes%2F12");
   });
 });
 
