@@ -108,6 +108,33 @@ export class AiNotConfiguredError extends Error {
   }
 }
 
+// - prompt_chars: system + user is over MAX_PROMPT_CHARS characters.
+// - output_tokens: the output limit that would be sent, after
+//   REASONING_TOKEN_ALLOWANCE and any OpenRouter scaling, is over
+//   MAX_OUTPUT_TOKENS.
+export type RequestLimit = "prompt_chars" | "output_tokens";
+
+// The request is over a fixed size limit, so the provider was never called.
+// Refused rather than cut short: a cut prompt silently changes what the model
+// is asked. Never carries the prompt.
+export class AiRequestTooLargeError extends Error {
+  override name = "AiRequestTooLargeError";
+  constructor(
+    readonly limit: RequestLimit,
+    readonly max: number,
+    readonly actual: number,
+    readonly procedure: string,
+    readonly provider: AiProvider,
+    readonly model: string,
+  ) {
+    super(
+      limit === "prompt_chars"
+        ? `prompt of ${actual} characters for ${procedure} on ${provider} ${model} is over the ${max}-character limit`
+        : `output limit of ${actual} tokens for ${procedure} on ${provider} ${model} is over the ${max}-token limit`,
+    );
+  }
+}
+
 // - unreachable: the request failed without a response (refused, DNS).
 // - timeout: no full response within the timeout.
 // - http_error: a non-2xx status.
@@ -157,9 +184,9 @@ export class AiProviderError extends Error {
 // provider and model the admin chose for `procedure`, or for `default` when
 // the procedure has none, at that selection's reasoning level where the
 // provider and model take one.
-// Rejects with AiNotConfiguredError or AiProviderError. Database and
-// decryption errors are not caught. Not retried: a caller that retries pays
-// for another completion, nothing worse.
+// Rejects with AiNotConfiguredError, AiRequestTooLargeError or
+// AiProviderError. Database and decryption errors are not caught. Not
+// retried: a caller that retries pays for another completion, nothing worse.
 export async function complete(
   deps: CompleteDeps,
   request: CompletionRequest,
@@ -182,11 +209,46 @@ export async function complete(
     throw new AiNotConfiguredError("no_credential", procedure, provider);
   }
 
+  // Both limits are checked before the request is built, so a refusal never
+  // reaches the provider.
+  const promptChars = request.system.length + request.user.length;
+  if (promptChars > MAX_PROMPT_CHARS) {
+    throw new AiRequestTooLargeError(
+      "prompt_chars",
+      MAX_PROMPT_CHARS,
+      promptChars,
+      procedure,
+      provider,
+      model,
+    );
+  }
+  const reasoning = reasoningFields(provider, model, reasoningLevel);
+  const limit = maxTokensFor(
+    provider,
+    model,
+    reasoningLevel,
+    reasoning,
+    request.maxTokens,
+  );
+  // Negated so NaN is refused too: JSON sends it as null, which a provider
+  // takes as no limit at all.
+  if (!(limit <= MAX_OUTPUT_TOKENS)) {
+    throw new AiRequestTooLargeError(
+      "output_tokens",
+      MAX_OUTPUT_TOKENS,
+      limit,
+      procedure,
+      provider,
+      model,
+    );
+  }
+
   const call = buildRequest(
     provider,
     model,
     credential,
-    reasoningLevel,
+    reasoning,
+    limit,
     request,
   );
   if (call === null) {
@@ -378,6 +440,18 @@ function openRouterReasoningFamily(
 // documents a figure per level, and a limit is a ceiling, not a charge.
 export const REASONING_TOKEN_ALLOWANCE = 25_000;
 
+// The most a prompt (system + user, in characters) may be, whichever caller
+// sends it: about 50k tokens, room for a 200-line import preview and the
+// visible text of a normal recipe page. A caller with more trims it itself;
+// complete() refuses rather than cut.
+export const MAX_PROMPT_CHARS = 200_000;
+
+// The most output tokens ever sent to a provider, checked on the limit as
+// sent, after maxTokensFor(). Several current models refuse a larger one.
+// With reasoning on this leaves an answer of up to 7,000 tokens, or 6,399 on
+// OpenRouter's Anthropic models at high; with it off, 32,000.
+export const MAX_OUTPUT_TOKENS = 32_000;
+
 // OpenRouter's thinking budget for an Anthropic model at each effort, as its
 // share of max_tokens: budget_tokens = max(min(max_tokens * share, 128000),
 // 1024), per its reasoning tokens docs.
@@ -434,17 +508,11 @@ function buildRequest(
   provider: AiProvider,
   model: string,
   credential: string,
-  reasoningLevel: AiReasoningLevel | null,
+  reasoning: Record<string, unknown>,
+  // From maxTokensFor(), already checked against MAX_OUTPUT_TOKENS.
+  limit: number,
   { system, user, maxTokens }: CompletionRequest,
 ): ProviderRequest | null {
-  const reasoning = reasoningFields(provider, model, reasoningLevel);
-  const limit = maxTokensFor(
-    provider,
-    model,
-    reasoningLevel,
-    reasoning,
-    maxTokens,
-  );
   if (provider === "anthropic") {
     return {
       url: ANTHROPIC_URL,
