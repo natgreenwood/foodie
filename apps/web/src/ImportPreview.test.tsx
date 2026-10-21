@@ -606,6 +606,63 @@ describe("ImportPreview", () => {
     ]);
   });
 
+  // NATG-373: the parser's notes are only "500ml", so keeping them alone
+  // would lose "pint".
+  it.each([
+    ["unit_ambiguous", "pint", "500ml"],
+    ["unit_unmatched", "pint", "500ml"],
+  ])(
+    "keeps the page's unit with No unit on a %s line",
+    async (flag, unitText, notes) => {
+      const milk = {
+        position: 1,
+        rawText: "1 pint (500ml) milk",
+        quantity: "1",
+        quantityText: "1",
+        unit: null,
+        unitText,
+        ingredientText: "milk",
+        prepNotes: null,
+        notes,
+        section: null,
+        flags: [flag],
+        ingredientId: 80,
+        candidates: [
+          { ingredientId: 80, name: "milk", locale: "en-GB", similarity: 1 },
+        ],
+      };
+      const fetchMock = stubApi({
+        ...previewOf([milk]),
+        "POST /api/imports": () =>
+          respondWith(201, { id: 5, title: "x", alreadyImported: false }),
+      });
+      render(<ImportPreview locale="en-GB" />);
+      const user = await importUrl();
+
+      await user.selectOptions(
+        await screen.findByLabelText("Unit for 1 pint (500ml) milk"),
+        "No unit (keep the page’s text in notes)",
+      );
+      expect(line(1).getByText("Notes: 1 pint (500ml) milk")).toBeDefined();
+      await user.click(saveButton());
+
+      await waitFor(() => expect(window.location.pathname).toBe("/recipes/5"));
+      const body = bodyOf(fetchMock, "POST /api/imports") as {
+        recipe: { ingredients: unknown[] };
+      };
+      expect(body.recipe.ingredients).toEqual([
+        {
+          position: 1,
+          ingredientId: 80,
+          measurementId: null,
+          quantity: "1",
+          prepNotes: null,
+          notes: "1 pint (500ml) milk",
+        },
+      ]);
+    },
+  );
+
   it.each([
     ["½", "0.5"],
     ["1 1/2", "1.5"],

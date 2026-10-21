@@ -108,9 +108,16 @@ function writtenAmount(line: PreviewIngredient): string {
   return amount.replace(/[\s,]+$/, "") || line.rawText;
 }
 
-// What the page's text keeps as notes once the cook chooses "No unit".
+// What the page's text keeps as notes once the cook chooses "No unit": the
+// whole line, so the unit the page wrote is not lost with it ("1 pint
+// (500ml) milk", whose parser notes are only "500ml", NATG-373). A line
+// with no amount at all keeps the parser's notes ("to taste"), which is
+// all the page said about the amount.
 function pageNotes(line: PreviewIngredient): string {
-  return line.notes ?? line.rawText;
+  const onlyNoQuantity = amountFlags(line).every(
+    (flag) => flag === "no_quantity",
+  );
+  return onlyNoQuantity ? (line.notes ?? line.rawText) : line.rawText;
 }
 
 // The hint under a flagged line, for each amount flag it has.
