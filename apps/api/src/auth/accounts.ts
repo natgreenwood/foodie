@@ -150,6 +150,72 @@ export async function deleteSession(db: Db, token: string): Promise<void> {
   await db.delete(session).where(eq(session.id, sessionId(token)));
 }
 
+// A signed-in user making a change, and the session they make it through.
+export interface Actor {
+  userId: number;
+  sessionId: string;
+}
+
+// Re-checks, inside the transaction `t` that makes a change, that the actor
+// may still act: requireUser checked when the request arrived, but the body
+// can arrive much later, and in between the account may have been disabled,
+// demoted or signed out (SEC-1). The actor's profile as committed now, or
+// null when the account is gone or disabled or the session is gone or
+// expired.
+//
+// The actor's user row is locked in `mode`, so the check waits for any
+// disable, demotion or delete in flight, then sees its committed result, and
+// none can land until the change commits: both "update" and "share"
+// conflict with the UPDATE or DELETE that makes one. "update" is for a change
+// that will itself modify the user rows it locks (asAdmin). "share" is for
+// any other change (the catalogue writes): it does not conflict with the
+// KEY SHARE lock a foreign key check takes on the user, so a transaction
+// that inserts a row referencing the user (an import's recipe) cannot close
+// a lock cycle with this one (NATG-371). `otherUserId`'s row, when given, is
+// locked too, always in ascending id order, so two actors acting on each
+// other wait rather than deadlock. The session row is locked FOR SHARE so a
+// sign-out waits for the change as well. Call it before taking any other
+// lock in `t`.
+export async function lockActor(
+  t: Db,
+  actor: Actor,
+  mode: "update" | "share",
+  otherUserId: number | null = null,
+): Promise<Profile | null> {
+  const ids = [...new Set([actor.userId, otherUserId ?? actor.userId])].sort(
+    (a, b) => a - b,
+  );
+  let actorRow: (Profile & { disabledAt: Date | null }) | undefined;
+  for (const id of ids) {
+    const [row] = await t
+      .select({ ...profileColumns, disabledAt: user.disabledAt })
+      .from(user)
+      .where(eq(user.id, id))
+      .for(mode);
+    if (id === actor.userId) actorRow = row;
+  }
+  if (!actorRow || actorRow.disabledAt) return null;
+  const [live] = await t
+    .select({ id: session.id })
+    .from(session)
+    .where(
+      and(
+        eq(session.id, actor.sessionId),
+        eq(session.userId, actor.userId),
+        gt(session.expiresAt, sql`now()`),
+      ),
+    )
+    .for("share");
+  if (!live) return null;
+  return {
+    id: actorRow.id,
+    email: actorRow.email,
+    displayName: actorRow.displayName,
+    locale: actorRow.locale,
+    isAdmin: actorRow.isAdmin,
+  };
+}
+
 export type AdminBootstrapOutcome = "created" | "promoted" | "unchanged";
 
 // Makes sure the account configured by ADMIN_USER exists and is an admin.

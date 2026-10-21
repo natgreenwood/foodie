@@ -1,6 +1,16 @@
-import { asc, eq, sql, type SQL } from "drizzle-orm";
-import type { Db, Profile } from "../auth/accounts.js";
-import { ingredient, ingredientName, normalised } from "./schema.js";
+import { and, asc, count, eq, sql, type SQL } from "drizzle-orm";
+import {
+  lockActor,
+  type Actor,
+  type Db,
+  type Profile,
+} from "../auth/accounts.js";
+import {
+  ingredient,
+  ingredientName,
+  normalised,
+  recipeIngredient,
+} from "./schema.js";
 
 // The shared ingredient catalogue (NATG-210). Every signed-in user sees every
 // ingredient; created_by says who may change one. Seeded rows have none and
@@ -90,7 +100,8 @@ export function displayName(locale: string): SQL {
   `;
 }
 
-// The creator or an admin. Computed here so a client never re-implements it.
+// The creator or an admin. Computed here so a client never re-implements it,
+// and the one check every change to an ingredient makes (changeIngredient).
 export function canEditIngredient(
   viewer: Pick<Profile, "id" | "isAdmin">,
   createdBy: number | null,
@@ -122,6 +133,9 @@ export interface IngredientPage<T> {
 }
 
 export const PAGE_SIZE = 25;
+// The most names one ingredient may have, given on create or added since.
+// Real ingredients have a handful.
+export const MAX_NAMES = 20;
 // A word_similarity a name must beat to be a search hit: pg_trgm's default.
 // `cor` scores 0.75 against `coriander` and `corriander` 0.82; one letter
 // scores 0.5 against everything that starts with it, so it finds nothing.
@@ -420,4 +434,273 @@ async function findTakenName(
     ingredient: { id: Number(row.ingredient_id), name: row.display_name },
     name: { name: row.name, locale: row.locale },
   };
+}
+
+// Why a change to an ingredient was refused before anything was written:
+// the actor may no longer act at all (signed out, disabled), there is no
+// such ingredient, or the actor may not change it.
+export type EditRefusal = {
+  refused: "unauthenticated" | "not_found" | "forbidden";
+};
+
+// Runs `change` in a transaction if the actor may still act (lockActor),
+// there is an ingredient `id`, and the actor may change it by
+// canEditIngredient: the rule canEdit reports, reading created_by only, and
+// the actor's role as committed now, not as it was when the request
+// arrived (SEC-1). `change` gets that live profile as the editor.
+//
+// The actor's user row is locked first, FOR SHARE, then the ingredient's.
+// FOR SHARE still waits for, and holds off, a demotion, disable or delete of
+// the actor, but not the KEY SHARE lock a foreign key check takes on the
+// user: an import saving a recipe locks the ingredient and then, through
+// recipe.owner_id, the user, the opposite order, and with FOR UPDATE here
+// the two could deadlock (NATG-371). The ingredient lock
+// makes changes to one ingredient run one at a time (two canonical swaps in
+// a locale cannot interleave, two adds cannot both take the last free name),
+// and a recipe line cannot start using an ingredient that is being deleted:
+// its foreign key check waits for the lock.
+async function changeIngredient<T>(
+  db: Db,
+  actor: Actor,
+  id: number,
+  change: (tx: Db, editor: Profile) => Promise<T>,
+): Promise<EditRefusal | T> {
+  return db.transaction(async (tx) => {
+    const editor = await lockActor(tx, actor, "share");
+    if (!editor) return { refused: "unauthenticated" } as const;
+    const [row] = await tx
+      .select({ createdBy: ingredient.createdBy })
+      .from(ingredient)
+      .where(eq(ingredient.id, id))
+      .for("update");
+    if (!row) return { refused: "not_found" } as const;
+    if (!canEditIngredient(editor, row.createdBy)) {
+      return { refused: "forbidden" } as const;
+    }
+    return change(tx, editor);
+  });
+}
+
+// The ingredient as GET /ingredients/:id returns it, after a change to it in
+// the same transaction.
+async function changed(
+  tx: Db,
+  viewer: Profile,
+  id: number,
+): Promise<{ changed: IngredientDetail }> {
+  const found = await findIngredient(tx, viewer, id);
+  if (!found) throw new Error(`changed ingredient ${id} not found`);
+  return { changed: found };
+}
+
+export async function setIngredientCategory(
+  db: Db,
+  actor: Actor,
+  id: number,
+  category: string | null,
+): Promise<EditRefusal | { changed: IngredientDetail }> {
+  return changeIngredient(db, actor, id, async (tx, editor) => {
+    await tx.update(ingredient).set({ category }).where(eq(ingredient.id, id));
+    return changed(tx, editor, id);
+  });
+}
+
+// Adds a name as the editor's, source 'user'. It is canonical if the
+// ingredient has no canonical name in its locale yet, as the first name in
+// a locale is on create. A name already in the catalogue in its locale is
+// not added, and the outcome names it, so a retry of an add that succeeded
+// finds this ingredient, even once that add filled the ingredient. Nor is
+// a name added to an ingredient that has MAX_NAMES already (SEC-2): counted
+// under the ingredient lock, so simultaneous adds cannot pass it.
+export async function addIngredientName(
+  db: Db,
+  actor: Actor,
+  id: number,
+  name: { name: string; locale: string },
+): Promise<
+  | EditRefusal
+  | { changed: IngredientDetail }
+  | { taken: TakenName | null }
+  | { nameLimit: true }
+> {
+  return changeIngredient(db, actor, id, async (tx, editor) => {
+    const [{ names } = { names: 0 }] = await tx
+      .select({ names: count() })
+      .from(ingredientName)
+      .where(eq(ingredientName.ingredientId, id));
+    if (names >= MAX_NAMES) {
+      const taken = await findTakenName(tx, editor, [name]);
+      return taken ? { taken } : ({ nameLimit: true } as const);
+    }
+    const [canonical] = await tx
+      .select({ id: ingredientName.id })
+      .from(ingredientName)
+      .where(
+        and(
+          eq(ingredientName.ingredientId, id),
+          eq(ingredientName.locale, name.locale),
+          eq(ingredientName.isCanonical, true),
+        ),
+      );
+    const inserted = await tx
+      .insert(ingredientName)
+      .values({
+        ingredientId: id,
+        ...name,
+        isCanonical: !canonical,
+        source: "user",
+        createdBy: editor.id,
+      })
+      .onConflictDoNothing()
+      .returning({ id: ingredientName.id });
+    if (inserted.length === 0) {
+      return { taken: await findTakenName(tx, editor, [name]) };
+    }
+    return changed(tx, editor, id);
+  });
+}
+
+// A change to one name: new text, and or making it the canonical name in
+// its locale. A name cannot be made not canonical: making another canonical
+// does that, and a locale is never left without one that way.
+export interface NameChange {
+  name?: string;
+  isCanonical?: true;
+}
+
+// Whether `err` is Postgres refusing a write for breaking `constraint`.
+function violates(err: unknown, constraint: string): boolean {
+  const cause = err instanceof Error ? err.cause : undefined;
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    (cause as { code?: unknown }).code === "23505" &&
+    (cause as { constraint?: unknown }).constraint === constraint
+  );
+}
+
+// Renaming to a name already in the catalogue in the name's locale (another
+// of this ingredient's, too) changes nothing, and the outcome names it.
+export async function changeIngredientName(
+  db: Db,
+  actor: Actor,
+  id: number,
+  nameId: number,
+  change: NameChange,
+): Promise<
+  | EditRefusal
+  | { changed: IngredientDetail }
+  | { taken: TakenName | null }
+  | { nameNotFound: true }
+> {
+  return changeIngredient(db, actor, id, async (tx, editor) => {
+    const [row] = await tx
+      .select({
+        locale: ingredientName.locale,
+        isCanonical: ingredientName.isCanonical,
+      })
+      .from(ingredientName)
+      .where(
+        and(eq(ingredientName.id, nameId), eq(ingredientName.ingredientId, id)),
+      );
+    if (!row) return { nameNotFound: true } as const;
+    if (change.name !== undefined) {
+      const name = change.name;
+      try {
+        // A savepoint, so a clash leaves the transaction usable to find
+        // the name it clashed with.
+        await tx.transaction((sp) =>
+          sp
+            .update(ingredientName)
+            .set({ name })
+            .where(eq(ingredientName.id, nameId)),
+        );
+      } catch (err) {
+        if (!violates(err, "ingredient_name_locale_name_key")) throw err;
+        return {
+          taken: await findTakenName(tx, editor, [
+            { name, locale: row.locale },
+          ]),
+        };
+      }
+    }
+    if (change.isCanonical && !row.isCanonical) {
+      // Unset, then set: ingredient_name_canonical_key is checked row by
+      // row, so one statement swapping both could see two at once.
+      await tx
+        .update(ingredientName)
+        .set({ isCanonical: false })
+        .where(
+          and(
+            eq(ingredientName.ingredientId, id),
+            eq(ingredientName.locale, row.locale),
+            eq(ingredientName.isCanonical, true),
+          ),
+        );
+      await tx
+        .update(ingredientName)
+        .set({ isCanonical: true })
+        .where(eq(ingredientName.id, nameId));
+    }
+    return changed(tx, editor, id);
+  });
+}
+
+// Deletes one name. An ingredient's last name is kept: an ingredient no one
+// can find or read is no use. A canonical name passes canonical to another
+// name in its locale, if there is one, by name order as findIngredient
+// lists them.
+export async function deleteIngredientName(
+  db: Db,
+  actor: Actor,
+  id: number,
+  nameId: number,
+): Promise<
+  EditRefusal | { deleted: true } | { lastName: true } | { nameNotFound: true }
+> {
+  return changeIngredient(db, actor, id, async (tx) => {
+    const names = await tx
+      .select({
+        id: ingredientName.id,
+        locale: ingredientName.locale,
+        isCanonical: ingredientName.isCanonical,
+      })
+      .from(ingredientName)
+      .where(eq(ingredientName.ingredientId, id))
+      .orderBy(asc(ingredientName.normalisedName), asc(ingredientName.id));
+    const target = names.find((n) => n.id === nameId);
+    if (!target) return { nameNotFound: true } as const;
+    if (names.length === 1) return { lastName: true } as const;
+    await tx.delete(ingredientName).where(eq(ingredientName.id, nameId));
+    const heir = target.isCanonical
+      ? names.find((n) => n.id !== nameId && n.locale === target.locale)
+      : undefined;
+    if (heir) {
+      await tx
+        .update(ingredientName)
+        .set({ isCanonical: true })
+        .where(eq(ingredientName.id, heir.id));
+    }
+    return { deleted: true } as const;
+  });
+}
+
+// Deletes the ingredient and its names, unless a recipe line uses it.
+// Checked first rather than left to recipe_ingredient's restrict, whose
+// error says nothing a client can act on.
+export async function deleteIngredient(
+  db: Db,
+  actor: Actor,
+  id: number,
+): Promise<EditRefusal | { deleted: true } | { inUse: true }> {
+  return changeIngredient(db, actor, id, async (tx) => {
+    const [used] = await tx
+      .select({ id: recipeIngredient.id })
+      .from(recipeIngredient)
+      .where(eq(recipeIngredient.ingredientId, id))
+      .limit(1);
+    if (used) return { inUse: true } as const;
+    await tx.delete(ingredient).where(eq(ingredient.id, id));
+    return { deleted: true } as const;
+  });
 }

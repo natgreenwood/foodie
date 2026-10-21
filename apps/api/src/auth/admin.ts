@@ -1,28 +1,17 @@
-import { and, eq, gt, isNotNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { session, user } from "../db/schema.js";
-import type { Db } from "./accounts.js";
+import { lockActor, type Actor, type Db } from "./accounts.js";
 
 // The admin making a change, and the session they make it through.
-export interface AdminActor {
-  userId: number;
-  sessionId: string;
-}
+export type AdminActor = Actor;
 
 // Why asAdmin refused: the actor's session is gone or their account is
 // disabled (unauthenticated), or they are no longer an admin (forbidden).
 export type AdminRefusal = "unauthenticated" | "forbidden";
 
-// Runs one privileged change in a transaction, after re-checking that the
-// actor is still an enabled admin with a live session. requireAdmin checked
-// that when the request arrived, but the body can arrive much later, and in
-// between another admin may have disabled or demoted the actor (SEC-1).
-//
-// The actor's user row is locked FOR UPDATE, so the check waits for any
-// disable or revoke of the actor in flight, then sees its committed result,
-// and nothing can change the actor until this change commits. The target's
-// row, when there is one, is locked too, always in ascending id order, so
-// two admins acting on each other wait rather than deadlock. The session row
-// is locked FOR SHARE so a sign-out waits for the change as well.
+// Runs one privileged change in a transaction, after re-checking with
+// lockActor that the actor is still an enabled admin with a live session
+// (SEC-1). The target's row, when there is one, is locked with the actor's.
 export async function asAdmin<T>(
   db: Db,
   actor: AdminActor,
@@ -30,32 +19,9 @@ export async function asAdmin<T>(
   work: (t: Db) => Promise<T>,
 ): Promise<{ refused: AdminRefusal } | { refused: null; value: T }> {
   return db.transaction(async (t) => {
-    const ids = [...new Set([actor.userId, targetId ?? actor.userId])].sort(
-      (a, b) => a - b,
-    );
-    let actorRow: { isAdmin: boolean; disabledAt: Date | null } | undefined;
-    for (const id of ids) {
-      const [row] = await t
-        .select({ isAdmin: user.isAdmin, disabledAt: user.disabledAt })
-        .from(user)
-        .where(eq(user.id, id))
-        .for("update");
-      if (id === actor.userId) actorRow = row;
-    }
-    if (!actorRow || actorRow.disabledAt) return { refused: "unauthenticated" };
-    const [live] = await t
-      .select({ id: session.id })
-      .from(session)
-      .where(
-        and(
-          eq(session.id, actor.sessionId),
-          eq(session.userId, actor.userId),
-          gt(session.expiresAt, sql`now()`),
-        ),
-      )
-      .for("share");
+    const live = await lockActor(t, actor, "update", targetId);
     if (!live) return { refused: "unauthenticated" };
-    if (!actorRow.isAdmin) return { refused: "forbidden" };
+    if (!live.isAdmin) return { refused: "forbidden" };
     return { refused: null, value: await work(t) };
   });
 }

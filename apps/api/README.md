@@ -73,6 +73,15 @@ dbTest("does something with the database", async ({ tx }) => {
   files that insert the same unique key can briefly wait on each other until
   one rolls back; they do not see each other's rows.
 
+### A test that must commit
+
+A race between two connections needs rows both can see, so it has to
+commit, and committed rows are seen by every other test file running at
+the same time. Such a file makes a database of its own with
+`recreateDatabase` from `src/test/global-setup.ts` and drops it with
+`dropDatabase` when it ends; `src/routes/ingredients-race.test.ts` does
+this. Its name must also end in `_test`.
+
 ### In CI
 
 `.github/workflows/ci.yml` runs Postgres as a GitHub Actions service container

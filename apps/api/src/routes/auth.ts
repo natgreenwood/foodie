@@ -12,6 +12,7 @@ import {
   deleteSession,
   sessionId,
   sessionUser,
+  type Actor,
   type Db,
   type Profile,
 } from "../auth/accounts.js";
@@ -76,9 +77,14 @@ export async function requireAdmin(
   }
 }
 
+// The signed-in user as the actor of a change, for lockActor.
+export function requestActor(request: FastifyRequest): Actor {
+  return { userId: request.user!.id, sessionId: request.sessionId! };
+}
+
 // The signed-in admin as the actor of a privileged change, for asAdmin.
 export function adminActor(request: FastifyRequest): AdminActor {
-  return { userId: request.user!.id, sessionId: request.sessionId! };
+  return requestActor(request);
 }
 
 // The answer when asAdmin finds the actor is no longer allowed to act: the
