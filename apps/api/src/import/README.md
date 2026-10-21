@@ -227,17 +227,17 @@ migration first or every import preview fails.
 
 ## Reversing the ai_extraction migration (manual)
 
-To undo `drizzle/0014_ai_extraction.sql`, while it is still the latest
+To undo `drizzle/0016_ai_extraction.sql`, while it is still the latest
 migration applied, run against the database:
 
 ```sql
 begin;
 drop table ai_extraction;
-delete from drizzle.__drizzle_migrations where created_at = 1792456346645;
+delete from drizzle.__drizzle_migrations where created_at = 1792547333159;
 commit;
 ```
 
-`1792456346645` is the `when` of `0014_ai_extraction` in
+`1792547333159` is the `when` of `0016_ai_extraction` in
 `drizzle/meta/_journal.json`. The table holds the only copy of every AI
 reading, so export it first if it may be wanted. Deploy code from before the
 migration first: this code writes to the table on every AI reading, and

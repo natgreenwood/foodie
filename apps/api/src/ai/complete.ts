@@ -108,12 +108,45 @@ export class AiNotConfiguredError extends Error {
   }
 }
 
+// - prompt_chars: system + user is over MAX_PROMPT_CHARS characters.
+// - output_tokens: the output limit that would be sent, after
+//   REASONING_TOKEN_ALLOWANCE and any OpenRouter scaling, is over
+//   MAX_OUTPUT_TOKENS.
+export type RequestLimit = "prompt_chars" | "output_tokens";
+
+// The request is over a fixed size limit, so the provider was never called.
+// Refused rather than cut short: a cut prompt silently changes what the model
+// is asked. Never carries the prompt.
+export class AiRequestTooLargeError extends Error {
+  override name = "AiRequestTooLargeError";
+  constructor(
+    readonly limit: RequestLimit,
+    readonly max: number,
+    readonly actual: number,
+    readonly procedure: string,
+    readonly provider: AiProvider,
+    readonly model: string,
+  ) {
+    super(
+      limit === "prompt_chars"
+        ? `prompt of ${actual} characters for ${procedure} on ${provider} ${model} is over the ${max}-character limit`
+        : `output limit of ${actual} tokens for ${procedure} on ${provider} ${model} is over the ${max}-token limit`,
+    );
+  }
+}
+
 // - unreachable: the request failed without a response (refused, DNS).
 // - timeout: no full response within the timeout.
 // - http_error: a non-2xx status.
-// - bad_response: a 2xx whose body is not the expected JSON, or too large.
+// - truncated: a 2xx whose answer stopped at the token limit (Anthropic
+//   stop_reason "max_tokens" or "model_context_window_exceeded", chat
+//   finish_reason "length"), whatever text it has. A cut-off answer is never returned: callers need all of it.
+// - bad_response: any other 2xx that is not an answer: a body that is not
+//   the expected JSON or is too large, no text or only whitespace, a refusal,
+//   an answer the provider filtered, or an error the provider reports in the
+//   body.
 export type ProviderFailureReason =
-  "unreachable" | "timeout" | "http_error" | "bad_response";
+  "unreachable" | "timeout" | "http_error" | "truncated" | "bad_response";
 
 // Never carries the credential, the Ollama base URL (which may hold a
 // password) or the prompt. Nothing from the provider's answer is quoted but
@@ -126,12 +159,14 @@ export class AiProviderError extends Error {
     readonly reason: ProviderFailureReason,
     // The provider's HTTP status; null if there was no response.
     readonly status: number | null,
-    // For http_error, the provider's error code (Anthropic's error.type; the
-    // OpenAI-compatible error.code, else error.type) when it is in
+    // For http_error, and for a bad_response the provider reported as an
+    // error in a 2xx body, the provider's error code (Anthropic's error.type;
+    // the OpenAI-compatible error.code, else error.type) when it is in
     // PROVIDER_ERROR_CODES; otherwise null.
     readonly code: string | null,
-    // For http_error, "HTTP <status>" and the code; otherwise what went wrong.
-    // Never the provider's own words.
+    // For http_error, "HTTP <status>" and the code; otherwise what went
+    // wrong, in our words, with the code when there is one. Never the
+    // provider's own words: not a refusal, not an error message.
     readonly providerMessage: string,
     // `cause`, when there is one, is only { name, code } of the caught error.
     options?: ErrorOptions,
@@ -145,12 +180,13 @@ export class AiProviderError extends Error {
   }
 }
 
-// The text the model answers `request` with, from the provider and model the
-// admin chose for `procedure`, or for `default` when the procedure has none,
-// at that selection's reasoning level where the provider and model take one.
-// Rejects with AiNotConfiguredError or AiProviderError. Database and
-// decryption errors are not caught. Not retried: a caller that retries pays
-// for another completion, nothing worse.
+// The text the model answers `request` with, whole and not blank, from the
+// provider and model the admin chose for `procedure`, or for `default` when
+// the procedure has none, at that selection's reasoning level where the
+// provider and model take one.
+// Rejects with AiNotConfiguredError, AiRequestTooLargeError or
+// AiProviderError. Database and decryption errors are not caught. Not
+// retried: a caller that retries pays for another completion, nothing worse.
 export async function complete(
   deps: CompleteDeps,
   request: CompletionRequest,
@@ -173,11 +209,46 @@ export async function complete(
     throw new AiNotConfiguredError("no_credential", procedure, provider);
   }
 
+  // Both limits are checked before the request is built, so a refusal never
+  // reaches the provider.
+  const promptChars = request.system.length + request.user.length;
+  if (promptChars > MAX_PROMPT_CHARS) {
+    throw new AiRequestTooLargeError(
+      "prompt_chars",
+      MAX_PROMPT_CHARS,
+      promptChars,
+      procedure,
+      provider,
+      model,
+    );
+  }
+  const reasoning = reasoningFields(provider, model, reasoningLevel);
+  const limit = maxTokensFor(
+    provider,
+    model,
+    reasoningLevel,
+    reasoning,
+    request.maxTokens,
+  );
+  // Negated so NaN is refused too: JSON sends it as null, which a provider
+  // takes as no limit at all.
+  if (!(limit <= MAX_OUTPUT_TOKENS)) {
+    throw new AiRequestTooLargeError(
+      "output_tokens",
+      MAX_OUTPUT_TOKENS,
+      limit,
+      procedure,
+      provider,
+      model,
+    );
+  }
+
   const call = buildRequest(
     provider,
     model,
     credential,
-    reasoningLevel,
+    reasoning,
+    limit,
     request,
   );
   if (call === null) {
@@ -257,9 +328,30 @@ export async function complete(
   if (body === null) {
     throw fail("bad_response", status, `over ${MAX_RESPONSE_BYTES} bytes`);
   }
+  // Checked before the text: a truncated or refused answer may still have
+  // some, and an empty one cut off at the token limit is a truncation.
+  const unanswered =
+    provider === "anthropic"
+      ? anthropicUnanswered(json)
+      : chatUnanswered(provider, json);
+  if (unanswered !== null) {
+    const { reason, message, code: raw } = unanswered;
+    const code = raw !== null && scrub(raw, secrets) === raw ? raw : null;
+    throw new AiProviderError(
+      provider,
+      model,
+      reason,
+      status,
+      code,
+      scrub(`${message}${code === null ? "" : ` (${code})`}`, secrets),
+    );
+  }
   const text = provider === "anthropic" ? anthropicText(json) : chatText(json);
   if (text === null) {
     throw fail("bad_response", status, "no text in the response");
+  }
+  if (text.trim() === "") {
+    throw fail("bad_response", status, "empty text in the response");
   }
   return { text, provider, model };
 }
@@ -348,6 +440,18 @@ function openRouterReasoningFamily(
 // documents a figure per level, and a limit is a ceiling, not a charge.
 export const REASONING_TOKEN_ALLOWANCE = 25_000;
 
+// The most a prompt (system + user, in characters) may be, whichever caller
+// sends it: about 50k tokens, room for a 200-line import preview and the
+// visible text of a normal recipe page. A caller with more trims it itself;
+// complete() refuses rather than cut.
+export const MAX_PROMPT_CHARS = 200_000;
+
+// The most output tokens ever sent to a provider, checked on the limit as
+// sent, after maxTokensFor(). Several current models refuse a larger one.
+// With reasoning on this leaves an answer of up to 7,000 tokens, or 6,399 on
+// OpenRouter's Anthropic models at high; with it off, 32,000.
+export const MAX_OUTPUT_TOKENS = 32_000;
+
 // OpenRouter's thinking budget for an Anthropic model at each effort, as its
 // share of max_tokens: budget_tokens = max(min(max_tokens * share, 128000),
 // 1024), per its reasoning tokens docs.
@@ -404,17 +508,11 @@ function buildRequest(
   provider: AiProvider,
   model: string,
   credential: string,
-  reasoningLevel: AiReasoningLevel | null,
+  reasoning: Record<string, unknown>,
+  // From maxTokensFor(), already checked against MAX_OUTPUT_TOKENS.
+  limit: number,
   { system, user, maxTokens }: CompletionRequest,
 ): ProviderRequest | null {
-  const reasoning = reasoningFields(provider, model, reasoningLevel);
-  const limit = maxTokensFor(
-    provider,
-    model,
-    reasoningLevel,
-    reasoning,
-    maxTokens,
-  );
   if (provider === "anthropic") {
     return {
       url: ANTHROPIC_URL,
@@ -575,6 +673,78 @@ function anthropicText(json: unknown): string | null {
     )
     .map((block) => block.text);
   return texts.length > 0 ? texts.join("") : null;
+}
+
+// Why a 2xx is not an answer whatever its text says, in our own fixed words;
+// `code` is a provider error code as errorCode accepts it.
+interface Unanswered {
+  reason: "truncated" | "bad_response";
+  message: string;
+  code: string | null;
+}
+
+const TRUNCATED: Unanswered = {
+  reason: "truncated",
+  message: "answer cut off at the token limit",
+  code: null,
+};
+const REFUSED: Unanswered = {
+  reason: "bad_response",
+  message: "model refused",
+  code: null,
+};
+const FILTERED: Unanswered = {
+  reason: "bad_response",
+  message: "answer filtered by the provider",
+  code: null,
+};
+
+// Messages API: the stop_reason of a refusal or a cut-off answer, whether
+// at max_tokens or at the end of the model's context window.
+function anthropicUnanswered(json: unknown): Unanswered | null {
+  if (!isRecord(json)) return null;
+  if (json.stop_reason === "refusal") return REFUSED;
+  if (
+    json.stop_reason === "max_tokens" ||
+    json.stop_reason === "model_context_window_exceeded"
+  ) {
+    return TRUNCATED;
+  }
+  return null;
+}
+
+// Chat completions: an error in the body, as OpenRouter sends when the
+// upstream fails after its 200 (top-level, or on the choice with
+// finish_reason "error"); a refusal; an answer the provider's content
+// filter stopped; or a cut-off answer.
+function chatUnanswered(
+  provider: AiProvider,
+  json: unknown,
+): Unanswered | null {
+  if (!isRecord(json)) return null;
+  const [first] = Array.isArray(json.choices)
+    ? (json.choices as unknown[])
+    : [];
+  const choice = isRecord(first) ? first : {};
+  if (
+    (json.error ?? null) !== null ||
+    (choice.error ?? null) !== null ||
+    choice.finish_reason === "error"
+  ) {
+    return {
+      reason: "bad_response",
+      message: "provider reported an error",
+      // Only a code from PROVIDER_ERROR_CODES. Not a numeric one, such as
+      // OpenRouter repeating an upstream 502: even three digits can be part
+      // of the prompt or the key, where the scrub of whole secrets misses it.
+      code: errorCode(provider, json) ?? errorCode(provider, choice),
+    };
+  }
+  const { refusal } = isRecord(choice.message) ? choice.message : {};
+  if (typeof refusal === "string" && refusal !== "") return REFUSED;
+  if (choice.finish_reason === "content_filter") return FILTERED;
+  if (choice.finish_reason === "length") return TRUNCATED;
+  return null;
 }
 
 // Chat completions: the first choice's message content.

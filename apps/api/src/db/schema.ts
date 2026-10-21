@@ -124,13 +124,28 @@ export const measurementName = pgTable(
 // One row per real-world ingredient. `id` is the IngredientID recipe lines
 // reference. Region-neutral attributes only; names are per locale, in
 // ingredient_name.
-export const ingredient = pgTable("ingredient", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  // Free text for now; a lookup table can come with shopping-list aisles.
-  category: text("category"),
-  // Provenance, for example seed, user or import.
-  source: text("source"),
-});
+export const ingredient = pgTable(
+  "ingredient",
+  {
+    id: bigint("id", { mode: "number" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    // Free text for now; a lookup table can come with shopping-list aisles.
+    category: text("category"),
+    // Provenance, for example seed, user or import.
+    source: text("source"),
+    // The user who created it; null for a prebuilt (seeded) row. The only
+    // thing the edit permission reads (NATG-210): the creator or an admin.
+    // Deleting the user leaves the row, now admin-only; cascading would hit
+    // recipe_ingredient's restrict and block the user delete.
+    createdBy: bigint("created_by", { mode: "number" }).references(
+      (): AnyPgColumn => user.id,
+      { onDelete: "set null" },
+    ),
+  },
+  // Serves the set-null on user delete.
+  (t) => [index("ingredient_created_by_idx").on(t.createdBy)],
+);
 
 // Every name an ingredient is found by, tagged with a BCP-47 locale: the same
 // text can mean different ingredients by region (`biscuit` in en-GB and
@@ -151,6 +166,12 @@ export const ingredientName = pgTable(
     locale: text("locale").notNull(),
     isCanonical: boolean("is_canonical").notNull().default(false),
     source: text("source"),
+    // Who added the name; null for a prebuilt (seeded) name. Deleting the
+    // user leaves the name, as on ingredient.
+    createdBy: bigint("created_by", { mode: "number" }).references(
+      (): AnyPgColumn => user.id,
+      { onDelete: "set null" },
+    ),
   },
   (t) => [
     // Serves exact lookup by locale and normalised name.
@@ -170,6 +191,8 @@ export const ingredientName = pgTable(
       .where(sql`${t.isCanonical}`),
     // Serves the join from ingredient and the cascade on delete.
     index("ingredient_name_ingredient_id_idx").on(t.ingredientId),
+    // Serves the set-null on user delete.
+    index("ingredient_name_created_by_idx").on(t.createdBy),
     check("ingredient_name_name_not_blank", sql`${t.normalisedName} <> ''`),
   ],
 );

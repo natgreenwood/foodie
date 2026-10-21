@@ -103,8 +103,22 @@
     {
       "idx": 14,
       "version": "7",
-      "when": 1792456346645,
-      "tag": "0014_ai_extraction",
+      "when": 1792406374388,
+      "tag": "0014_ingredient_created_by",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1792517590625,
+      "tag": "0015_seed_ingredient_catalogue",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1792547333159,
+      "tag": "0016_ai_extraction",
       "breakpoints": true
     }
   ]

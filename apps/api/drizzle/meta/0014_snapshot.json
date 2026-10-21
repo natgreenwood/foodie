@@ -1,87 +1,9 @@
 {
-  "id": "f9c1550a-6a8f-45e2-81ac-5944f6043e9d",
+  "id": "4c06e26d-0f62-4474-8dc9-4b7784f784cd",
   "prevId": "6bc6caaa-b571-4a4d-bea3-454c6353eba8",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
-    "public.ai_extraction": {
-      "name": "ai_extraction",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "bigint",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "ai_extraction_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "9223372036854775807",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "source_url": {
-          "name": "source_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "provider": {
-          "name": "provider",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "page_text": {
-          "name": "page_text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "raw_output": {
-          "name": "raw_output",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "outcome": {
-          "name": "outcome",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "ai_extraction_outcome_known": {
-          "name": "ai_extraction_outcome_known",
-          "value": "\"ai_extraction\".\"outcome\" IN ('accepted', 'ungrounded', 'no_recipe', 'unreadable')"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.ai_model_selection": {
       "name": "ai_model_selection",
       "schema": "",
@@ -212,10 +134,46 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
+      "indexes": {
+        "ingredient_created_by_idx": {
+          "name": "ingredient_created_by_idx",
+          "columns": [
+            {
+              "expression": "created_by",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "ingredient_created_by_user_id_fk": {
+          "name": "ingredient_created_by_user_id_fk",
+          "tableFrom": "ingredient",
+          "tableTo": "user",
+          "columnsFrom": [
+            "created_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -281,6 +239,12 @@
         "source": {
           "name": "source",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         }
@@ -359,6 +323,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "ingredient_name_created_by_idx": {
+          "name": "ingredient_name_created_by_idx",
+          "columns": [
+            {
+              "expression": "created_by",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -373,6 +352,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ingredient_name_created_by_user_id_fk": {
+          "name": "ingredient_name_created_by_user_id_fk",
+          "tableFrom": "ingredient_name",
+          "tableTo": "user",
+          "columnsFrom": [
+            "created_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

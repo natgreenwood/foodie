@@ -135,19 +135,22 @@ describe("apiErrorHandler", () => {
 
   it("logs no property name a function was called through", async () => {
     const { app, logLines } = start();
+    // A constant, also sent in the URL: the method called is never chosen by
+    // the request.
+    const KIND = "kind-7e2b";
     const handlers: Record<string, () => never> = {};
-    app.get<{ Params: { kind: string } }>("/recipes/kind/:kind", (request) => {
-      handlers[request.params.kind] = function () {
+    app.get("/recipes/kind/:kind", () => {
+      handlers[KIND] = function () {
         throw new Error("unexpected kind");
       };
-      return handlers[request.params.kind]!();
+      return handlers[KIND]();
     });
 
-    await app.inject({ method: "GET", url: "/recipes/kind/kind-7e2b" });
+    await app.inject({ method: "GET", url: `/recipes/kind/${KIND}` });
 
     const failure = logLines.find((l) => l.msg === "recipes: request failed");
     expect(failure).toBeDefined();
-    expect(JSON.stringify(failure)).not.toContain("kind-7e2b");
+    expect(JSON.stringify(failure)).not.toContain(KIND);
   });
 
   it("answers an unparseable body with 400 invalid_request", async () => {

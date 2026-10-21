@@ -1,7 +1,7 @@
 import type { FastifyPluginCallback, FastifyReply } from "fastify";
 import {
   deleteOwnedRecipe,
-  findOwnedRecipe,
+  findOwnedRecipeDetail,
   listOwnedRecipes,
   type Recipe,
 } from "../db/recipes.js";
@@ -40,12 +40,13 @@ export const recipeRoutes: FastifyPluginCallback<AuthDeps> = (
     return { recipes: await listOwnedRecipes(db, request.user!) };
   });
 
+  // The recipe with its ingredient lines, steps and tags (RecipeDetail).
   app.get<{ Params: { id: string } }>(
     "/recipes/:id",
     async (request, reply) => {
       const id = parseRecipeId(request.params.id);
       const found =
-        id === null ? null : await findOwnedRecipe(db, request.user!, id);
+        id === null ? null : await findOwnedRecipeDetail(db, request.user!, id);
       if (!found) return notFound(reply);
       return found;
     },
