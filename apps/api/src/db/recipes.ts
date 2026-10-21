@@ -1,5 +1,6 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
-import type { Db } from "../auth/accounts.js";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import type { Db, Profile } from "../auth/accounts.js";
+import { displayName } from "./ingredients.js";
 import {
   ingredient,
   measurement,
@@ -45,6 +46,91 @@ export async function findOwnedRecipe(
     .from(recipe)
     .where(ownedBy(owner, recipeId));
   return row ?? null;
+}
+
+// An ingredient line as the recipe page shows it. The ingredient's name and
+// locale are its display name to the viewer (see displayName); null only for
+// an ingredient with no names. quantity is numeric text, as stored.
+export interface RecipeDetailLine {
+  position: number;
+  ingredient: { id: number; name: string | null; locale: string | null };
+  measurementId: number | null;
+  quantity: string | null;
+  prepNotes: string | null;
+  notes: string | null;
+}
+
+// A recipe with its lines and steps by position and its tags as entered, by
+// normalised tag. Only GET /recipes/:id returns this; lists keep Recipe.
+export interface RecipeDetail extends Recipe {
+  ingredients: RecipeDetailLine[];
+  steps: { position: number; text: string }[];
+  tags: string[];
+}
+
+interface LineRow extends Record<string, unknown> {
+  position: number;
+  ingredient_id: number | string;
+  name: string | null;
+  locale: string | null;
+  measurement_id: number | string | null;
+  quantity: string | null;
+  prep_notes: string | null;
+  notes: string | null;
+}
+
+// The recipe with its lines, steps and tags if `viewer` owns it; null as for
+// findOwnedRecipe. Ownership first, then one query per table, all on one
+// snapshot, so a recipe deleted meanwhile is either whole or not found.
+export function findOwnedRecipeDetail(
+  db: Db,
+  viewer: Pick<Profile, "id" | "locale">,
+  recipeId: number,
+): Promise<RecipeDetail | null> {
+  return db.transaction(
+    async (t) => {
+      const found = await findOwnedRecipe(t, viewer, recipeId);
+      if (!found) return null;
+      const { rows: lines } = await t.execute<LineRow>(sql`
+        select l.position, i.id as ingredient_id, d.name, d.locale,
+          l.measurement_id, l.quantity, l.prep_notes, l.notes
+        from recipe_ingredient l
+        join ingredient i on i.id = l.ingredient_id
+        left join lateral (${displayName(viewer.locale)}) d on true
+        where l.recipe_id = ${recipeId}
+        order by l.position
+      `);
+      const steps = await t
+        .select({ position: recipeStep.position, text: recipeStep.text })
+        .from(recipeStep)
+        .where(eq(recipeStep.recipeId, recipeId))
+        .orderBy(asc(recipeStep.position));
+      const tags = await t
+        .select({ tag: recipeTag.tag })
+        .from(recipeTag)
+        .where(eq(recipeTag.recipeId, recipeId))
+        .orderBy(asc(recipeTag.normalisedTag));
+      return {
+        ...found,
+        ingredients: lines.map((row) => ({
+          position: row.position,
+          ingredient: {
+            id: Number(row.ingredient_id),
+            name: row.name,
+            locale: row.locale,
+          },
+          measurementId:
+            row.measurement_id === null ? null : Number(row.measurement_id),
+          quantity: row.quantity,
+          prepNotes: row.prep_notes,
+          notes: row.notes,
+        })),
+        steps,
+        tags: tags.map((row) => row.tag),
+      };
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
 }
 
 // The owner's recipes, newest first.
