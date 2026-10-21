@@ -17,6 +17,8 @@ export type ApiErrorCode =
   | "rate_limited"
   | "not_found"
   | "name_taken"
+  | "last_name"
+  | "in_use"
   | "invalid_lines"
   | "invalid_steps"
   | "unresolved_lines"

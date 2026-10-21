@@ -1,10 +1,16 @@
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import type { LightMyRequestResponse as Response } from "fastify";
 import { describe, expect, onTestFinished, test } from "vitest";
 import { buildApp } from "../app.js";
 import { createSession } from "../auth/accounts.js";
 import { PAGE_SIZE } from "../db/ingredients.js";
-import { ingredient, ingredientName, user } from "../db/schema.js";
+import {
+  ingredient,
+  ingredientName,
+  recipe,
+  recipeIngredient,
+  user,
+} from "../db/schema.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE } from "./auth.js";
 import { parseListQuery } from "./ingredients.js";
@@ -24,7 +30,7 @@ function start(tx: TestTransaction) {
   onTestFinished(() => app.close());
 
   const request = (
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PATCH" | "DELETE",
     url: string,
     token?: string,
     payload?: unknown,
@@ -108,6 +114,11 @@ describe("signed out", () => {
     ["GET", "/ingredients?q=cor"],
     ["GET", "/ingredients/1"],
     ["POST", "/ingredients"],
+    ["PATCH", "/ingredients/1"],
+    ["DELETE", "/ingredients/1"],
+    ["POST", "/ingredients/1/names"],
+    ["PATCH", "/ingredients/1/names/1"],
+    ["DELETE", "/ingredients/1/names/1"],
   ] as const)("%s %s answers 401", async ([method, url], { tx }) => {
     const { request } = start(tx);
 
@@ -900,4 +911,738 @@ describe("POST /ingredients", () => {
       message: "locale must be a BCP-47 language tag",
     });
   });
+});
+
+interface DetailBody {
+  id: number;
+  category: string | null;
+  canEdit: boolean;
+  names: { id: number; name: string; locale: string; isCanonical: boolean }[];
+}
+
+// The ingredient and its names as stored, to show a refused write changed
+// nothing.
+async function stored(tx: TestTransaction, id: number) {
+  return {
+    ingredient: await tx.select().from(ingredient).where(eq(ingredient.id, id)),
+    names: await tx
+      .select()
+      .from(ingredientName)
+      .where(eq(ingredientName.ingredientId, id))
+      .orderBy(asc(ingredientName.id)),
+  };
+}
+
+async function nameIds(tx: TestTransaction, id: number) {
+  const names = await tx
+    .select({ id: ingredientName.id, name: ingredientName.name })
+    .from(ingredientName)
+    .where(eq(ingredientName.ingredientId, id));
+  return Object.fromEntries(names.map((n) => [n.name, n.id]));
+}
+
+async function useInRecipe(
+  tx: TestTransaction,
+  ownerId: number,
+  ingredientId: number,
+) {
+  const [row] = await tx
+    .insert(recipe)
+    .values({ ownerId, title: "stew" })
+    .returning({ id: recipe.id });
+  if (!row) throw new Error("recipe insert returned no row");
+  await tx
+    .insert(recipeIngredient)
+    .values({ recipeId: row.id, position: 1, ingredientId });
+}
+
+describe("who may change an ingredient", () => {
+  // Each write, on an ingredient with the names `${tag}` (canonical) and
+  // `${tag} seeds`, both en-GB, and the status it answers when allowed.
+  const writes: [
+    string,
+    (
+      id: number,
+      names: Record<string, number>,
+      tag: string,
+    ) => [method: "POST" | "PATCH" | "DELETE", url: string, body?: unknown],
+    number,
+  ][] = [
+    [
+      "PATCH /ingredients/:id",
+      (id) => ["PATCH", `/ingredients/${id}`, { category: "spices" }],
+      200,
+    ],
+    ["DELETE /ingredients/:id", (id) => ["DELETE", `/ingredients/${id}`], 204],
+    [
+      "POST /ingredients/:id/names",
+      (id, _, tag) => [
+        "POST",
+        `/ingredients/${id}/names`,
+        { name: `${tag} powder` },
+      ],
+      201,
+    ],
+    [
+      "PATCH /ingredients/:id/names/:nameId rename",
+      (id, names, tag) => [
+        "PATCH",
+        `/ingredients/${id}/names/${names[`${tag} seeds`]}`,
+        { name: `${tag} pods` },
+      ],
+      200,
+    ],
+    [
+      "PATCH /ingredients/:id/names/:nameId canonical",
+      (id, names, tag) => [
+        "PATCH",
+        `/ingredients/${id}/names/${names[`${tag} seeds`]}`,
+        { isCanonical: true },
+      ],
+      200,
+    ],
+    [
+      "DELETE /ingredients/:id/names/:nameId",
+      (id, names, tag) => [
+        "DELETE",
+        `/ingredients/${id}/names/${names[`${tag} seeds`]}`,
+      ],
+      204,
+    ],
+  ];
+
+  dbTest.for(writes)(
+    "%s: the creator and an admin, or only an admin for a prebuilt row",
+    async ([, write, allowedStatus], { tx }) => {
+      const { request } = start(tx);
+      const creator = await signedInUser(tx);
+      const other = await signedInUser(tx);
+      const admin = await signedInUser(tx, { isAdmin: true });
+
+      const cases: [string, TestUser, "user" | "prebuilt", boolean][] = [
+        ["creator", creator, "user", true],
+        ["creator", creator, "prebuilt", false],
+        ["other", other, "user", false],
+        ["other", other, "prebuilt", false],
+        ["admin", admin, "user", true],
+        ["admin", admin, "prebuilt", true],
+      ];
+      for (const [who, actor, kind, allowed] of cases) {
+        const tag = `cardamom ${who} ${kind}`;
+        const id = await newIngredient(
+          tx,
+          [
+            { name: tag, locale: "en-GB" },
+            { name: `${tag} seeds`, locale: "en-GB" },
+          ],
+          { createdBy: kind === "user" ? creator.id : null },
+        );
+        const [method, url, body] = write(id, await nameIds(tx, id), tag);
+        const canEdit = (
+          await request("GET", `/ingredients/${id}`, actor.token)
+        ).json<DetailBody>().canEdit;
+        const before = await stored(tx, id);
+
+        const res = await request(method, url, actor.token, body);
+
+        expect([who, kind, res.statusCode]).toEqual([
+          who,
+          kind,
+          allowed ? allowedStatus : 403,
+        ]);
+        // The write and canEdit share one rule.
+        expect(canEdit).toBe(allowed);
+        if (!allowed) {
+          expect(res.json()).toEqual({
+            error: "forbidden",
+            message: "only the ingredient's creator or an admin can change it",
+          });
+          expect(await stored(tx, id)).toEqual(before);
+        }
+      }
+    },
+  );
+
+  dbTest("reads created_by, not source", async ({ tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    const [userSourced] = await tx
+      .insert(ingredient)
+      .values({ source: "user", createdBy: null })
+      .returning({ id: ingredient.id });
+    const [seedSourced] = await tx
+      .insert(ingredient)
+      .values({ source: "seed", createdBy: me.id })
+      .returning({ id: ingredient.id });
+
+    const refused = await request(
+      "PATCH",
+      `/ingredients/${userSourced!.id}`,
+      me.token,
+      { category: "spices" },
+    );
+    const allowed = await request(
+      "PATCH",
+      `/ingredients/${seedSourced!.id}`,
+      me.token,
+      { category: "spices" },
+    );
+
+    expect(refused.statusCode).toBe(403);
+    expect(allowed.statusCode).toBe(200);
+  });
+
+  dbTest.for([
+    ["PATCH", "/ingredients/{id}", { category: "spices" }],
+    ["DELETE", "/ingredients/{id}", undefined],
+    ["POST", "/ingredients/{id}/names", { name: "mace" }],
+    ["PATCH", "/ingredients/{id}/names/1", { isCanonical: true }],
+    ["DELETE", "/ingredients/{id}/names/1", undefined],
+  ] as const)(
+    "%s %s answers 404 for an ingredient that is not there",
+    async ([method, url, body], { tx }) => {
+      const { request } = start(tx);
+      const admin = await signedInUser(tx, { isAdmin: true });
+
+      for (const id of ["abc", "0", "99999999999999999999", "999999999"]) {
+        const res = await request(
+          method,
+          url.replace("{id}", id),
+          admin.token,
+          body,
+        );
+        expect(res.statusCode).toBe(404);
+        expect(res.json()).toEqual({
+          error: "not_found",
+          message: "ingredient not found",
+        });
+      }
+    },
+  );
+});
+
+describe("PATCH /ingredients/:id", () => {
+  dbTest("sets the category, and null clears it", async ({ tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    const id = await newIngredient(tx, [{ name: "sumac", locale: "en-GB" }], {
+      createdBy: me.id,
+    });
+
+    const set = await request("PATCH", `/ingredients/${id}`, me.token, {
+      category: " spices ",
+    });
+    const again = await request("PATCH", `/ingredients/${id}`, me.token, {
+      category: " spices ",
+    });
+
+    expect(set.statusCode).toBe(200);
+    expect(set.json()).toEqual({
+      id,
+      category: "spices",
+      source: "user",
+      canEdit: true,
+      names: [expect.objectContaining({ name: "sumac", locale: "en-GB" })],
+    });
+    expect(again.json()).toEqual(set.json());
+
+    const cleared = await request("PATCH", `/ingredients/${id}`, me.token, {
+      category: null,
+    });
+    expect(cleared.json()).toMatchObject({ category: null });
+  });
+
+  dbTest.for([
+    ["no category field", {}],
+    ["an unknown field", { category: "spices", source: "seed" }],
+    ["a blank category", { category: " " }],
+    ["a long category", { category: "a".repeat(101) }],
+    ["a category that is not text", { category: 3 }],
+    ["a body that is not an object", ["spices"]],
+  ] as const)("answers 400 to %s", async ([, body], { tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    const id = await newIngredient(tx, [{ name: "sumac", locale: "en-GB" }], {
+      createdBy: me.id,
+    });
+
+    const res = await request("PATCH", `/ingredients/${id}`, me.token, body);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: "invalid_request" });
+  });
+});
+
+describe("POST /ingredients/:id/names", () => {
+  dbTest(
+    "adds the name as the caller's, canonical only if first in its locale",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const creator = await signedInUser(tx);
+      const admin = await signedInUser(tx, { isAdmin: true, locale: "en-US" });
+      const id = await newIngredient(
+        tx,
+        [{ name: "coriander", locale: "en-GB" }],
+        { createdBy: creator.id },
+      );
+
+      const synonym = await request(
+        "POST",
+        `/ingredients/${id}/names`,
+        admin.token,
+        { name: " coriander leaf ", locale: "en-gb" },
+      );
+      const firstInLocale = await request(
+        "POST",
+        `/ingredients/${id}/names`,
+        admin.token,
+        { name: "cilantro" },
+      );
+
+      expect(synonym.statusCode).toBe(201);
+      expect(firstInLocale.statusCode).toBe(201);
+      expect(firstInLocale.json<DetailBody>().names).toEqual([
+        expect.objectContaining({
+          name: "coriander",
+          locale: "en-GB",
+          isCanonical: true,
+        }),
+        expect.objectContaining({
+          name: "coriander leaf",
+          locale: "en-GB",
+          isCanonical: false,
+        }),
+        expect.objectContaining({
+          name: "cilantro",
+          locale: "en-US",
+          isCanonical: true,
+        }),
+      ]);
+      const added = await tx
+        .select({
+          name: ingredientName.name,
+          createdBy: ingredientName.createdBy,
+          source: ingredientName.source,
+        })
+        .from(ingredientName)
+        .where(eq(ingredientName.ingredientId, id))
+        .orderBy(asc(ingredientName.id));
+      expect(added.slice(1)).toEqual([
+        { name: "coriander leaf", createdBy: admin.id, source: "user" },
+        { name: "cilantro", createdBy: admin.id, source: "user" },
+      ]);
+    },
+  );
+
+  dbTest(
+    "answers 409 with the ingredient that has the name, and to a retry",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+      const coriander = await newIngredient(tx, [
+        { name: "Coriander", locale: "en-GB" },
+      ]);
+      const id = await newIngredient(
+        tx,
+        [{ name: "parsley", locale: "en-GB" }],
+        {
+          createdBy: me.id,
+        },
+      );
+      const before = await stored(tx, id);
+
+      const clash = await request(
+        "POST",
+        `/ingredients/${id}/names`,
+        me.token,
+        {
+          name: "coriander ",
+        },
+      );
+
+      expect(clash.statusCode).toBe(409);
+      expect(clash.json()).toEqual({
+        error: "name_taken",
+        message: 'en-GB already has the name "Coriander"',
+        ingredient: { id: coriander, name: "Coriander" },
+        name: { name: "Coriander", locale: "en-GB" },
+      });
+      expect(await stored(tx, id)).toEqual(before);
+
+      const add = { name: "flat-leaf parsley" };
+      const first = await request(
+        "POST",
+        `/ingredients/${id}/names`,
+        me.token,
+        add,
+      );
+      const retry = await request(
+        "POST",
+        `/ingredients/${id}/names`,
+        me.token,
+        add,
+      );
+      expect(first.statusCode).toBe(201);
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json()).toMatchObject({
+        ingredient: { id, name: "parsley" },
+      });
+    },
+  );
+
+  dbTest.for([
+    ["a malformed locale", { name: "mace", locale: "en_GB!" }],
+    ["a locale that is not text", { name: "mace", locale: 1 }],
+    ["a blank name", { name: "  " }],
+    ["a name with NUL", { name: "ma\0ce" }],
+    ["a long name", { name: "a".repeat(101) }],
+    ["an unknown field", { name: "mace", isCanonical: true }],
+    ["a list of names", { names: [{ name: "mace" }] }],
+  ] as const)("answers 400 to %s", async ([, body], { tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    const id = await newIngredient(tx, [{ name: "nutmeg", locale: "en-GB" }], {
+      createdBy: me.id,
+    });
+
+    const res = await request(
+      "POST",
+      `/ingredients/${id}/names`,
+      me.token,
+      body,
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: "invalid_request" });
+  });
+});
+
+describe("PATCH /ingredients/:id/names/:nameId", () => {
+  dbTest(
+    "makes a name canonical, unsetting the old one in that locale only",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+      const id = await newIngredient(
+        tx,
+        [
+          { name: "coriander", locale: "en-GB" },
+          { name: "coriander leaf", locale: "en-GB" },
+          { name: "cilantro", locale: "en-US" },
+        ],
+        { createdBy: me.id },
+      );
+      const names = await nameIds(tx, id);
+
+      const res = await request(
+        "PATCH",
+        `/ingredients/${id}/names/${names["coriander leaf"]}`,
+        me.token,
+        { isCanonical: true },
+      );
+      const again = await request(
+        "PATCH",
+        `/ingredients/${id}/names/${names["coriander leaf"]}`,
+        me.token,
+        { isCanonical: true },
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json<DetailBody>().names).toEqual([
+        expect.objectContaining({ name: "coriander leaf", isCanonical: true }),
+        expect.objectContaining({ name: "coriander", isCanonical: false }),
+        expect.objectContaining({ name: "cilantro", isCanonical: true }),
+      ]);
+      expect(again.json()).toEqual(res.json());
+    },
+  );
+
+  dbTest("renames a name, and can make it canonical too", async ({ tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    const id = await newIngredient(
+      tx,
+      [
+        { name: "aubergine", locale: "en-GB" },
+        { name: "egg plant", locale: "en-GB" },
+      ],
+      { createdBy: me.id },
+    );
+    const names = await nameIds(tx, id);
+
+    const recased = await request(
+      "PATCH",
+      `/ingredients/${id}/names/${names.aubergine}`,
+      me.token,
+      { name: "Aubergine" },
+    );
+    const both = await request(
+      "PATCH",
+      `/ingredients/${id}/names/${names["egg plant"]}`,
+      me.token,
+      { name: " eggplant ", isCanonical: true },
+    );
+
+    expect(recased.statusCode).toBe(200);
+    expect(recased.json<DetailBody>().names).toEqual([
+      expect.objectContaining({ name: "Aubergine", isCanonical: true }),
+      expect.objectContaining({ name: "egg plant", isCanonical: false }),
+    ]);
+    expect(both.statusCode).toBe(200);
+    expect(both.json<DetailBody>().names).toEqual([
+      {
+        id: names["egg plant"],
+        name: "eggplant",
+        locale: "en-GB",
+        isCanonical: true,
+      },
+      expect.objectContaining({ name: "Aubergine", isCanonical: false }),
+    ]);
+  });
+
+  dbTest(
+    "answers 409 to a rename onto a name already in the locale, changing nothing",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+      const coriander = await newIngredient(tx, [
+        { name: "coriander", locale: "en-GB" },
+      ]);
+      const id = await newIngredient(
+        tx,
+        [
+          { name: "parsley", locale: "en-GB" },
+          { name: "persil", locale: "en-GB" },
+        ],
+        { createdBy: me.id },
+      );
+      const names = await nameIds(tx, id);
+      const before = await stored(tx, id);
+
+      const other = await request(
+        "PATCH",
+        `/ingredients/${id}/names/${names.persil}`,
+        me.token,
+        { name: "Coriander", isCanonical: true },
+      );
+      const own = await request(
+        "PATCH",
+        `/ingredients/${id}/names/${names.persil}`,
+        me.token,
+        { name: "PARSLEY" },
+      );
+
+      expect(other.statusCode).toBe(409);
+      expect(other.json()).toEqual({
+        error: "name_taken",
+        message: 'en-GB already has the name "coriander"',
+        ingredient: { id: coriander, name: "coriander" },
+        name: { name: "coriander", locale: "en-GB" },
+      });
+      expect(own.statusCode).toBe(409);
+      expect(own.json()).toMatchObject({ ingredient: { id } });
+      expect(await stored(tx, id)).toEqual(before);
+    },
+  );
+
+  dbTest(
+    "answers 404 for a name of another ingredient, or none",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const admin = await signedInUser(tx, { isAdmin: true });
+      const id = await newIngredient(tx, [{ name: "mace", locale: "en-GB" }]);
+      const other = await newIngredient(tx, [
+        { name: "nutmeg", locale: "en-GB" },
+      ]);
+      const { nutmeg } = await nameIds(tx, other);
+
+      for (const nameId of [String(nutmeg), "abc", "0", "999999999"]) {
+        const patch = await request(
+          "PATCH",
+          `/ingredients/${id}/names/${nameId}`,
+          admin.token,
+          { isCanonical: true },
+        );
+        const del = await request(
+          "DELETE",
+          `/ingredients/${id}/names/${nameId}`,
+          admin.token,
+        );
+        for (const res of [patch, del]) {
+          expect(res.statusCode).toBe(404);
+          expect(res.json()).toEqual({
+            error: "not_found",
+            message: "name not found",
+          });
+        }
+      }
+      expect(await nameIds(tx, other)).toEqual({ nutmeg });
+    },
+  );
+
+  dbTest.for([
+    ["an empty body", {}],
+    ["isCanonical false", { isCanonical: false }],
+    ["a blank name", { name: " " }],
+    ["a long name", { name: "a".repeat(101) }],
+    ["a locale", { name: "mace", locale: "en-US" }],
+    ["a body that is not an object", ["mace"]],
+  ] as const)("answers 400 to %s", async ([, body], { tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    const id = await newIngredient(tx, [{ name: "mace", locale: "en-GB" }], {
+      createdBy: me.id,
+    });
+    const { mace } = await nameIds(tx, id);
+
+    const res = await request(
+      "PATCH",
+      `/ingredients/${id}/names/${mace}`,
+      me.token,
+      body,
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: "invalid_request" });
+  });
+});
+
+describe("DELETE /ingredients/:id/names/:nameId", () => {
+  dbTest("refuses the last name with 409, keeping it", async ({ tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    const id = await newIngredient(tx, [{ name: "mace", locale: "en-GB" }], {
+      createdBy: me.id,
+    });
+    const { mace } = await nameIds(tx, id);
+
+    const res = await request(
+      "DELETE",
+      `/ingredients/${id}/names/${mace}`,
+      me.token,
+    );
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({
+      error: "last_name",
+      message:
+        "an ingredient's last name cannot be deleted: delete the ingredient instead",
+    });
+    expect(await nameIds(tx, id)).toEqual({ mace });
+  });
+
+  dbTest(
+    "deleting the canonical name makes the next in its locale canonical",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+      const id = await newIngredient(
+        tx,
+        [
+          { name: "coriander", locale: "en-GB" },
+          { name: "coriander leaf", locale: "en-GB" },
+          { name: "chinese parsley", locale: "en-GB" },
+          { name: "cilantro", locale: "en-US" },
+        ],
+        { createdBy: me.id },
+      );
+      const names = await nameIds(tx, id);
+
+      const res = await request(
+        "DELETE",
+        `/ingredients/${id}/names/${names.coriander}`,
+        me.token,
+      );
+      const retry = await request(
+        "DELETE",
+        `/ingredients/${id}/names/${names.coriander}`,
+        me.token,
+      );
+
+      expect(res.statusCode).toBe(204);
+      expect(retry.statusCode).toBe(404);
+      const after = await request("GET", `/ingredients/${id}`, me.token);
+      expect(after.json<DetailBody>().names).toEqual([
+        expect.objectContaining({ name: "chinese parsley", isCanonical: true }),
+        expect.objectContaining({ name: "coriander leaf", isCanonical: false }),
+        expect.objectContaining({ name: "cilantro", isCanonical: true }),
+      ]);
+    },
+  );
+
+  dbTest(
+    "deleting a locale's only name leaves the other locales as they were",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+      const id = await newIngredient(
+        tx,
+        [
+          { name: "coriander", locale: "en-GB" },
+          { name: "cilantro", locale: "en-US" },
+        ],
+        { createdBy: me.id },
+      );
+      const names = await nameIds(tx, id);
+
+      const res = await request(
+        "DELETE",
+        `/ingredients/${id}/names/${names.cilantro}`,
+        me.token,
+      );
+
+      expect(res.statusCode).toBe(204);
+      const after = await request("GET", `/ingredients/${id}`, me.token);
+      expect(after.json<DetailBody>().names).toEqual([
+        expect.objectContaining({ name: "coriander", isCanonical: true }),
+      ]);
+    },
+  );
+});
+
+describe("DELETE /ingredients/:id", () => {
+  dbTest("deletes the ingredient and its names", async ({ tx }) => {
+    const { request } = start(tx);
+    const me = await signedInUser(tx);
+    const id = await newIngredient(
+      tx,
+      [
+        { name: "mace", locale: "en-GB" },
+        { name: "mace blade", locale: "en-GB" },
+      ],
+      { createdBy: me.id },
+    );
+
+    const res = await request("DELETE", `/ingredients/${id}`, me.token);
+    const retry = await request("DELETE", `/ingredients/${id}`, me.token);
+
+    expect(res.statusCode).toBe(204);
+    expect(retry.statusCode).toBe(404);
+    expect(await stored(tx, id)).toEqual({ ingredient: [], names: [] });
+  });
+
+  dbTest(
+    "refuses with 409 when a recipe uses it, keeping it",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const creator = await signedInUser(tx);
+      const cook = await signedInUser(tx);
+      const admin = await signedInUser(tx, { isAdmin: true });
+      const id = await newIngredient(tx, [{ name: "mace", locale: "en-GB" }], {
+        createdBy: creator.id,
+      });
+      await useInRecipe(tx, cook.id, id);
+      const before = await stored(tx, id);
+
+      for (const who of [creator, admin]) {
+        const res = await request("DELETE", `/ingredients/${id}`, who.token);
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toEqual({
+          error: "in_use",
+          message: "a recipe uses this ingredient, so it cannot be deleted",
+        });
+      }
+      expect(await stored(tx, id)).toEqual(before);
+    },
+  );
 });
