@@ -225,23 +225,23 @@ describe("a held-back catalogue write (SEC-1)", () => {
   });
 });
 
-// Resolves once some query on this database is waiting for a lock, or
-// after two seconds, whichever is first.
-async function someoneWaitsForALock(): Promise<void> {
+// True once at least `count` queries on this database are waiting for a
+// lock; false if that has not happened after two seconds.
+async function waitersForALock(count = 1): Promise<boolean> {
   for (let tries = 0; tries < 40; tries++) {
     const { rows } = await db.execute<{ waiting: number }>(sql`
       select count(*)::int as waiting from pg_stat_activity
       where datname = current_database() and wait_event_type = 'Lock'
     `);
-    if ((rows[0]?.waiting ?? 0) > 0) return;
+    if ((rows[0]?.waiting ?? 0) >= count) return true;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  return false;
 }
 
 describe("simultaneous adds (SEC-2)", () => {
   test(`two adds to an ingredient with ${MAX_NAMES - 1} names end with ${MAX_NAMES}`, async () => {
-    // Two different users, so nothing but the ingredient lock orders them:
-    // lockActor locks each sender's own row.
+    // Two different users, so nothing but the ingredient lock orders them.
     const creator = await signedInUser();
     const admin = await signedInUser({ isAdmin: true });
     const id = await newIngredient(creator.id, MAX_NAMES - 1);
@@ -262,7 +262,7 @@ describe("simultaneous adds (SEC-2)", () => {
         name: `race ${id} extra 2`,
         locale: "en-GB",
       });
-      await someoneWaitsForALock();
+      await waitersForALock();
       return outcome;
     });
 
@@ -285,5 +285,63 @@ describe("simultaneous adds (SEC-2)", () => {
 
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ error: "name_limit" });
+  });
+});
+
+describe("a catalogue write overlapping an import save (NATG-371)", () => {
+  test("by the same user: both succeed, 201 and 200", async () => {
+    const cook = await signedInUser();
+    const id = await newIngredient(cook.id);
+    const save = {
+      sourceUrl: `https://example.test/natg-371/${id}`,
+      recipe: {
+        title: "Lock order",
+        servings: null,
+        prepMinutes: null,
+        cookMinutes: null,
+        ingredients: [
+          {
+            position: 1,
+            rawText: "salt",
+            quantity: null,
+            unit: null,
+            ingredientText: "salt",
+            prepNotes: null,
+            notes: null,
+            ingredientId: id,
+            measurementId: null,
+          },
+        ],
+        steps: [{ position: 1, text: "Season." }],
+        tags: [],
+      },
+    };
+
+    // A third transaction holds the recipe table, so the import stops at
+    // its recipe insert: after it has locked the ingredient FOR KEY SHARE,
+    // before the insert's foreign key check locks the user. The PATCH then
+    // locks the user and waits for the ingredient. Releasing the import
+    // makes its foreign key check reach for the user the PATCH holds, which
+    // with the user locked FOR UPDATE is a deadlock.
+    let imported: Promise<Response> | undefined;
+    let patched: Promise<Response> | undefined;
+    await db.transaction(async (blocker) => {
+      await blocker.execute(sql`lock table recipe in share mode`);
+      imported = post("/imports", cook.token, save);
+      expect(await waitersForALock(1)).toBe(true);
+      patched = fetch(`http://127.0.0.1:${port}/ingredients/${id}`, {
+        method: "PATCH",
+        headers: {
+          cookie: `${SESSION_COOKIE}=${cook.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ category: "after" }),
+      });
+      expect(await waitersForALock(2)).toBe(true);
+    });
+
+    const [importRes, patchRes] = await Promise.all([imported!, patched!]);
+    expect([importRes.status, patchRes.status]).toEqual([201, 200]);
+    expect(await category(id)).toBe("after");
   });
 });

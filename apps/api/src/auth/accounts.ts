@@ -163,16 +163,23 @@ export interface Actor {
 // null when the account is gone or disabled or the session is gone or
 // expired.
 //
-// The actor's user row is locked FOR UPDATE, so the check waits for any
-// disable or demotion in flight, then sees its committed result, and nothing
-// can change the actor until the change commits. `otherUserId`'s row, when
-// given, is locked too, always in ascending id order, so two actors acting
-// on each other wait rather than deadlock. The session row is locked FOR
-// SHARE so a sign-out waits for the change as well. Call it before taking
-// any other lock in `t`.
+// The actor's user row is locked in `mode`, so the check waits for any
+// disable, demotion or delete in flight, then sees its committed result, and
+// none can land until the change commits: both "update" and "share"
+// conflict with the UPDATE or DELETE that makes one. "update" is for a change
+// that will itself modify the user rows it locks (asAdmin). "share" is for
+// any other change (the catalogue writes): it does not conflict with the
+// KEY SHARE lock a foreign key check takes on the user, so a transaction
+// that inserts a row referencing the user (an import's recipe) cannot close
+// a lock cycle with this one (NATG-371). `otherUserId`'s row, when given, is
+// locked too, always in ascending id order, so two actors acting on each
+// other wait rather than deadlock. The session row is locked FOR SHARE so a
+// sign-out waits for the change as well. Call it before taking any other
+// lock in `t`.
 export async function lockActor(
   t: Db,
   actor: Actor,
+  mode: "update" | "share",
   otherUserId: number | null = null,
 ): Promise<Profile | null> {
   const ids = [...new Set([actor.userId, otherUserId ?? actor.userId])].sort(
@@ -184,7 +191,7 @@ export async function lockActor(
       .select({ ...profileColumns, disabledAt: user.disabledAt })
       .from(user)
       .where(eq(user.id, id))
-      .for("update");
+      .for(mode);
     if (id === actor.userId) actorRow = row;
   }
   if (!actorRow || actorRow.disabledAt) return null;

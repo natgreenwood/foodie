@@ -19,7 +19,7 @@ export async function asAdmin<T>(
   work: (t: Db) => Promise<T>,
 ): Promise<{ refused: AdminRefusal } | { refused: null; value: T }> {
   return db.transaction(async (t) => {
-    const live = await lockActor(t, actor, targetId);
+    const live = await lockActor(t, actor, "update", targetId);
     if (!live) return { refused: "unauthenticated" };
     if (!live.isAdmin) return { refused: "forbidden" };
     return { refused: null, value: await work(t) };

@@ -449,8 +449,12 @@ export type EditRefusal = {
 // the actor's role as committed now, not as it was when the request
 // arrived (SEC-1). `change` gets that live profile as the editor.
 //
-// The actor's user row is locked first, then the ingredient's: the only
-// order in use, so this cannot deadlock with asAdmin. The ingredient lock
+// The actor's user row is locked first, FOR SHARE, then the ingredient's.
+// FOR SHARE still waits for, and holds off, a demotion, disable or delete of
+// the actor, but not the KEY SHARE lock a foreign key check takes on the
+// user: an import saving a recipe locks the ingredient and then, through
+// recipe.owner_id, the user, the opposite order, and with FOR UPDATE here
+// the two could deadlock (NATG-371). The ingredient lock
 // makes changes to one ingredient run one at a time (two canonical swaps in
 // a locale cannot interleave, two adds cannot both take the last free name),
 // and a recipe line cannot start using an ingredient that is being deleted:
@@ -462,7 +466,7 @@ async function changeIngredient<T>(
   change: (tx: Db, editor: Profile) => Promise<T>,
 ): Promise<EditRefusal | T> {
   return db.transaction(async (tx) => {
-    const editor = await lockActor(tx, actor);
+    const editor = await lockActor(tx, actor, "share");
     if (!editor) return { refused: "unauthenticated" } as const;
     const [row] = await tx
       .select({ createdBy: ingredient.createdBy })
