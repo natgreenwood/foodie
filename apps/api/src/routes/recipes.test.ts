@@ -13,10 +13,24 @@ import {
   recipeTag,
   user,
 } from "../db/schema.js";
-import { dbTest, type TestTransaction } from "../test/db.js";
+import { dbTest as sharedDbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE } from "./auth.js";
 
 const unused = () => Promise.reject(new Error("not used by these tests"));
+
+// These tests name their own ingredients, such as salt and coriander, which
+// the seeded catalogue (0015) already holds. Each starts from an empty
+// catalogue: the seed is deleted inside the test's transaction, and the
+// rollback restores it.
+const dbTest = sharedDbTest.extend<{ $test: { emptyCatalogue: void } }>({
+  emptyCatalogue: [
+    async ({ tx }, use) => {
+      await tx.delete(ingredient);
+      await use();
+    },
+    { auto: true },
+  ],
+});
 
 function start(tx: TestTransaction) {
   const app = buildApp({
