@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from "vitest";
 import {
   AiNotConfiguredError,
   AiProviderError,
+  AiRequestTooLargeError,
   type Completion,
   type CompletionRequest,
 } from "../ai/complete.js";
@@ -364,6 +365,42 @@ describe("chooseIngredients", () => {
         code: "overloaded_error",
       },
       "import preview: ingredients not matched, AI provider failed",
+    );
+  });
+
+  test("a prompt too large for the AI: every line unmatched, as a failure, and logged with the limit", async () => {
+    const log = fakeLog();
+    const { chosen, matching } = await chooseIngredients(
+      lines,
+      () =>
+        Promise.reject(
+          new AiRequestTooLargeError(
+            "prompt_chars",
+            200_000,
+            200_001,
+            "default",
+            "openrouter",
+            "some/model",
+          ),
+        ),
+      asLog(log),
+    );
+
+    expect(chosen).toEqual(new Map());
+    expect(matching).toEqual({
+      status: "ai_failed",
+      message: AI_FAILED_MESSAGE,
+    });
+    expect(log.warn).toHaveBeenCalledWith(
+      {
+        procedure: "default",
+        provider: "openrouter",
+        model: "some/model",
+        limit: "prompt_chars",
+        max: 200_000,
+        actual: 200_001,
+      },
+      "import preview: ingredients not matched, AI request too large",
     );
   });
 
