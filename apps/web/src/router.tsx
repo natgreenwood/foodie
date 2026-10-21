@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useState,
   useSyncExternalStore,
   type AnchorHTMLAttributes,
   type MouseEvent,
@@ -24,10 +25,32 @@ function snapshot() {
   return window.location.pathname + window.location.search;
 }
 
-export function navigate(to: string, { replace = false } = {}) {
-  if (replace) window.history.replaceState(null, "", to);
-  else window.history.pushState(null, "", to);
+// `state` travels with the history entry, for a page to read on arrival
+// (useArrivalState) and only then: a reload or a shared link does not
+// carry it.
+export function navigate(
+  to: string,
+  {
+    replace = false,
+    state = null,
+  }: { replace?: boolean; state?: unknown } = {},
+) {
+  if (replace) window.history.replaceState(state, "", to);
+  else window.history.pushState(state, "", to);
   for (const listener of listeners) listener();
+}
+
+// The state the current history entry arrived with. It is then cleared
+// from the entry, so a reload of the page does not see it again; this
+// component keeps what it read.
+export function useArrivalState(): unknown {
+  const [state] = useState(() => window.history.state as unknown);
+  useEffect(() => {
+    if (window.history.state !== null) {
+      window.history.replaceState(null, "", window.location.href);
+    }
+  }, []);
+  return state;
 }
 
 // A full page load, for addresses outside this app: the api's OIDC start
