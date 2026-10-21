@@ -82,7 +82,7 @@ export function bestNamePerIngredient(
 // any name. So an en-GB user never sees a German name while an English one
 // exists. A lateral subquery over `i`, with columns name, locale and
 // normalised_name, or no row for an ingredient with no names.
-function displayName(locale: string): SQL {
+export function displayName(locale: string): SQL {
   const language = sql`lower(split_part(${locale}, '-', 1))`;
   return sql`
     select n.name, n.locale, n.normalised_name

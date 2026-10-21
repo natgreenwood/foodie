@@ -1,0 +1,1 @@
+- Shared AI budgets and concurrency: open source approaches — 2026-10-20 — NATG-331 — [Confluence (unpublished draft; visible only to its author until shared or published)](https://natgreenwood.atlassian.net/wiki/pages/resumedraft.action?draftId=2719752&draftShareId=a3a6e205-d00e-4d63-ac06-a63a2849941d)
