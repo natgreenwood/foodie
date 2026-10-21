@@ -111,6 +111,85 @@ host, URL and each line of output in the issue. `http 403 challenged` then
 `impit 200 ok` is the result the fallback depends on; `impit 403 challenged`
 from the deployment host means it needs the parked headless Chromium story.
 
+## Reading a page with no structured data (AI)
+
+When `extractRecipe` finds neither JSON-LD nor microdata, the preview hands
+the page to `extractRecipeWithAi` in `extract/ai.ts` (NATG-248). A page past
+the extraction budget is not handed on; it is still `no_recipe_found`.
+
+1. The page's visible text is taken: `head`, `script`, `style` and the like
+   removed, and so is every element the markup hides, with all inside it:
+   the `hidden` attribute, `aria-hidden="true"`, or an inline style of
+   `display: none` or `visibility: hidden` in any case or spacing, with or
+   without `!important`, once `/* */` comments are taken out (NATG-360).
+   A line break comes only where a block element ends, or where the source
+   has one inside a `<pre>` or an element with an inline `white-space` of
+   `pre`, `pre-wrap` or `pre-line` (NATG-363); any other line break in the
+   HTML source is a space, as a browser shows it. The cells of a table row
+   share one line, as a browser shows them, so `1` | `1/2 cup flour` reads
+   "1 1/2 cup flour" (NATG-359). Whitespace in each line is
+   collapsed, blank lines dropped, and the text cut at a line to 40,000
+   characters (`MAX_PAGE_TEXT_CHARS`). That one text is both what the model
+   is sent and what its answer is checked against. Out of scope (NATG-360
+   ruling): an element hidden by a class and a stylesheet, which would mean
+   evaluating the CSS, and other inline hiding such as `opacity: 0`, a zero
+   size, off-screen positioning or `clip`. The check stops the model
+   inventing text; a page that means to mislead can as well show a false
+   recipe in plain view. A page with no text (an app that renders in the
+   browser) makes no completion and is `no_recipe_found`.
+2. One completion through `complete()` with procedure `default`, so the
+   model the admin chose for it. The prompt tells the model to copy the
+   title, ingredient lines and steps character for character and never to
+   invent, complete, reword or convert anything, and to answer
+   `{"recipe": null}` when there is no recipe.
+3. The answer is used only if every ingredient line and every step is in the
+   page text. Both sides go through `normalise` first: NFKC (NBSP and other
+   fixed-width spaces, ligatures, full-width letters), curly quotes to
+   straight, whitespace collapsed. Nothing else is forgiven: case, dashes,
+   spelling and numbers must match. A line that starts or ends with a
+   letter or digit must do so at a word boundary in the page, and no line
+   may start or end next to a digit, `/`, a fraction character, a hyphen or
+   an en dash, nor next to a `.` or `,` with a digit on its far side
+   (NATG-359), so "25 g" is not found in "225 g", nor "1 g" in "0.1 g",
+   "5 kg" in "1,5 kg", "2 cup" in "1/2 cup" or "2 eggs" in "1-2 eggs". A
+   line that starts with a digit may not start right after a `.` or `,`
+   either, so "5 tsp" is not found in ".5 tsp". A line that starts with a
+   number may not follow a number and spaces on the same page line, and
+   one that ends with a number may not be followed by spaces and a number:
+   "1/2 cups" is not found in "1 1/2 cups", nor "Bake for 1" in "Bake for
+   1 1/2 hours". A line break ends that rule, so "2 eggs" is found on the
+   line after "Serves 4"; elsewhere a space in a line matches a line break
+   on the page. A copy that stops short of
+   a comma or full stop is still found ("55 g butter" from "55 g butter,
+   cubed", or a step without its last full stop). Steps must be found in the
+   page's order, each after the end of the one before; two adjacent steps
+   given as one are still found. Ingredient lines may come in any order.
+   One line not found and the whole answer is dropped.
+   A title not in the page is replaced by the page's `<title>`; servings,
+   times and tags are left empty for the cook.
+4. A used answer's lines go through the same line parser and ingredient
+   match as structured data's, with `extraction: "ai"`.
+
+Every answer is recorded in `ai_extraction`: the URL, provider, model, the
+page text exactly as sent, the model's raw output (with any NUL characters
+removed, as `fetchPage` does for HTML: Postgres `text` cannot hold them; the
+answer is read with them removed too) and the `outcome`
+(`accepted`, `ungrounded`, `no_recipe` or `unreadable`). Rows are kept
+permanently; nothing prunes them. Nothing is recorded when no completion
+was made.
+
+| What happened                         | Preview answer          |
+| ------------------------------------- | ----------------------- |
+| Answer used                           | 200, `extraction: "ai"` |
+| No text, no recipe, or answer dropped | 404 `no_recipe_found`   |
+| No model chosen or no credential      | 503 `ai_not_configured` |
+| Provider failed (`AiProviderError`)   | 502 `ai_failed`         |
+| Anything else, recording included     | 500 `internal_error`    |
+
+Each answer is logged with its `aiExtractionId` and `outcome`, and for a
+dropped one the positions of the lines not found, never their text. A retry
+makes, pays for and records another completion.
+
 ## Reversing the page_fetch migration (manual)
 
 Drizzle has no down migrations. To undo `drizzle/0005_page_fetch.sql`, while
@@ -145,3 +224,21 @@ Dropping the column drops its unique index with it. `1792184379834` is the
 `when` of `0006_measurement_key` in `drizzle/meta/_journal.json`. The
 measurement lookup selects the column, so deploy code from before the
 migration first or every import preview fails.
+
+## Reversing the ai_extraction migration (manual)
+
+To undo `drizzle/0016_ai_extraction.sql`, while it is still the latest
+migration applied, run against the database:
+
+```sql
+begin;
+drop table ai_extraction;
+delete from drizzle.__drizzle_migrations where created_at = 1792547333159;
+commit;
+```
+
+`1792547333159` is the `when` of `0016_ai_extraction` in
+`drizzle/meta/_journal.json`. The table holds the only copy of every AI
+reading, so export it first if it may be wanted. Deploy code from before the
+migration first: this code writes to the table on every AI reading, and
+without it those previews fail with 500.

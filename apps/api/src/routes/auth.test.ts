@@ -35,6 +35,7 @@ function start(
       fetchPage: unused,
       loadUnits: unused,
       matchIngredients: unused,
+      extractWithAi: unused,
       db: tx,
       secureCookies,
       settingsKey: Buffer.alloc(32),
@@ -538,9 +539,11 @@ describe("auth routes when a request fails", () => {
         level: 50,
         msg: "auth: request failed",
         route: "POST /auth/login",
-        error: "Failed query: select",
+        module: "auth",
+        errorName: "Error",
       }),
     );
+    expect(JSON.stringify(logLines)).not.toContain("Failed query");
     expect(JSON.stringify(logLines)).not.toContain("params: a@b.c");
   });
 });

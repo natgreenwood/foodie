@@ -5,19 +5,26 @@ import type {
   FastifyReply,
   FastifyRequest,
 } from "fastify";
-import { complete } from "../ai/complete.js";
+import {
+  AiNotConfiguredError,
+  AiProviderError,
+  complete,
+} from "../ai/complete.js";
 import type { Database } from "../db/client.js";
+import { errorForLog } from "../db/errors.js";
 import {
   createOwnedRecipe,
   type NewRecipe,
   type NewRecipeLine,
   type Recipe,
 } from "../db/recipes.js";
+import { extractRecipeWithAi } from "../import/extract/ai.js";
 import { BudgetExceededError } from "../import/extract/budget.js";
 import {
   extractRecipe,
   MAX_LINE_CHARS,
   type DraftIngredient,
+  type ExtractContext,
   type ExtractedRecipe,
 } from "../import/extract/extract.js";
 import {
@@ -59,6 +66,12 @@ export interface ImportDeps {
     ingredients: DraftIngredient[];
     matching: IngredientMatching;
   }>;
+  // extractRecipeWithAi with the api's database and AI settings bound, for a
+  // page with no structured data.
+  extractWithAi: (
+    page: Pick<FetchedPage, "html" | "finalUrl">,
+    ctx: ExtractContext & { log: Pick<FastifyBaseLogger, "info" | "warn"> },
+  ) => Promise<ExtractedRecipe | null>;
 }
 
 export function importDeps(
@@ -73,6 +86,16 @@ export function importDeps(
       matchIngredients(
         { db, complete: (request) => complete({ db, settingsKey }, request) },
         ingredients,
+        ctx,
+      ),
+    extractWithAi: (page, ctx) =>
+      extractRecipeWithAi(
+        {
+          db,
+          complete: (request) =>
+            complete({ db, settingsKey }, request, "default"),
+        },
+        page,
         ctx,
       ),
   };
@@ -93,6 +116,8 @@ export type PreviewErrorCode =
   | "fetch_failed"
   | "import_not_permitted"
   | "rate_limited"
+  | "ai_not_configured"
+  | "ai_failed"
   | "internal_error";
 
 // Each preview can cost a completion on the admin's AI account (SEC-1 on
@@ -114,10 +139,13 @@ const previewLimit = {
 export type SaveResponse = Recipe & { alreadyImported: boolean };
 
 // POST /imports/preview { url, refresh? }: the page's recipe as a draft, read
-// from its structured data (NATG-245), each line with a proposed catalogue
-// ingredient (NATG-321). Nothing is stored as a recipe or in the catalogue;
-// the fetched page is cached by fetchPage. AI being unconfigured or failing
-// leaves the lines unmatched rather than failing the preview.
+// from its structured data (NATG-245), or failing that from its text by AI
+// (NATG-248), each line with a proposed catalogue ingredient (NATG-321).
+// Nothing is stored as a recipe or in the catalogue; the fetched page is
+// cached by fetchPage, and each AI reading is recorded in ai_extraction. AI
+// being unconfigured or failing leaves the lines unmatched rather than
+// failing the preview; for a page that needs AI to be read at all, it is
+// 503 ai_not_configured or 502 ai_failed.
 //
 // POST /imports { sourceUrl, recipe }: saves a reviewed draft as a recipe
 // owned by the signed-in user (NATG-250). See saveRoute.
@@ -217,7 +245,11 @@ export const importRoutes: FastifyPluginCallback<
             reason: err.reason,
           });
         }
-        request.log.error({ err }, "import preview: fetch error");
+        // Never `err` itself: fetchPage's own query carries the page (SEC-2).
+        request.log.error(
+          { operation: "fetch", ...errorForLog(err) },
+          "import preview: fetch error",
+        );
         return sendError(
           reply,
           500,
@@ -227,13 +259,14 @@ export const importRoutes: FastifyPluginCallback<
         );
       }
 
+      let ctx: ExtractContext;
       let extracted: ExtractedRecipe | null;
       try {
-        const units = await deps.loadUnits();
-        extracted = extractRecipe(page.html, {
+        ctx = {
           sourceHost: new URL(page.finalUrl).hostname,
-          ...units,
-        });
+          ...(await deps.loadUnits()),
+        };
+        extracted = extractRecipe(page.html, ctx);
       } catch (err) {
         // A page past the extraction budget is answered as having no recipe;
         // the log says which limit it hit.
@@ -256,7 +289,7 @@ export const importRoutes: FastifyPluginCallback<
           );
         }
         request.log.error(
-          { err, url: page.finalUrl },
+          { url: page.finalUrl, operation: "extract", ...errorForLog(err) },
           "import preview: extraction error",
         );
         return sendError(
@@ -268,6 +301,71 @@ export const importRoutes: FastifyPluginCallback<
         );
       }
 
+      if (extracted === null) {
+        try {
+          extracted = await deps.extractWithAi(page, {
+            ...ctx,
+            log: request.log,
+          });
+        } catch (err) {
+          if (err instanceof AiNotConfiguredError) {
+            request.log.info(
+              {
+                url: page.finalUrl,
+                reason: err.reason,
+                procedure: err.procedure,
+                provider: err.provider,
+              },
+              "import preview: no structured data and AI not configured",
+            );
+            return sendError(
+              reply,
+              503,
+              "ai_not_configured",
+              "the page has no structured data, and reading it needs an AI provider; an admin can choose one in the AI settings",
+              page.finalUrl,
+            );
+          }
+          if (err instanceof AiProviderError) {
+            request.log.warn(
+              {
+                url: page.finalUrl,
+                provider: err.provider,
+                model: err.model,
+                reason: err.reason,
+                status: err.status,
+                code: err.code,
+              },
+              "import preview: no structured data and AI provider failed",
+            );
+            return sendError(
+              reply,
+              502,
+              "ai_failed",
+              "the page has no structured data, and the AI provider that reads it did not answer; try again later",
+              page.finalUrl,
+            );
+          }
+          // A failed ai_extraction insert carries the page text and the
+          // model's output as query parameters, so only errorForLog's fields.
+          request.log.error(
+            {
+              url: page.finalUrl,
+              operation: "ai_extraction",
+              ...errorForLog(err),
+            },
+            "import preview: AI extraction error",
+          );
+          return sendError(
+            reply,
+            500,
+            "internal_error",
+            "the page could not be read",
+            page.finalUrl,
+          );
+        }
+      }
+
       let matched: Awaited<ReturnType<ImportDeps["matchIngredients"]>> | null =
         null;
       if (extracted !== null) {
@@ -277,8 +375,13 @@ export const importRoutes: FastifyPluginCallback<
             log: request.log,
           });
         } catch (err) {
+          // The candidate query carries the ingredient lines.
           request.log.error(
-            { err, url: page.finalUrl },
+            {
+              url: page.finalUrl,
+              operation: "match_ingredients",
+              ...errorForLog(err),
+            },
             "import preview: ingredient match error",
           );
           return sendError(
@@ -311,7 +414,7 @@ export const importRoutes: FastifyPluginCallback<
           reply,
           404,
           "no_recipe_found",
-          "the page has no schema.org Recipe in JSON-LD or microdata",
+          "the page has no schema.org Recipe in JSON-LD or microdata, and no recipe could be read from its text",
           page.finalUrl,
         );
       }

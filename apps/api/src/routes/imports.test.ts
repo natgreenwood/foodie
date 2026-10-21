@@ -1,11 +1,18 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { Writable } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AiNotConfiguredError, AiProviderError } from "../ai/complete.js";
 import { buildApp, type AppSeams } from "../app.js";
 import { createSession } from "../auth/accounts.js";
-import { ingredient, measurement, recipe, user } from "../db/schema.js";
+import {
+  aiExtraction,
+  ingredient,
+  measurement,
+  recipe,
+  user,
+} from "../db/schema.js";
 import { measurements, UNIT } from "../import/extract/__fixtures__/units.js";
 import {
   FetchFailedError,
@@ -14,7 +21,8 @@ import {
   type FetchedPage,
   type FetchFailureReason,
 } from "../import/fetch.js";
-import { MAX_LINE_CHARS } from "../import/extract/extract.js";
+import { extractRecipeWithAi } from "../import/extract/ai.js";
+import { extractRecipe, MAX_LINE_CHARS } from "../import/extract/extract.js";
 import { AI_NOT_CONFIGURED_MESSAGE } from "../import/match-ingredients.js";
 import { dbTest, type TestTransaction } from "../test/db.js";
 import { SESSION_COOKIE, type AuthDeps } from "./auth.js";
@@ -23,6 +31,7 @@ import {
   MAX_STEPS,
   MAX_TAG_CHARS,
   MAX_TAGS,
+  importDeps,
   PREVIEWS_PER_MINUTE,
   type ImportDeps,
 } from "./imports.js";
@@ -78,6 +87,10 @@ const noMatches: ImportDeps["matchIngredients"] = (ingredients) =>
     matching: { status: "ok" },
   });
 
+// The model finds no recipe in the page's text. The reading itself is
+// covered in extract/ai.test.ts.
+const aiFindsNothing: ImportDeps["extractWithAi"] = () => Promise.resolve(null);
+
 // The fetch is mocked: these tests cover the route and its error mapping.
 function start(
   fetchPage: ImportDeps["fetchPage"],
@@ -86,10 +99,12 @@ function start(
     db = {} as AuthDeps["db"],
     seams = signedInAsCook,
     matchIngredients = noMatches,
+    extractWithAi = aiFindsNothing,
   }: {
     db?: AuthDeps["db"];
     seams?: AppSeams;
     matchIngredients?: ImportDeps["matchIngredients"];
+    extractWithAi?: ImportDeps["extractWithAi"];
   } = {},
 ) {
   logLines = [];
@@ -105,6 +120,7 @@ function start(
       fetchPage,
       loadUnits: loadUnits ?? (() => Promise.resolve({ measurements })),
       matchIngredients,
+      extractWithAi,
       db,
       secureCookies: false,
       settingsKey: Buffer.alloc(32),
@@ -396,25 +412,268 @@ describe("POST /imports/preview", () => {
     });
   });
 
-  it("returns 404 no_recipe_found for a page with neither", async () => {
-    start(() => Promise.resolve(page(fixture("no-recipe.html"))));
+  it("returns 404 no_recipe_found for a page with neither, when AI finds none", async () => {
+    const extractWithAi = vi.fn(aiFindsNothing);
+    start(() => Promise.resolve(page(fixture("no-recipe.html"))), undefined, {
+      extractWithAi,
+    });
 
     const res = await preview({ url: URL_ });
 
     expect(res.statusCode).toBe(404);
     expect(res.json()).toEqual({
       error: "no_recipe_found",
-      message: "the page has no schema.org Recipe in JSON-LD or microdata",
+      message:
+        "the page has no schema.org Recipe in JSON-LD or microdata, and no recipe could be read from its text",
       url: URL_,
     });
+    expect(extractWithAi).toHaveBeenCalledOnce();
     expect(previewLog()).toEqual([
       expect.objectContaining({ extraction: null, ingredients: 0 }),
     ]);
   });
 
+  it("reads a page with neither by AI, then matches its lines", async () => {
+    const html = fixture("no-recipe.html");
+    // A draft as extractRecipeWithAi returns one; how it is read is covered
+    // in extract/ai.test.ts.
+    const fromText = {
+      ...extractRecipe(fixture("json-ld-single.html"), {
+        sourceHost: "www.example.com.au",
+        measurements,
+      })!,
+      extraction: "ai" as const,
+    };
+    const extractWithAi = vi.fn<ImportDeps["extractWithAi"]>(() =>
+      Promise.resolve(fromText),
+    );
+    const matchIngredients = vi.fn(noMatches);
+    start(() => Promise.resolve(page(html)), undefined, {
+      extractWithAi,
+      matchIngredients,
+    });
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      sourceUrl: URL_,
+      extraction: "ai",
+      recipe: { title: fromText.recipe.title },
+      ingredientMatching: { status: "ok" },
+    });
+    expect(extractWithAi).toHaveBeenCalledWith(
+      { ...page(html) },
+      expect.objectContaining({
+        sourceHost: "www.example.com.au",
+        measurements,
+      }),
+    );
+    expect(matchIngredients).toHaveBeenCalledWith(
+      fromText.recipe.ingredients,
+      expect.objectContaining({ sourceHost: "www.example.com.au" }),
+    );
+    expect(previewLog()).toEqual([
+      expect.objectContaining({
+        msg: "import preview",
+        extraction: "ai",
+        ingredients: fromText.recipe.ingredients.length,
+      }),
+    ]);
+  });
+
+  it.each([
+    ["JSON-LD", "json-ld-single.html"],
+    ["microdata", "microdata.html"],
+  ])("never asks AI about a page with %s", async (_, name) => {
+    const extractWithAi = vi.fn(aiFindsNothing);
+    start(() => Promise.resolve(page(fixture(name))), undefined, {
+      extractWithAi,
+    });
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(200);
+    expect(extractWithAi).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 ai_not_configured for a page with neither when AI is not set up", async () => {
+    start(() => Promise.resolve(page(fixture("no-recipe.html"))), undefined, {
+      extractWithAi: () =>
+        Promise.reject(
+          new AiNotConfiguredError("no_credential", "default", "openai"),
+        ),
+    });
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({
+      error: "ai_not_configured",
+      message:
+        "the page has no structured data, and reading it needs an AI provider; an admin can choose one in the AI settings",
+      url: URL_,
+    });
+    expect(previewLog()).toEqual([
+      expect.objectContaining({
+        level: 30,
+        msg: "import preview: no structured data and AI not configured",
+        url: URL_,
+        reason: "no_credential",
+        procedure: "default",
+        provider: "openai",
+      }),
+    ]);
+  });
+
+  it("returns 502 ai_failed for a page with neither when the AI provider fails", async () => {
+    start(() => Promise.resolve(page(fixture("no-recipe.html"))), undefined, {
+      extractWithAi: () =>
+        Promise.reject(
+          new AiProviderError(
+            "anthropic",
+            "claude-haiku-5-5",
+            "http_error",
+            529,
+            "overloaded_error",
+            "HTTP 529 (overloaded_error)",
+          ),
+        ),
+    });
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({
+      error: "ai_failed",
+      message:
+        "the page has no structured data, and the AI provider that reads it did not answer; try again later",
+      url: URL_,
+    });
+    expect(previewLog()).toEqual([
+      expect.objectContaining({
+        level: 40,
+        msg: "import preview: no structured data and AI provider failed",
+        provider: "anthropic",
+        model: "claude-haiku-5-5",
+        reason: "http_error",
+        status: 529,
+        code: "overloaded_error",
+      }),
+    ]);
+  });
+
+  dbTest(
+    "asks the default procedure's model through the api's own AI wiring",
+    async ({ tx }) => {
+      // A transaction stands in for the pool: importDeps only queries it.
+      const { extractWithAi } = importDeps(
+        tx as unknown as Parameters<typeof importDeps>[0],
+        Buffer.alloc(32),
+      );
+      start(() => Promise.resolve(page(fixture("no-recipe.html"))), undefined, {
+        extractWithAi,
+      });
+
+      const res = await preview({ url: URL_ });
+
+      // No model is chosen in the test database, so complete() refuses
+      // before any request, naming the procedure it was asked for.
+      expect(res.statusCode).toBe(503);
+      expect(previewLog()).toEqual([
+        expect.objectContaining({
+          msg: "import preview: no structured data and AI not configured",
+          reason: "no_selection",
+          procedure: "default",
+        }),
+      ]);
+      expect(await tx.select().from(aiExtraction)).toEqual([]);
+    },
+  );
+
+  dbTest(
+    "logs no page text or model output when recording the AI reading fails",
+    async ({ tx }) => {
+      // SEC-2: a failed insert's error carries its parameters and the
+      // failing row. CHECK (false) makes Postgres refuse the row; the
+      // constraint goes with the test's transaction.
+      await tx.execute(
+        sql`alter table ai_extraction add constraint sec2_refuse_all check (false) not valid`,
+      );
+      const html =
+        "<html><body><h1>Soup</h1><p>PAGE-MARKER-4c1d</p></body></html>";
+      start(() => Promise.resolve(page(html)), undefined, {
+        extractWithAi: (fetched, ctx) =>
+          extractRecipeWithAi(
+            {
+              db: tx,
+              complete: () =>
+                Promise.resolve({
+                  text: '{"recipe": null, "why": "OUTPUT-MARKER-8e2b"}',
+                  provider: "anthropic",
+                  model: "claude-haiku-5-5",
+                }),
+            },
+            fetched,
+            ctx,
+          ),
+      });
+
+      const res = await preview({ url: URL_ });
+
+      expect(res.statusCode).toBe(500);
+      expect(res.json()).toEqual({
+        error: "internal_error",
+        message: "the page could not be read",
+        url: URL_,
+      });
+      const logged = JSON.stringify(logLines);
+      for (const marker of ["PAGE-MARKER-4c1d", "OUTPUT-MARKER-8e2b"]) {
+        expect(res.body).not.toContain(marker);
+        expect(logged).not.toContain(marker);
+      }
+      expect(previewLog()).toEqual([
+        {
+          level: 50,
+          time: expect.any(Number) as number,
+          pid: expect.any(Number) as number,
+          hostname: expect.any(String) as string,
+          reqId: expect.any(String) as string,
+          url: URL_,
+          operation: "ai_extraction",
+          errorName: "DrizzleQueryError",
+          code: "23514",
+          msg: "import preview: AI extraction error",
+        },
+      ]);
+    },
+  );
+
+  it("returns 500 without the cause when AI extraction fails for any other reason", async () => {
+    start(() => Promise.resolve(page(fixture("no-recipe.html"))), undefined, {
+      extractWithAi: () => Promise.reject(new Error("connection lost")),
+    });
+
+    const res = await preview({ url: URL_ });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({
+      error: "internal_error",
+      message: "the page could not be read",
+      url: URL_,
+    });
+    expect(previewLog()).toEqual([
+      expect.objectContaining({
+        level: 50,
+        msg: "import preview: AI extraction error",
+      }),
+    ]);
+  });
+
   it("returns 404 no_recipe_found for a page past the extraction budget", async () => {
     const html = `<html><body><div itemscope itemtype="https://schema.org/Recipe">${'<meta itemprop="name" content="a">'.repeat(2_000)}</div></body></html>`;
-    start(() => Promise.resolve(page(html)));
+    const extractWithAi = vi.fn(aiFindsNothing);
+    start(() => Promise.resolve(page(html)), undefined, { extractWithAi });
 
     const res = await preview({ url: URL_ });
 
@@ -432,6 +691,7 @@ describe("POST /imports/preview", () => {
         budgetExceeded: "valuesPerProperty",
       }),
     ]);
+    expect(extractWithAi).not.toHaveBeenCalled();
   });
 
   it.each([

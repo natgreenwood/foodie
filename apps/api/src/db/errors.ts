@@ -35,6 +35,41 @@ function describeOne(err: unknown): string {
   return `${prefix}${detail}`;
 }
 
+// What a log line may carry of an error that can be a failed query (SEC-2 on
+// NATG-248): its name and one code, never its message, stack or cause. Those
+// are where Drizzle and Postgres put the query, its parameters and the
+// failing row, which for an import is page text and model output. `code` is
+// the first Postgres SQLSTATE (five characters, e.g. 23514) or Node system
+// error code (e.g. ECONNREFUSED) down the cause chain; anything else is
+// dropped, as is a name that is not a plain identifier.
+export function errorForLog(err: unknown): {
+  errorName: string;
+  code: string | null;
+} {
+  // Drizzle's DrizzleQueryError leaves name as "Error"; its class says more.
+  const name =
+    err instanceof Error
+      ? err.name === "Error"
+        ? err.constructor.name
+        : err.name
+      : "";
+  let code: string | null = null;
+  const seen = new Set<unknown>();
+  for (
+    let current: unknown = err;
+    code === null && current instanceof Error && !seen.has(current);
+    current = current.cause
+  ) {
+    seen.add(current);
+    const own = (current as { code?: unknown }).code;
+    if (typeof own === "string" && LOGGABLE_CODE.test(own)) code = own;
+  }
+  return { errorName: ERROR_NAME.test(name) ? name : "Error", code };
+}
+
+const LOGGABLE_CODE = /^(?:[0-9A-Z]{5}|E[A-Z0-9_]{2,40})$/;
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+
 // host:port/database from a connection string, without user or password.
 export function describeTarget(databaseUrl: string): string {
   try {
