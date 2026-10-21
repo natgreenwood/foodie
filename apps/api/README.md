@@ -56,8 +56,8 @@ dbTest("does something with the database", async ({ tx }) => {
 });
 ```
 
-- Rows a test writes are not visible to any other test. Rows the migrations
-  wrote (seed data) are never removed.
+- Rows a test writes are not visible to any other test. Migration seed data
+  is restored when the test transaction rolls back.
 - A statement that fails aborts the whole transaction. To assert on an
   expected error and carry on, run it inside `tx.transaction(...)`, which
   Drizzle wraps in a savepoint:
@@ -73,9 +73,17 @@ dbTest("does something with the database", async ({ tx }) => {
   files that insert the same unique key can briefly wait on each other until
   one rolls back; they do not see each other's rows.
 
+The test database includes the ingredient catalogue seeded by
+`0015_seed_ingredient_catalogue.sql`. Tests that insert catalogue names must
+start from an empty catalogue using the auto `emptyCatalogue` fixture (see
+`src/routes/ingredients.test.ts` and `src/routes/recipes.test.ts`), or use names
+the seed cannot contain. The fixture deletes the catalogue inside the test
+transaction; rollback restores it afterward.
+
 ### In CI
 
 `.github/workflows/ci.yml` runs Postgres as a GitHub Actions service container
 with `postgres:18-alpine`, the image `docker-compose.yml` uses, and sets
 `TEST_DATABASE_URL` for the job. The database tests run as part of
-`pnpm test` on every pull request, and a failure fails the job.
+`pnpm test` on every pull request and every push to `main`, and a failure
+fails the job.

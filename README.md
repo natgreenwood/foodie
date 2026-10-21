@@ -116,7 +116,8 @@ with an empty value and the api refuses to start.
 
 ### Checks
 
-Run from the repository root; CI runs the same three on every pull request.
+Run from the repository root; CI runs the same three on every pull request
+and every push to `main`.
 
 ```sh
 pnpm lint        # ESLint + Prettier check (pnpm format to fix formatting)
