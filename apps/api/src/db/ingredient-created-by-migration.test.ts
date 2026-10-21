@@ -95,6 +95,8 @@ afterAll(async () => {
 describe(MIGRATION, () => {
   test("applies on top of existing catalogue rows, leaving them prebuilt", async () => {
     // 0013_ai_reasoning_level is already applied.
+    // The x-test locale and the id filters keep this row apart from the
+    // seeded catalogue (0015), which the migrate below also applies.
     const { rows: before } = await db.query(
       `select 1 from information_schema.columns
        where table_name = 'ai_model_selection' and column_name = 'reasoning_level'`,
@@ -106,20 +108,22 @@ describe(MIGRATION, () => {
     const id = rows[0]!.id;
     await db.query(
       `insert into ingredient_name (ingredient_id, name, locale, is_canonical, source)
-       values ($1, 'coriander', 'en-GB', true, 'seed')`,
+       values ($1, 'coriander', 'x-test', true, 'seed')`,
       [id],
     );
 
     await migrateScratch(migrationsFolder);
 
     const ingredients = await db.query(
-      `select category, source, created_by from ingredient`,
+      `select category, source, created_by from ingredient where id = $1`,
+      [id],
     );
     expect(ingredients.rows).toEqual([
       { category: "herbs", source: "seed", created_by: null },
     ]);
     const names = await db.query(
-      `select name, created_by from ingredient_name`,
+      `select name, created_by from ingredient_name where ingredient_id = $1`,
+      [id],
     );
     expect(names.rows).toEqual([{ name: "coriander", created_by: null }]);
     const { rows: fks } = await db.query(

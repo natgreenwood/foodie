@@ -22,7 +22,10 @@ import {
 
 // A small catalogue, inserted inside each test's transaction. "coriander"
 // is the leaf in en-GB and the seed in en-US, where the leaf is cilantro.
+// It replaces the seeded catalogue (0015), which the rollback restores, so
+// the tests see only these names.
 async function catalogue(tx: TestTransaction) {
+  await tx.delete(ingredient);
   const add = async (names: [string, string][]) => {
     const [row] = await tx
       .insert(ingredient)
