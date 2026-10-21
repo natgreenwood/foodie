@@ -1,5 +1,10 @@
-import { and, asc, eq, sql, type SQL } from "drizzle-orm";
-import type { Db, Profile } from "../auth/accounts.js";
+import { and, asc, count, eq, sql, type SQL } from "drizzle-orm";
+import {
+  lockActor,
+  type Actor,
+  type Db,
+  type Profile,
+} from "../auth/accounts.js";
 import {
   ingredient,
   ingredientName,
@@ -128,6 +133,9 @@ export interface IngredientPage<T> {
 }
 
 export const PAGE_SIZE = 25;
+// The most names one ingredient may have, given on create or added since.
+// Real ingredients have a handful.
+export const MAX_NAMES = 20;
 // A word_similarity a name must beat to be a search hit: pg_trgm's default.
 // `cor` scores 0.75 against `coriander` and `corriander` 0.82; one letter
 // scores 0.5 against everything that starts with it, so it finds nothing.
@@ -428,22 +436,34 @@ async function findTakenName(
   };
 }
 
-// Why a change to an ingredient was refused before anything was written.
-export type EditRefusal = { refused: "not_found" | "forbidden" };
+// Why a change to an ingredient was refused before anything was written:
+// the actor may no longer act at all (signed out, disabled), there is no
+// such ingredient, or the actor may not change it.
+export type EditRefusal = {
+  refused: "unauthenticated" | "not_found" | "forbidden";
+};
 
-// Runs `change` in a transaction if there is an ingredient `id` and `editor`
-// may change it, by canEditIngredient: the rule canEdit reports, reading
-// created_by only. The ingredient's row is locked first, so changes to one
-// ingredient run one at a time (two canonical swaps in a locale cannot
-// interleave), and a recipe line cannot start using an ingredient that is
-// being deleted: its foreign key check waits for the lock.
+// Runs `change` in a transaction if the actor may still act (lockActor),
+// there is an ingredient `id`, and the actor may change it by
+// canEditIngredient: the rule canEdit reports, reading created_by only, and
+// the actor's role as committed now, not as it was when the request
+// arrived (SEC-1). `change` gets that live profile as the editor.
+//
+// The actor's user row is locked first, then the ingredient's: the only
+// order in use, so this cannot deadlock with asAdmin. The ingredient lock
+// makes changes to one ingredient run one at a time (two canonical swaps in
+// a locale cannot interleave, two adds cannot both take the last free name),
+// and a recipe line cannot start using an ingredient that is being deleted:
+// its foreign key check waits for the lock.
 async function changeIngredient<T>(
   db: Db,
-  editor: Profile,
+  actor: Actor,
   id: number,
-  change: (tx: Db) => Promise<T>,
+  change: (tx: Db, editor: Profile) => Promise<T>,
 ): Promise<EditRefusal | T> {
   return db.transaction(async (tx) => {
+    const editor = await lockActor(tx, actor);
+    if (!editor) return { refused: "unauthenticated" } as const;
     const [row] = await tx
       .select({ createdBy: ingredient.createdBy })
       .from(ingredient)
@@ -453,7 +473,7 @@ async function changeIngredient<T>(
     if (!canEditIngredient(editor, row.createdBy)) {
       return { refused: "forbidden" } as const;
     }
-    return change(tx);
+    return change(tx, editor);
   });
 }
 
@@ -471,11 +491,11 @@ async function changed(
 
 export async function setIngredientCategory(
   db: Db,
-  editor: Profile,
+  actor: Actor,
   id: number,
   category: string | null,
 ): Promise<EditRefusal | { changed: IngredientDetail }> {
-  return changeIngredient(db, editor, id, async (tx) => {
+  return changeIngredient(db, actor, id, async (tx, editor) => {
     await tx.update(ingredient).set({ category }).where(eq(ingredient.id, id));
     return changed(tx, editor, id);
   });
@@ -485,16 +505,29 @@ export async function setIngredientCategory(
 // ingredient has no canonical name in its locale yet, as the first name in
 // a locale is on create. A name already in the catalogue in its locale is
 // not added, and the outcome names it, so a retry of an add that succeeded
-// finds this ingredient.
+// finds this ingredient, even once that add filled the ingredient. Nor is
+// a name added to an ingredient that has MAX_NAMES already (SEC-2): counted
+// under the ingredient lock, so simultaneous adds cannot pass it.
 export async function addIngredientName(
   db: Db,
-  editor: Profile,
+  actor: Actor,
   id: number,
   name: { name: string; locale: string },
 ): Promise<
-  EditRefusal | { changed: IngredientDetail } | { taken: TakenName | null }
+  | EditRefusal
+  | { changed: IngredientDetail }
+  | { taken: TakenName | null }
+  | { nameLimit: true }
 > {
-  return changeIngredient(db, editor, id, async (tx) => {
+  return changeIngredient(db, actor, id, async (tx, editor) => {
+    const [{ names } = { names: 0 }] = await tx
+      .select({ names: count() })
+      .from(ingredientName)
+      .where(eq(ingredientName.ingredientId, id));
+    if (names >= MAX_NAMES) {
+      const taken = await findTakenName(tx, editor, [name]);
+      return taken ? { taken } : ({ nameLimit: true } as const);
+    }
     const [canonical] = await tx
       .select({ id: ingredientName.id })
       .from(ingredientName)
@@ -546,7 +579,7 @@ function violates(err: unknown, constraint: string): boolean {
 // of this ingredient's, too) changes nothing, and the outcome names it.
 export async function changeIngredientName(
   db: Db,
-  editor: Profile,
+  actor: Actor,
   id: number,
   nameId: number,
   change: NameChange,
@@ -556,7 +589,7 @@ export async function changeIngredientName(
   | { taken: TakenName | null }
   | { nameNotFound: true }
 > {
-  return changeIngredient(db, editor, id, async (tx) => {
+  return changeIngredient(db, actor, id, async (tx, editor) => {
     const [row] = await tx
       .select({
         locale: ingredientName.locale,
@@ -615,13 +648,13 @@ export async function changeIngredientName(
 // lists them.
 export async function deleteIngredientName(
   db: Db,
-  editor: Profile,
+  actor: Actor,
   id: number,
   nameId: number,
 ): Promise<
   EditRefusal | { deleted: true } | { lastName: true } | { nameNotFound: true }
 > {
-  return changeIngredient(db, editor, id, async (tx) => {
+  return changeIngredient(db, actor, id, async (tx) => {
     const names = await tx
       .select({
         id: ingredientName.id,
@@ -653,10 +686,10 @@ export async function deleteIngredientName(
 // error says nothing a client can act on.
 export async function deleteIngredient(
   db: Db,
-  editor: Profile,
+  actor: Actor,
   id: number,
 ): Promise<EditRefusal | { deleted: true } | { inUse: true }> {
-  return changeIngredient(db, editor, id, async (tx) => {
+  return changeIngredient(db, actor, id, async (tx) => {
     const [used] = await tx
       .select({ id: recipeIngredient.id })
       .from(recipeIngredient)

@@ -12,6 +12,7 @@ import {
   deleteIngredientName,
   findIngredient,
   listIngredients,
+  MAX_NAMES,
   PAGE_SIZE,
   searchIngredients,
   setIngredientCategory,
@@ -21,13 +22,12 @@ import {
   type NewIngredient,
   type TakenName,
 } from "../db/ingredients.js";
-import { isRecord, type AuthDeps } from "./auth.js";
+import { isRecord, requestActor, type AuthDeps } from "./auth.js";
 import { apiErrorHandler, sendError } from "./errors.js";
 
-// Real ingredients have a handful of names. In code points, like the recipe
-// tag cap: at most 400 UTF-8 bytes, far under the ~2.7 kB btree entry limit
-// on ingredient_name's (locale, normalised_name) key.
-export const MAX_NAMES = 20;
+// In code points, like the recipe tag cap: at most 400 UTF-8 bytes, far
+// under the ~2.7 kB btree entry limit on ingredient_name's (locale,
+// normalised_name) key.
 export const MAX_NAME_CHARS = 100;
 export const MAX_CATEGORY_CHARS = 100;
 
@@ -47,15 +47,21 @@ function nameNotFound(reply: FastifyReply) {
   return sendError(reply, 404, "not_found", "name not found");
 }
 
+// The same answers requireUser and a get would give now.
 function refused(reply: FastifyReply, { refused }: EditRefusal) {
-  return refused === "not_found"
-    ? notFound(reply)
-    : sendError(
+  switch (refused) {
+    case "unauthenticated":
+      return sendError(reply, 401, "unauthenticated", "sign in required");
+    case "not_found":
+      return notFound(reply);
+    case "forbidden":
+      return sendError(
         reply,
         403,
         "forbidden",
         "only the ingredient's creator or an admin can change it",
       );
+  }
 }
 
 // 409 for a name already in the catalogue in its locale, with the ingredient
@@ -337,7 +343,12 @@ export const ingredientRoutes: FastifyPluginCallback<AuthDeps> = (
       if ("invalid" in parsed) {
         return sendError(reply, 400, "invalid_request", parsed.invalid);
       }
-      const outcome = await setIngredientCategory(db, user, id, parsed.ok);
+      const outcome = await setIngredientCategory(
+        db,
+        requestActor(request),
+        id,
+        parsed.ok,
+      );
       if ("refused" in outcome) return refused(reply, outcome);
       request.log.info(
         { userId: user.id, ingredientId: id },
@@ -355,7 +366,7 @@ export const ingredientRoutes: FastifyPluginCallback<AuthDeps> = (
       const user = request.user!;
       const id = parseIngredientId(request.params.id);
       if (id === null) return notFound(reply);
-      const outcome = await deleteIngredient(db, user, id);
+      const outcome = await deleteIngredient(db, requestActor(request), id);
       if ("refused" in outcome) return refused(reply, outcome);
       if ("inUse" in outcome) {
         return sendError(
@@ -374,7 +385,8 @@ export const ingredientRoutes: FastifyPluginCallback<AuthDeps> = (
   );
 
   // { name, locale? }: a name, by the create rules. 201 with the ingredient.
-  // A retry of an add that succeeded gets 409 naming this ingredient.
+  // A retry of an add that succeeded gets 409 naming this ingredient. 409
+  // name_limit when the ingredient has MAX_NAMES already.
   app.post<{ Params: { id: string }; Body: unknown }>(
     "/ingredients/:id/names",
     async (request, reply) => {
@@ -385,10 +397,23 @@ export const ingredientRoutes: FastifyPluginCallback<AuthDeps> = (
       if ("invalid" in parsed) {
         return sendError(reply, 400, "invalid_request", parsed.invalid);
       }
-      const outcome = await addIngredientName(db, user, id, parsed.ok);
+      const outcome = await addIngredientName(
+        db,
+        requestActor(request),
+        id,
+        parsed.ok,
+      );
       if ("refused" in outcome) return refused(reply, outcome);
       if ("taken" in outcome) {
         return nameTaken(request, reply, outcome.taken, "ingredient add name");
+      }
+      if ("nameLimit" in outcome) {
+        return sendError(
+          reply,
+          409,
+          "name_limit",
+          `an ingredient can have at most ${MAX_NAMES} names: delete one first`,
+        );
       }
       request.log.info(
         { userId: user.id, ingredientId: id },
@@ -414,7 +439,7 @@ export const ingredientRoutes: FastifyPluginCallback<AuthDeps> = (
       }
       const outcome = await changeIngredientName(
         db,
-        user,
+        requestActor(request),
         id,
         nameId,
         parsed.ok,
@@ -448,7 +473,12 @@ export const ingredientRoutes: FastifyPluginCallback<AuthDeps> = (
       if (id === null) return notFound(reply);
       const nameId = parseIngredientId(request.params.nameId);
       if (nameId === null) return nameNotFound(reply);
-      const outcome = await deleteIngredientName(db, user, id, nameId);
+      const outcome = await deleteIngredientName(
+        db,
+        requestActor(request),
+        id,
+        nameId,
+      );
       if ("refused" in outcome) return refused(reply, outcome);
       if ("nameNotFound" in outcome) return nameNotFound(reply);
       if ("lastName" in outcome) {

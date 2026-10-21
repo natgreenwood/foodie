@@ -19,6 +19,7 @@ export type ApiErrorCode =
   | "name_taken"
   | "last_name"
   | "in_use"
+  | "name_limit"
   | "invalid_lines"
   | "invalid_steps"
   | "unresolved_lines"

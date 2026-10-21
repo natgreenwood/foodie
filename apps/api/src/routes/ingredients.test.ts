@@ -3,7 +3,7 @@ import type { LightMyRequestResponse as Response } from "fastify";
 import { describe, expect, onTestFinished, test } from "vitest";
 import { buildApp } from "../app.js";
 import { createSession } from "../auth/accounts.js";
-import { PAGE_SIZE } from "../db/ingredients.js";
+import { MAX_NAMES, PAGE_SIZE } from "../db/ingredients.js";
 import {
   ingredient,
   ingredientName,
@@ -1231,6 +1231,58 @@ describe("POST /ingredients/:id/names", () => {
         { name: "coriander leaf", createdBy: admin.id, source: "user" },
         { name: "cilantro", createdBy: admin.id, source: "user" },
       ]);
+    },
+  );
+
+  dbTest(
+    "adds the 20th name and refuses the 21st with 409, writing nothing",
+    async ({ tx }) => {
+      const { request } = start(tx);
+      const me = await signedInUser(tx);
+      const id = await newIngredient(
+        tx,
+        Array.from({ length: MAX_NAMES - 1 }, (_, i) => ({
+          name: `chilli ${i}`,
+          locale: "en-GB",
+        })),
+        { createdBy: me.id },
+      );
+
+      const twentieth = await request(
+        "POST",
+        `/ingredients/${id}/names`,
+        me.token,
+        { name: "chilli 19" },
+      );
+      const before = await stored(tx, id);
+      const twentyFirst = await request(
+        "POST",
+        `/ingredients/${id}/names`,
+        me.token,
+        { name: "chilli 20", locale: "en-US" },
+      );
+      const retry = await request(
+        "POST",
+        `/ingredients/${id}/names`,
+        me.token,
+        { name: "chilli 19" },
+      );
+
+      expect(MAX_NAMES).toBe(20);
+      expect(twentieth.statusCode).toBe(201);
+      expect(twentieth.json<DetailBody>().names).toHaveLength(20);
+      expect(twentyFirst.statusCode).toBe(409);
+      expect(twentyFirst.json()).toEqual({
+        error: "name_limit",
+        message: "an ingredient can have at most 20 names: delete one first",
+      });
+      // A retry of the add that filled it still names the ingredient.
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json()).toMatchObject({
+        error: "name_taken",
+        ingredient: { id },
+      });
+      expect(await stored(tx, id)).toEqual(before);
     },
   );
 
